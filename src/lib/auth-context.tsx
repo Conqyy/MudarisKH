@@ -105,6 +105,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const profileDoc = await getDoc(doc(db, "users", firebaseUser.uid));
           if (profileDoc.exists()) {
             setProfile(profileDoc.data() as UserProfile);
+          } else {
+            // Self-heal: the profile doc is missing (e.g. signup happened while
+            // Firestore rules still denied writes). Recreate it from the auth
+            // account so the name shows up instead of falling back to "Student".
+            const healed: UserProfile = {
+              uid: firebaseUser.uid,
+              email: firebaseUser.email || "",
+              fullName: firebaseUser.displayName || "Student",
+              photoURL: firebaseUser.photoURL || undefined,
+              createdAt: Date.now(),
+            };
+            try {
+              await setDoc(doc(db, "users", firebaseUser.uid), healed, {
+                merge: true,
+              });
+            } catch {
+              /* if rules still block it, we at least keep the name in memory */
+            }
+            setProfile(healed);
           }
         } catch (error) {
           console.error("Error fetching profile:", error);
