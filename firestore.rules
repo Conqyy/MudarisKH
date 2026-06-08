@@ -1,0 +1,26 @@
+rules_version = '2';
+
+// Mudaris Firestore security rules.
+// The BACKEND uses the Firebase Admin SDK, which bypasses these rules entirely.
+// These rules only govern the FRONTEND client SDK, which a signed-in student
+// uses to manage their own profile and their own course documents.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // A user can read/write only their own profile document.
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // Every other app collection stores a `userId` field naming the owner.
+    // A signed-in user may only touch documents they own.
+    match /{collection}/{docId} {
+      allow read:          if request.auth != null
+                           && resource.data.userId == request.auth.uid;
+      allow create:        if request.auth != null
+                           && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if request.auth != null
+                           && resource.data.userId == request.auth.uid;
+    }
+  }
+}

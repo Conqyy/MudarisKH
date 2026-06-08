@@ -188,7 +188,7 @@ export default function SignUpPage() {
                     type="text"
                     value={fullName}
                     onChange={(e) => setFullName(e.target.value)}
-                    placeholder="Sultan Al-Zahrani"
+                    placeholder="KHalid Alluhaydan"
                     className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition"
                     required
                   />

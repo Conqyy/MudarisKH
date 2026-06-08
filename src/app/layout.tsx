@@ -14,10 +14,10 @@ export default function RootLayout({
 }: {
   children: React.ReactNode;
 }) {
-  // Arabic / RTL is the default; the client switches to en/ltr if the user
-  // previously chose English (LanguageProvider updates <html> on mount).
+  // English / LTR is the default; the client switches to ar/rtl if the user
+  // previously chose Arabic (LanguageProvider updates <html> on mount).
   return (
-    <html lang="ar" dir="rtl" suppressHydrationWarning>
+    <html lang="en" dir="ltr" suppressHydrationWarning>
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link

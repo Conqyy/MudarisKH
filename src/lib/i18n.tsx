@@ -32,9 +32,9 @@ const Ctx = createContext<LangCtx>({
 const STORAGE_KEY = "mudaris_lang";
 
 export function LanguageProvider({ children }: { children: ReactNode }) {
-  // Arabic is the default. The <html> tag is pre-rendered as ar/rtl in the
+  // English is the default. The <html> tag is pre-rendered as en/ltr in the
   // root layout, so the first paint is already correct for the common case.
-  const [lang, setLangState] = useState<Lang>("ar");
+  const [lang, setLangState] = useState<Lang>("en");
 
   // Hydrate the saved choice (if any) on mount.
   useEffect(() => {
