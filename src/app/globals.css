@@ -1,0 +1,177 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #f7f3ec;
+  --foreground: #1a1814;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #f7f3ec;
+    --foreground: #1a1814;
+  }
+}
+
+html,
+body {
+  background: #f7f3ec !important;
+  color: #1a1814 !important;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* Grain texture — exact match to prototype (subtle and easy on the eyes) */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.4;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9'/%3E%3CfeColorMatrix values='0 0 0 0 0.1 0 0 0 0 0.1 0 0 0 0 0.08 0 0 0 0.08 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+body > * {
+  position: relative;
+  z-index: 2;
+}
+
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ============ ARABIC / RTL ============ */
+/* Use IBM Plex Sans Arabic for Arabic glyphs (it also covers Latin), and apply
+   it to headings too since the serif display font has no Arabic glyphs. */
+[lang="ar"] body,
+[lang="ar"] button,
+[lang="ar"] input,
+[lang="ar"] textarea,
+[lang="ar"] select {
+  font-family: "IBM Plex Sans Arabic", "IBM Plex Sans", system-ui, sans-serif;
+}
+[lang="ar"] .font-serif {
+  font-family: "IBM Plex Sans Arabic", "Fraunces", serif;
+  font-weight: 600;
+}
+[lang="ar"] .font-mono {
+  font-family: "IBM Plex Sans Arabic", "IBM Plex Mono", monospace;
+}
+/* Numbers/latin URLs inside Arabic stay LTR for readability. */
+[dir="rtl"] .force-ltr {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
+/* Flashcard 3D flip */
+.flashcard-scene {
+  perspective: 1500px;
+}
+
+.flashcard {
+  transform-style: preserve-3d;
+  transition: transform 0.7s;
+}
+
+.flashcard.flipped {
+  transform: rotateY(180deg);
+}
+
+.flashcard-face {
+  backface-visibility: hidden;
+}
+
+.flashcard-back {
+  transform: rotateY(180deg);
+}
+
+/* ============ HERO DECORATIVE FLOATING CARDS ============ */
+/* Exact match to prototype animation */
+@keyframes float-card {
+  0%, 100% {
+    transform: rotate(var(--rotate, 0deg)) translateY(0);
+  }
+  50% {
+    transform: rotate(var(--rotate, 0deg)) translateY(-10px);
+  }
+}
+
+.deco-card {
+  position: absolute;
+  background: #fffbf3;
+  border: 1px solid #d8d0c0;
+  border-radius: 16px;
+  padding: 20px;
+  box-shadow: 0 1px 3px rgba(26, 24, 20, 0.04),
+    0 8px 24px rgba(26, 24, 20, 0.06);
+  /* Base tilt so cards are angled from the very first frame (before the
+     animation-delay elapses). `backwards` fill-mode then keeps the 0%
+     keyframe (which includes the same rotation) applied during the delay,
+     so there's no upright-then-tilt flash on load. */
+  transform: rotate(var(--rotate, 0deg));
+  animation: float-card 6s ease-in-out infinite backwards;
+}
+
+.deco-card-1 {
+  top: 0;
+  right: 50px;
+  width: 240px;
+  --rotate: 6deg;
+  animation-delay: 0s;
+}
+
+.deco-card-2 {
+  top: 180px;
+  right: 0;
+  width: 220px;
+  --rotate: -4deg;
+  animation-delay: 1s;
+}
+
+.deco-card-3 {
+  top: 340px;
+  right: 80px;
+  width: 200px;
+  --rotate: 8deg;
+  animation-delay: 2s;
+}
+
+/* In RTL the hero is right-aligned, so mirror the floating cards to the left. */
+[dir="rtl"] .deco-card-1 { right: auto; left: 50px; }
+[dir="rtl"] .deco-card-2 { right: auto; left: 0; }
+[dir="rtl"] .deco-card-3 { right: auto; left: 80px; }
+
+/* Document viewer slide-in */
+@keyframes slide-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+.animate-slide-in-right {
+  animation: slide-in-right 0.3s ease-out;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #efe9dd;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #d8d0c0;
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #8a847a;
+}

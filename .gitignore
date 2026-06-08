@@ -1,0 +1,75 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# local env files
+# NOTE: .env.local is intentionally tracked (private repo, owner's choice)
+.env*.local
+!.env.local
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# ── Python Backend ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+*.egg
+
+# Python virtual environments
+backend/.venv/
+backend/venv/
+backend/env/
+
+# Backend secrets
+backend/src/config/firebase-key.json
+# Firebase service-account key — never commit, wherever it lives.
+firebase-key.json
+**/firebase-key.json
+*serviceAccount*.json
+*-firebase-adminsdk-*.json
+# backend/.env holds real API keys (OpenRouter, Groq) — keep it OUT of git.
+backend/.env
+
+# Backend artifacts
+backend/data/
+!backend/data/**/.gitkeep
+backend/uploads/
+mudaris_local_db.json
+*.tex
+*.aux
+*.log
+*.pdf
+
+# IDE
+.vscode/
+.idea/
