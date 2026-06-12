@@ -2151,8 +2151,18 @@ def _latex_escape(s, keep_unknown_unicode: bool = False) -> str:
     return "".join(out)
 
 
+def _md_inline_to_latex(s: str) -> str:
+    """Convert the AI's inline markdown into LaTeX. Runs AFTER _latex_escape
+    (which leaves * and ` untouched), so the content inside is already safe:
+    **bold** -> \\textbf, *italic* -> \\textit, `code` -> \\texttt."""
+    s = re.sub(r"\*\*(.+?)\*\*", r"\\textbf{\1}", s)
+    s = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\\textit{\1}", s)
+    s = re.sub(r"`([^`\n]+)`", r"\\texttt{\1}", s)
+    return s
+
+
 def _summary_to_latex(summary: dict) -> str:
-    esc = _latex_escape
+    esc = lambda x: _md_inline_to_latex(_latex_escape(x))
     parts = [
         r"\documentclass[11pt,a4paper]{article}",
         r"\usepackage[a4paper,margin=2.2cm]{geometry}",

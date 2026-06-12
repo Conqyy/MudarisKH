@@ -3,11 +3,35 @@
 import { useEffect, useState, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import Navbar from "@/components/Navbar";
 import Sidebar from "@/components/Sidebar";
 import { useAuth } from "@/lib/auth-context";
 import { getCourse, getUserCourses, Course } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
+
+// Inline-markdown renderer: the AI writes **bold** / *italic* / `code` inside
+// summary text — render it instead of showing raw asterisks. Paragraphs unwrap
+// to fragments so it also works inside list items and styled containers.
+const Md = ({ children }: { children: string }) => (
+  <ReactMarkdown
+    remarkPlugins={[remarkGfm]}
+    components={{
+      p: ({ children }) => <>{children}</>,
+      strong: ({ children }) => (
+        <strong className="font-semibold text-ink">{children}</strong>
+      ),
+      code: ({ children }) => (
+        <code className="font-mono text-[0.9em] bg-bg-alt px-1.5 py-0.5 rounded">
+          {children}
+        </code>
+      ),
+    }}
+  >
+    {children}
+  </ReactMarkdown>
+);
 
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
@@ -303,22 +327,30 @@ export default function SummaryPage() {
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;");
 
+    // Escape HTML, then render the AI's inline markdown (**bold**, *italic*,
+    // `code`) so the print view doesn't show raw asterisks.
+    const md = (str: string) =>
+      esc(str)
+        .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+        .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>")
+        .replace(/`([^`\n]+)`/g, "<code>$1</code>");
+
     const sections = s.sections
       .map(
         (sec, i) => `
       <section class="sec">
-        <h2>${i + 1}. ${esc(sec.heading)}${
+        <h2>${i + 1}. ${md(sec.heading)}${
           sec.examLikelihood
             ? ` <span class="badge ${sec.examLikelihood}">${esc(
                 sec.examLikelihood
               )} exam${sec.examWeight ? ` · ~${sec.examWeight}%` : ""}</span>`
             : ""
         }</h2>
-        ${sec.content ? `<p>${esc(sec.content)}</p>` : ""}
+        ${sec.content ? `<p>${md(sec.content)}</p>` : ""}
         ${
           (sec.keyPoints?.length ?? 0) > 0
             ? `<ul>${sec
-                .keyPoints!.map((p) => `<li>${esc(p)}</li>`)
+                .keyPoints!.map((p) => `<li>${md(p)}</li>`)
                 .join("")}</ul>`
             : ""
         }
@@ -329,7 +361,7 @@ export default function SummaryPage() {
     const examFocus =
       (s.examFocus?.length ?? 0) > 0
         ? `<div class="focus"><h3>🎯 Focus for the exam</h3><ul>${s
-            .examFocus!.map((f) => `<li>${esc(f)}</li>`)
+            .examFocus!.map((f) => `<li>${md(f)}</li>`)
             .join("")}</ul></div>`
         : "";
 
@@ -338,7 +370,7 @@ export default function SummaryPage() {
         ? `<div class="terms"><h3>Key Terms</h3>${s
             .keyTerms!.map(
               (t) =>
-                `<p><strong>${esc(t.term)}</strong> — ${esc(t.definition)}</p>`
+                `<p><strong>${md(t.term)}</strong> — ${md(t.definition)}</p>`
             )
             .join("")}</div>`
         : "";
@@ -855,9 +887,9 @@ export default function SummaryPage() {
         )}
 
         {summary.overview && (
-          <p className="text-ink-soft text-lg leading-relaxed bg-paper border border-line rounded-2xl p-7 mb-7">
-            {summary.overview}
-          </p>
+          <div className="text-ink-soft text-lg leading-relaxed bg-paper border border-line rounded-2xl p-7 mb-7">
+            <Md>{summary.overview}</Md>
+          </div>
         )}
 
         {(summary.examFocus?.length ?? 0) > 0 && (
@@ -869,7 +901,7 @@ export default function SummaryPage() {
               {summary.examFocus!.map((f, i) => (
                 <li key={i} className="text-base text-ink flex items-start gap-3 leading-relaxed">
                   <span className="text-accent flex-shrink-0">●</span>
-                  <span>{f}</span>
+                  <span><Md>{f}</Md></span>
                 </li>
               ))}
             </ul>
@@ -904,14 +936,16 @@ export default function SummaryPage() {
                 )}
               </div>
               {sec.content && (
-                <p className="text-base text-ink-soft leading-relaxed mb-4">{sec.content}</p>
+                <div className="text-base text-ink-soft leading-relaxed mb-4">
+                  <Md>{sec.content}</Md>
+                </div>
               )}
               {(sec.keyPoints?.length ?? 0) > 0 && (
                 <ul className="space-y-2.5 bg-bg rounded-xl border border-line p-5">
                   {sec.keyPoints!.map((p, j) => (
                     <li key={j} className="text-base text-ink-soft flex items-start gap-3 leading-relaxed">
                       <span className="text-sage flex-shrink-0">–</span>
-                      <span>{p}</span>
+                      <span><Md>{p}</Md></span>
                     </li>
                   ))}
                 </ul>
@@ -926,8 +960,10 @@ export default function SummaryPage() {
             <div className="bg-paper border border-line rounded-2xl overflow-hidden">
               {summary.keyTerms!.map((t, i) => (
                 <div key={i} className={`px-6 py-5 ${i !== 0 ? "border-t border-line" : ""}`}>
-                  <div className="font-medium text-base text-accent">{t.term}</div>
-                  <div className="text-base text-ink-soft mt-1.5 leading-relaxed">{t.definition}</div>
+                  <div className="font-medium text-base text-accent"><Md>{t.term}</Md></div>
+                  <div className="text-base text-ink-soft mt-1.5 leading-relaxed">
+                    <Md>{t.definition}</Md>
+                  </div>
                 </div>
               ))}
             </div>
