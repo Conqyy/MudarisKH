@@ -828,9 +828,9 @@ export default function SummaryPage() {
   const renderView = () => {
     if (!summary) return null;
     return (
-      <div className="max-w-3xl">
-        <div className="flex items-center justify-between mb-3 gap-3">
-          <h2 className="font-serif text-2xl font-medium tracking-tight">{summary.title}</h2>
+      <div className="max-w-4xl mx-auto">
+        <div className="flex items-center justify-between mb-4 gap-3">
+          <h2 className="font-serif text-3xl font-medium tracking-tight">{summary.title}</h2>
           <div className="flex items-center gap-3 flex-shrink-0">
             <button
               onClick={handleDownloadPdf}
@@ -855,19 +855,19 @@ export default function SummaryPage() {
         )}
 
         {summary.overview && (
-          <p className="text-ink-soft leading-relaxed bg-paper border border-line rounded-2xl p-6 mb-6">
+          <p className="text-ink-soft text-lg leading-relaxed bg-paper border border-line rounded-2xl p-7 mb-7">
             {summary.overview}
           </p>
         )}
 
         {(summary.examFocus?.length ?? 0) > 0 && (
-          <div className="bg-accent/5 border border-accent/30 rounded-2xl p-6 mb-8">
-            <div className="font-mono text-xs text-accent uppercase tracking-widest mb-3">
+          <div className="bg-accent/5 border border-accent/30 rounded-2xl p-7 mb-9">
+            <div className="font-mono text-xs text-accent uppercase tracking-widest mb-4">
               🎯 Focus for the exam
             </div>
-            <ul className="space-y-1.5">
+            <ul className="space-y-2.5">
               {summary.examFocus!.map((f, i) => (
-                <li key={i} className="text-sm text-ink flex items-start gap-2">
+                <li key={i} className="text-base text-ink flex items-start gap-3 leading-relaxed">
                   <span className="text-accent flex-shrink-0">●</span>
                   <span>{f}</span>
                 </li>
@@ -876,19 +876,19 @@ export default function SummaryPage() {
           </div>
         )}
 
-        <div className="space-y-6">
+        <div className="space-y-7">
           {summary.sections.map((sec, i) => (
-            <section key={i} className="bg-paper border border-line rounded-2xl p-6">
-              <div className="flex items-start justify-between gap-3 mb-2">
-                <h3 className="font-serif text-xl font-medium tracking-tight flex items-center gap-3">
-                  <span className="w-7 h-7 rounded-full bg-sage/10 text-sage text-xs flex items-center justify-center font-mono flex-shrink-0">
+            <section key={i} className="bg-paper border border-line rounded-2xl p-7 md:p-8">
+              <div className="flex items-start justify-between gap-3 mb-4">
+                <h3 className="font-serif text-2xl font-medium tracking-tight flex items-center gap-3">
+                  <span className="w-9 h-9 rounded-full bg-sage/10 text-sage text-sm flex items-center justify-center font-mono flex-shrink-0">
                     {i + 1}
                   </span>
                   {sec.heading}
                 </h3>
                 {sec.examLikelihood && (
                   <span
-                    className={`text-[10px] font-mono uppercase px-2.5 py-1 rounded-full flex-shrink-0 ${
+                    className={`text-[11px] font-mono uppercase px-3 py-1.5 rounded-full flex-shrink-0 ${
                       sec.examLikelihood === "high"
                         ? "bg-accent/10 text-accent"
                         : sec.examLikelihood === "medium"
@@ -904,12 +904,12 @@ export default function SummaryPage() {
                 )}
               </div>
               {sec.content && (
-                <p className="text-sm text-ink-soft leading-relaxed mb-3">{sec.content}</p>
+                <p className="text-base text-ink-soft leading-relaxed mb-4">{sec.content}</p>
               )}
               {(sec.keyPoints?.length ?? 0) > 0 && (
-                <ul className="space-y-1.5">
+                <ul className="space-y-2.5 bg-bg rounded-xl border border-line p-5">
                   {sec.keyPoints!.map((p, j) => (
-                    <li key={j} className="text-sm text-ink-soft flex items-start gap-2">
+                    <li key={j} className="text-base text-ink-soft flex items-start gap-3 leading-relaxed">
                       <span className="text-sage flex-shrink-0">–</span>
                       <span>{p}</span>
                     </li>
@@ -921,13 +921,13 @@ export default function SummaryPage() {
         </div>
 
         {(summary.keyTerms?.length ?? 0) > 0 && (
-          <section className="mt-8">
-            <h3 className="font-serif text-xl font-medium tracking-tight mb-4">Key Terms</h3>
+          <section className="mt-10">
+            <h3 className="font-serif text-2xl font-medium tracking-tight mb-5">Key Terms</h3>
             <div className="bg-paper border border-line rounded-2xl overflow-hidden">
               {summary.keyTerms!.map((t, i) => (
-                <div key={i} className={`px-5 py-4 ${i !== 0 ? "border-t border-line" : ""}`}>
-                  <div className="font-medium text-sm text-accent">{t.term}</div>
-                  <div className="text-sm text-ink-soft mt-1">{t.definition}</div>
+                <div key={i} className={`px-6 py-5 ${i !== 0 ? "border-t border-line" : ""}`}>
+                  <div className="font-medium text-base text-accent">{t.term}</div>
+                  <div className="text-base text-ink-soft mt-1.5 leading-relaxed">{t.definition}</div>
                 </div>
               ))}
             </div>
