@@ -22,41 +22,54 @@ _MIKTEX_CANDIDATES = [
 ]
 
 
-def _find_pdflatex() -> str | None:
-    """Return the full path to pdflatex, or None if not found."""
+def _find_engine(engine: str = "pdflatex") -> str | None:
+    """Return the full path to a LaTeX engine (pdflatex/xelatex/lualatex), or None."""
     # 1. Check PATH first
-    found = shutil.which("pdflatex")
+    found = shutil.which(engine)
     if found:
         return found
 
     # 2. Probe common MiKTeX install locations (Windows)
     for candidate in _MIKTEX_CANDIDATES:
-        exe = candidate / "pdflatex.exe"
+        exe = candidate / f"{engine}.exe"
         if exe.exists():
             return str(exe)
 
     return None
 
 
-def compile_tex_to_pdf(tex_path: str, output_dir: str | None = None, clean_aux: bool = True) -> str | None:
+def _find_pdflatex() -> str | None:
+    """Back-compat shim."""
+    return _find_engine("pdflatex")
+
+
+def compile_tex_to_pdf(
+    tex_path: str,
+    output_dir: str | None = None,
+    clean_aux: bool = True,
+    engine: str = "pdflatex",
+) -> str | None:
     """
-    Compile a .tex file to .pdf using pdflatex.
+    Compile a .tex file to .pdf.
 
     Args:
         tex_path:   Path to the .tex file.
         output_dir: Directory for the output PDF (defaults to same dir as .tex).
         clean_aux:  Remove auxiliary files (.aux, .log, .out, .toc) after compilation.
+        engine:     LaTeX engine to use ("pdflatex" default, or "xelatex" for
+                    Unicode/RTL content such as Arabic).
 
     Returns:
         Path to the generated .pdf, or None if compilation failed.
     """
-    pdflatex = _find_pdflatex()
-    if not pdflatex:
+    latex_exe = _find_engine(engine)
+    if not latex_exe:
         logger.error(
-            "❌ pdflatex not found! Install MiKTeX: https://miktex.org/download\n"
+            f"❌ {engine} not found! Install MiKTeX: https://miktex.org/download\n"
             "   Or run:  winget install MiKTeX.MiKTeX"
         )
         return None
+    pdflatex = latex_exe
 
     tex_file = Path(tex_path).resolve()
     if not tex_file.exists():

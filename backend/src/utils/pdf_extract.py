@@ -87,6 +87,29 @@ def is_meaningful_text(text: str) -> bool:
     return bool(text) and len(text.strip()) >= _MIN_MEANINGFUL
 
 
+def image_to_image_uri(file_bytes: bytes) -> str:
+    """Normalize an uploaded photo/image into a PNG data-URI a vision model can
+    read. Applies EXIF orientation (so sideways phone photos are upright),
+    converts to RGB, and downscales very large photos to keep the payload sane.
+    Falls back to the raw bytes as JPEG if Pillow can't decode it."""
+    import base64
+    try:
+        from PIL import Image, ImageOps
+        img = Image.open(io.BytesIO(file_bytes))
+        img = ImageOps.exif_transpose(img)
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+        max_dim = 2200
+        if max(img.size) > max_dim:
+            img.thumbnail((max_dim, max_dim))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    except Exception as e:
+        logger.warning(f"Image normalize failed ({e}); passing raw bytes as JPEG.")
+        return "data:image/jpeg;base64," + base64.b64encode(file_bytes).decode()
+
+
 def pdf_to_image_uris(file_bytes: bytes, max_pages: int = 8, zoom: float = 2.0) -> list:
     """Render PDF pages to PNG data-URIs so a vision model can SEE the page —
     including equations, diagrams, figures, and code that plain text extraction

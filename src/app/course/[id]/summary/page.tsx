@@ -494,6 +494,24 @@ export default function SummaryPage() {
                 </div>
               </label>
             ))}
+            <div className="px-5 py-3 bg-bg-alt border-t border-line flex items-center justify-between">
+              <span className="text-xs text-ink-mute font-mono">
+                {selectedDocs.size} of {documents.length} selected
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedDocs.size === documents.length) {
+                    setSelectedDocs(new Set());
+                  } else {
+                    setSelectedDocs(new Set(documents.map((d) => d.id)));
+                  }
+                }}
+                className="text-xs text-accent hover:underline"
+              >
+                {selectedDocs.size === documents.length ? "Deselect all" : "Select all"}
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -528,6 +546,24 @@ export default function SummaryPage() {
                 </div>
               </label>
             ))}
+            <div className="px-5 py-3 bg-bg-alt border-t border-line flex items-center justify-between">
+              <span className="text-xs text-ink-mute font-mono">
+                {selectedHist.size} of {histExams.length} selected
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedHist.size === histExams.length) {
+                    setSelectedHist(new Set());
+                  } else {
+                    setSelectedHist(new Set(histExams.map((h) => h.id)));
+                  }
+                }}
+                className="text-xs text-accent hover:underline"
+              >
+                {selectedHist.size === histExams.length ? "Deselect all" : "Select all"}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -572,6 +608,24 @@ export default function SummaryPage() {
                 </div>
               </label>
             ))}
+            <div className="px-5 py-3 bg-bg-alt border-t border-line flex items-center justify-between">
+              <span className="text-xs text-ink-mute font-mono">
+                {selectedTut.size} of {tutorials.length} selected
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedTut.size === tutorials.length) {
+                    setSelectedTut(new Set());
+                  } else {
+                    setSelectedTut(new Set(tutorials.map((t) => t.id)));
+                  }
+                }}
+                className="text-xs text-accent hover:underline"
+              >
+                {selectedTut.size === tutorials.length ? "Deselect all" : "Select all"}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -616,6 +670,24 @@ export default function SummaryPage() {
                 </div>
               </label>
             ))}
+            <div className="px-5 py-3 bg-bg-alt border-t border-line flex items-center justify-between">
+              <span className="text-xs text-ink-mute font-mono">
+                {selectedAudio.size} of {audioRecs.length} selected
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (selectedAudio.size === audioRecs.length) {
+                    setSelectedAudio(new Set());
+                  } else {
+                    setSelectedAudio(new Set(audioRecs.map((a) => a.id)));
+                  }
+                }}
+                className="text-xs text-accent hover:underline"
+              >
+                {selectedAudio.size === audioRecs.length ? "Deselect all" : "Select all"}
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -887,7 +959,7 @@ export default function SummaryPage() {
       <Navbar />
       <div className="pt-20 flex">
         <Sidebar courses={allCourses} />
-        <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-6xl">
+        <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-7xl mx-auto w-full">
           <div className="my-8 flex items-center gap-2 text-xs font-mono">
             <Link href="/dashboard" className="text-ink-soft hover:text-accent transition">
               Dashboard

@@ -175,7 +175,7 @@ export default function ExamAnswerPage() {
       <Navbar />
       <div className="pt-20 flex">
         <Sidebar courses={allCourses} />
-        <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-7xl">
+        <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-7xl mx-auto w-full">
           {/* Breadcrumb */}
           <div className="my-8 flex items-center gap-2 text-xs font-mono">
             <Link

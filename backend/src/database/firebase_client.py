@@ -222,6 +222,9 @@ class FirebaseClient:
     def update_audio_recording(self, rec_id: str, data: dict):
         self._flat_update("audio_recordings", rec_id, data)
 
+    def get_audio_recording(self, rec_id: str) -> dict:
+        return self._flat_get("audio_recordings", rec_id)
+
     def get_course_audio_recordings(self, course_id: str) -> list:
         return self._flat_query_by_course("audio_recordings", course_id)
 

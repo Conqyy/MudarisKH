@@ -188,7 +188,7 @@ export default function DashboardPage() {
       <div className="pt-20 flex">
         <Sidebar courses={courses} />
 
-        <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-6xl">
+        <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-7xl mx-auto w-full">
           {/* Header */}
           <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-6 my-10">
             <div>
@@ -214,14 +214,14 @@ export default function DashboardPage() {
           {/* Stats */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-12">
             {statCards.map((s) => (
-              <div key={s.label} className="bg-paper border border-line rounded-2xl p-6">
+              <div key={s.label} className="bg-paper border border-line rounded-2xl p-7">
                 <div className="font-mono text-xs text-ink-mute uppercase tracking-widest mb-3">
                   {s.label}
                 </div>
-                <div className={`font-serif text-4xl font-medium tracking-tight ${s.accent}`}>
+                <div className={`font-serif text-5xl font-medium tracking-tight ${s.accent}`}>
                   {s.value}
                 </div>
-                <div className="text-xs text-ink-mute mt-2 font-mono">{s.note}</div>
+                <div className="text-sm text-ink-mute mt-2 font-mono">{s.note}</div>
               </div>
             ))}
           </div>

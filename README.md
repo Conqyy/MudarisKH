@@ -16,8 +16,8 @@ output to their own database table; the generation/tutor models read that stored
 back from the database. The database is the single shared source of truth.
 
 1. **Document Processor** — extracts topics, definitions, formulas, diagrams, code, and chapter structure from lecture PDF / PPTX / DOCX (reads page images too). It has a dedicated **tutorial mode** that instead captures each practice *problem* (statement, given data/tables, what it asks, the concept, and the solving method).
-2. **Audio Intelligence** — transcribes professor recordings (Groq-hosted **Whisper-large-v3**) and produces a full **lecture summary** ("what the professor said") plus exam hints, key emphasis, and chapter mapping. Accepts audio files, **video files (MP4/MOV — audio auto-extracted to MP3)**, and **video URLs** (YouTube/Vimeo/direct links, fetched with yt-dlp); long files are chunked so any length works. Transcripts are biased to the lecture's language(s) — tuned here for mixed **Arabic/English** — with stray foreign-script text filtered out and bidirectional (RTL/LTR) text rendered correctly.
-3. **Historical Exam Analyzer** — analyzes past exams for topic weights, question-type distribution, difficulty, and grading patterns.
+2. **Audio Intelligence** — transcribes professor recordings (Groq-hosted **Whisper-large-v3**) and produces a full **lecture summary** ("what the professor said") plus exam hints, key emphasis, and chapter mapping. Accepts audio files, **video files (MP4/MOV — audio auto-extracted to MP3)**, and **video URLs** (YouTube/Vimeo/direct links, fetched with yt-dlp); long files are chunked so any length works. Transcripts are biased to the lecture's language(s) — tuned here for mixed **Arabic/English** — with stray foreign-script text filtered out, Whisper's silence hallucinations (prompt echo / subtitle credits) stripped, and bidirectional (RTL/LTR) text rendered correctly. The analysis is written in English, but the professor's **direct quotes stay verbatim in his own words** (Arabic stays Arabic), and an explicit mark statement ("this chapter is 8 marks") is treated as the strongest exam signal. The full analysis can be **downloaded as a PDF** (compiled with XeLaTeX so inline Arabic quotes render correctly).
+3. **Historical Exam Analyzer** — analyzes past exams for topic weights, question-type distribution, difficulty, and grading patterns. Accepts **PDFs or photos** of the exam (each photo is analyzed as its own exam; phone photos are auto-rotated and read by the vision model).
 4. **Generation agent** — produces exams (LaTeX → PDF), their **model-answer keys** (every question with the exact answer in red), flashcards, and summaries. Generated exams **mirror the selected past exam's exact question types and counts** (e.g. the same number of MCQs) and replicate its **format/layout**; the header is branded **"Mudaris University of {your major}"**. Long generations use an **auto-continuation loop** so they never truncate mid-paper.
 5. **AI Tutor** — a chat tutor grounded in the course's documents, recordings, past exams, and tutorials, with its own saved chat history.
 
@@ -34,11 +34,12 @@ back from the database. The database is the single shared source of truth.
 - **Practice Exam** — pick which lecture documents, past exams, tutorials, and **lecture recordings** to use, choose total marks (auto-labeled **Quiz / Midterm / Final**), and generate an exam that mirrors the selected past exam's **exact question types & counts**, **format/layout**, and grading weights (the mark total only rescales the marks, never the question mix). You **solve it yourself**, then reveal a **model-answer key PDF** — every question followed by its exact answer in **red** (code answers shown as real code), so you self-check. Optionally **drag-and-drop your own solved exam** (photo, scanned PDF, or typed file) to view it side-by-side with the answers.
 - **Tutorials** — upload practice-problem / exercise sheets. They're analyzed for their problem types and methods, then selectable as a source for exam generation, flashcards, and summaries (they add *problem ideas only* — never marks or format).
 - **Flashcards** — up to 20 cards, prioritized by exam likelihood from past exams + professor hints, including how-to-solve cards from tutorials and points from selected **recordings**; 3-D flip study view.
-- **Summary** — detailed, comprehensive study summary (a section per major topic, with full explanations, key terms, and how-to-solve notes for the tutorial problem types). Each topic is tagged with an exam likelihood & weight that — when past exams are available — is **derived from the past exams' topic weights** (traceable, not an LLM guess); without past exams it falls back to the model's estimate.
+- **Summary** — detailed, comprehensive study summary (a section per major topic, with full explanations, key terms, and how-to-solve notes for the tutorial problem types). Sections follow the **course's own chapter order** (Chapter 1 before Chapter 2 — not sorted by exam weight). Each topic is tagged with an exam likelihood & weight that — when past exams are available — is **derived from the past exams' topic weights** (traceable, not an LLM guess); without past exams it falls back to the model's estimate.
 - **Selectable sources** — exam generation, summaries, flashcards, and the AI Tutor all let you tick exactly which documents, past exams, tutorials, and **lecture recordings** to draw from.
-- **Multi-file upload** — documents, past exams, tutorials, and **recordings** can be uploaded many at once (recordings also via **multiple video URLs**); each item is analyzed **one at a time** with a live "done / total" counter (no batching, same quality as single uploads).
+- **Multi-file upload** — documents, past exams, tutorials, and **recordings** can be uploaded many at once (recordings also via **multiple video URLs**, past exams also as **photos**); each item is analyzed **one at a time** with a live "done / total" counter (no batching, same quality as single uploads).
 - **Weekly calendar** — Sunday–Thursday lecture schedule with start/finish times, hall notes, and no double-booking; click a lecture to edit.
 - **Arabic (Najdi) + RTL** — the interface defaults to Arabic with full right-to-left layout and a one-tap **عربي ⇄ EN** toggle in the navbar (remembered per device). The copy uses a Najdi dialect and a first-person **"مُدرّس"** persona (e.g. on upload: *"مُدرّس بيقرأ مستندك ويحلّله…"*). Only the **interface** is translated — your **course content stays in its own language** (an English curriculum's topic names, exam hints, and generated material are never translated).
+- **Dark mode** — a ☾/☀ toggle in the navbar flips the whole app to a warm dark theme (remembered per device, applied before first paint — no flash). The palette is CSS-variable based, so every component follows automatically.
 - **Watermarked PDFs** — every generated exam and summary PDF carries a "Mudaris" mark.
 
 ---
@@ -54,7 +55,7 @@ back from the database. The database is the single shared source of truth.
 | Transcription | Groq-hosted **Whisper-large-v3** (set `GROQ_API_KEY`); long audio auto-chunked |
 | Video / URL ingest | yt-dlp + ffmpeg — extract audio from MP4/MOV files and video URLs to MP3 |
 | Text / file handling | PyPDF2, python-pptx, python-docx, PyMuPDF (scanned-PDF → image) |
-| PDF rendering | LaTeX → PDF via pdflatex (MiKTeX) |
+| PDF rendering | LaTeX → PDF via pdflatex (MiKTeX); audio-analysis PDFs use XeLaTeX (bundled with MiKTeX) for Arabic/RTL quotes |
 | Database | Firebase Firestore — one flat collection per data type |
 | File storage | local `backend/uploads/` (cloud upload best-effort) |
 
@@ -179,6 +180,7 @@ mudaris-dev/
 |--------|------|---------|
 | POST | `/api/documents/upload` · `/api/audio/upload` · `/api/historical-exams/upload` · `/api/tutorials/upload` | Upload + analyze material (audio runs in the background) |
 | POST | `/api/audio/upload-url` | Transcribe a video URL (downloaded + converted to MP3 in the background) |
+| GET | `/api/audio/{rec_id}/pdf` | Download a recording's analysis (summary, hints, emphasis, chapters) as a PDF |
 | GET/DELETE | `/api/tutorials/{course_id}` · `/api/tutorials/{id}` | List / delete course tutorials |
 | POST | `/api/exams/generate-enhanced` | Generate an exam (selected docs + past exams + tutorials, total marks) |
 | GET | `/api/exams/{id}/pdf` | Recompile + serve the watermarked exam PDF |

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { useLang } from "@/lib/i18n";
+import { useTheme } from "@/lib/theme";
 
 // 👉 PASTE YOUR GOOGLE FORM LINK HERE (between the quotes) once it's ready.
 //    Example: const FEEDBACK_URL = "https://forms.gle/xxxxxxxx";
@@ -15,6 +16,7 @@ export default function Navbar() {
   const router = useRouter();
   const { user, profile, signOut, loading } = useAuth();
   const { t, lang, toggle } = useLang();
+  const { theme, toggle: toggleTheme } = useTheme();
 
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -126,6 +128,14 @@ export default function Navbar() {
 
       {/* CTA Section */}
       <div className="flex items-center gap-3">
+        {/* Theme toggle (light ⇄ dark) */}
+        <button
+          onClick={toggleTheme}
+          className="w-8 h-8 rounded-full border border-line hover:bg-bg-alt text-sm text-ink-soft transition flex items-center justify-center"
+          title={theme === "dark" ? t("Switch to light mode") : t("Switch to dark mode")}
+        >
+          {theme === "dark" ? "☀" : "☾"}
+        </button>
         {/* Language toggle (Arabic ⇄ English) */}
         <button
           onClick={toggle}

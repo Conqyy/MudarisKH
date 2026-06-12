@@ -1,5 +1,6 @@
 from openai import OpenAI
 import json
+import re
 import logging
 from collections import namedtuple
 from src.config import settings
@@ -106,12 +107,11 @@ class AudioIntelligenceAgent:
                     resp = client.audio.transcriptions.create(
                         model=model, file=fh, language=lang,
                         response_format="verbose_json",
-                        # Bias toward Arabic+English so unclear audio isn't
-                        # mis-detected as a similar-sounding third language.
-                        prompt=(
-                            "University lecture in Arabic and English. "
-                            "محاضرة جامعية باللغتين العربية والإنجليزية."
-                        ),
+                        # Short, English-only hint to bias language without
+                        # giving Whisper a full Arabic sentence to echo. (A long
+                        # Arabic prompt gets hallucinated/repeated verbatim into
+                        # the transcript during silence — see _clean_segments.)
+                        prompt="Computer-science university lecture, mixed Arabic and English.",
                         # Deterministic decoding reduces hallucinated text on
                         # silence/noise (a common source of stray languages).
                         temperature=0,
@@ -134,9 +134,51 @@ class AudioIntelligenceAgent:
             # Drop any segment written in a clearly non-Arabic / non-English
             # script (e.g. CJK, Cyrillic, Devanagari) — stray mis-detections.
             all_segs = [s for s in all_segs if self._is_arabic_or_english(s.text)]
+            # Strip Whisper's prompt-echo / subtitle-credit hallucinations and
+            # collapse repetition loops that otherwise bury the real speech.
+            all_segs = self._clean_segments(all_segs)
             return self._format_segments(all_segs)
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
+
+    # Phrases Whisper tends to hallucinate and repeat on silence/unclear audio:
+    # the language-bias prompt (echoed verbatim) and subtitle-credit fillers it
+    # learned from training on captioned video.
+    _HALLUCINATION_PHRASES = [
+        "محاضرة جامعية باللغتين العربية والإنجليزية",
+        "المحاضرة جامعية باللغتين العربية والإنجليزية",
+        "المحضرة جامعية باللغتين العربية والإنجليزية",
+        "المحضرة جامعية باللغتين العربية والإنجليزي",
+        "Computer-science university lecture, mixed Arabic and English.",
+        "University lecture in Arabic and English.",
+        "المترجم للقناة",
+    ]
+
+    @staticmethod
+    def _clean_segments(segments):
+        """Remove prompt-echo / subtitle-credit hallucinations and collapse
+        repetition loops.
+
+        Whisper floods low-confidence audio with the bias prompt repeated dozens
+        of times, which buries (and out-weights) the professor's actual speech.
+        We strip those phrases from each segment, drop what's left empty, and
+        collapse immediate duplicate lines (the hallucination repeats a line)."""
+        phrases = AudioIntelligenceAgent._HALLUCINATION_PHRASES
+        cleaned, prev = [], ""
+        for s in segments:
+            text = s.text or ""
+            for p in phrases:
+                text = text.replace(p, " ")
+            text = re.sub(r"\s+", " ", text).strip()
+            text = text.strip(" .،,-—")
+            # Keep only if something real (a letter/digit) remains.
+            if not text or not re.search(r"[0-9A-Za-z؀-ۿ]", text):
+                continue
+            if text == prev:  # collapse immediate repeats
+                continue
+            prev = text
+            cleaned.append(_Seg(text, s.start, s.end))
+        return cleaned
 
     @staticmethod
     def _is_arabic_or_english(text: str) -> bool:

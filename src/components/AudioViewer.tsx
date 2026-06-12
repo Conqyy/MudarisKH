@@ -4,6 +4,9 @@ import { AudioRecording } from "@/lib/firestore-helpers";
 import BookmarkButton from "@/components/BookmarkButton";
 import { useTrackRecent } from "@/lib/activity";
 
+const API_URL =
+  process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
+
 interface AudioViewerProps {
   recording: AudioRecording;
   onClose: () => void;
@@ -68,6 +71,17 @@ export default function AudioViewer({
               )}
             </div>
           </div>
+          {insights && (
+            <a
+              href={`${API_URL}/api/audio/${recording.id}/pdf`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex-shrink-0 bg-accent text-paper px-4 py-2 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2"
+              title="Download analysis & transcript as PDF"
+            >
+              <span>↓</span> PDF
+            </a>
+          )}
           <BookmarkButton item={bookmarkItem} size="sm" />
         </div>
 

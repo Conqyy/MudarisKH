@@ -111,7 +111,7 @@ export default function Home() {
             { num: "AR + EN", label: t("Bilingual support"), em: true },
             { num: "94%", label: t("Exam confidence ↑"), em: false },
           ].map((s, i) => (
-            <div key={i} className="border-s border-white/15 ps-6">
+            <div key={i} className="border-s border-paper/15 ps-6">
               <div className="font-serif text-4xl md:text-5xl font-normal leading-none mb-2">
                 {s.em ? (
                   <em className="italic text-accent-soft font-light">{s.num}</em>
@@ -119,7 +119,7 @@ export default function Home() {
                   s.num
                 )}
               </div>
-              <div className="text-xs text-white/60 font-mono uppercase tracking-widest">
+              <div className="text-xs text-paper/60 font-mono uppercase tracking-widest">
                 {s.label}
               </div>
             </div>

@@ -346,7 +346,106 @@ class ExamGeneratorAgent:
         # Load forgiving packages so common offenders still compile.
         raw_tex = ExamGeneratorAgent._inject_safety_packages(raw_tex)
         raw_tex = ExamGeneratorAgent._fix_overflowing_tables(raw_tex)
+        raw_tex = ExamGeneratorAgent._fix_tabularx_without_x(raw_tex)
+        raw_tex = ExamGeneratorAgent._fix_counter_itemize(raw_tex)
         return raw_tex.strip()
+
+    @staticmethod
+    def _fix_tabularx_without_x(tex: str) -> str:
+        """Ensure every tabularx has an X column.
+
+        tabularx stretches to its target width (e.g. \\textwidth) by widening its
+        X columns. With no X column the surplus width is dumped into a spurious
+        trailing empty cell — the "extra empty column" bug. LLMs often emit
+        \\begin{tabularx}{\\textwidth}{|p{12cm}|c|} (fixed columns only). Promote
+        the first wrappable text column (p/m/b{..} or l) to X — or, failing that,
+        the first c/r — so the table fills the width cleanly with no phantom cell.
+        This is brace-aware, so specs like p{12cm} are parsed correctly (the older
+        regex-based _fix_overflowing_tables cannot match those).
+        """
+        def read_group(s: str, pos: int):
+            """s[pos] must be '{'. Return (inner, index_after_closing_brace)."""
+            if pos >= len(s) or s[pos] != '{':
+                return None, pos
+            depth, i = 0, pos
+            while i < len(s):
+                if s[i] == '{':
+                    depth += 1
+                elif s[i] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return s[pos + 1:i], i + 1
+                i += 1
+            return None, pos
+
+        def promote(spec: str) -> str:
+            # First p{..}/m{..}/b{..} column → X (drop its width arg).
+            m = re.search(r'[pmb]\{', spec)
+            if m:
+                _, after = read_group(spec, m.end() - 1)
+                return spec[:m.start()] + 'X' + spec[after:]
+            # else first bare l → X, else first c/r → X.
+            for ch in ('l', 'c', 'r'):
+                idx = spec.find(ch)
+                if idx != -1:
+                    return spec[:idx] + 'X' + spec[idx + 1:]
+            return spec
+
+        marker = '\\begin{tabularx}'
+        out, i = [], 0
+        while True:
+            j = tex.find(marker, i)
+            if j == -1:
+                out.append(tex[i:])
+                break
+            out.append(tex[i:j])
+            k = j + len(marker)
+            width, k1 = read_group(tex, k)
+            spec, k2 = read_group(tex, k1)
+            if width is None or spec is None:
+                out.append(marker)          # malformed; leave untouched
+                i = k
+                continue
+            new_spec = spec if 'X' in spec else promote(spec)
+            out.append(marker + '{' + width + '}{' + new_spec + '}')
+            i = k2
+        return ''.join(out)
+
+    @staticmethod
+    def _fix_counter_itemize(tex: str) -> str:
+        """Convert itemize lists that use an enumerate-only counter label into
+        enumerate.
+
+        enumitem counter macros (\\Alph*, \\alph*, \\arabic*, \\roman*, \\Roman*)
+        only have a counter to reference inside an \\begin{enumerate}. LLMs
+        frequently emit MCQ options as \\begin{itemize}[label=\\Alph*.], which
+        fails to compile with "Missing number, treated as zero" (\\Alph* expands
+        to \\c@ of a counter that does not exist in itemize). Rewrite the opening
+        tag and its matching \\end{itemize} to enumerate; lists are properly
+        nested, so the most recent unmatched begin owns each end.
+        """
+        counter_re = re.compile(r'\\(?:Alph|alph|arabic|roman|Roman)\*')
+        token_re = re.compile(
+            r'\\begin\{(itemize|enumerate)\}(\[[^\]]*\])?'
+            r'|\\end\{(itemize|enumerate)\}'
+        )
+        out: list[str] = []
+        stack: list[bool] = []  # True if the matching begin was converted
+        pos = 0
+        for m in token_re.finditer(tex):
+            out.append(tex[pos:m.start()])
+            pos = m.end()
+            begin_env = m.group(1)
+            if begin_env:  # \begin{...}
+                opts = m.group(2) or ''
+                convert = begin_env == 'itemize' and bool(counter_re.search(opts))
+                stack.append(convert)
+                out.append('\\begin{enumerate}' + opts if convert else m.group(0))
+            else:  # \end{...}
+                converted = stack.pop() if stack else False
+                out.append('\\end{enumerate}' if converted else m.group(0))
+        out.append(tex[pos:])
+        return ''.join(out)
 
     @staticmethod
     def _fix_overflowing_tables(tex: str) -> str:

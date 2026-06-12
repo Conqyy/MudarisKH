@@ -45,7 +45,7 @@ export default function RecentPage() {
       <Navbar />
       <div className="pt-20 flex">
         <Sidebar courses={courses} />
-        <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-5xl">
+        <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-6xl mx-auto w-full">
           <div className="my-10">
             <h1 className="font-serif text-4xl md:text-5xl font-normal tracking-tight leading-tight mb-2">
               Recent

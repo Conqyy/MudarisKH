@@ -106,8 +106,12 @@ You MUST respond ONLY with a clean, raw JSON block matching this exact schema:
 }
 
 RULES:
+- LANGUAGE: Write the "summary", every "chapterMapping" segment, every "examHints" hint, and every "keyEmphasis" topic in clear English — a readable study recap — EVEN IF the lecture is delivered in Arabic. Paraphrasing the professor's points in English is expected here. Keep technical terms as they are.
+- BUT THE PROFESSOR'S DIRECT QUOTES ARE VERBATIM: the "source" and "quote" fields must contain the professor's OWN WORDS, copied EXACTLY from the transcript in the original language he spoke them (Arabic stays Arabic). Do NOT translate, transliterate, or paraphrase a quote. If you don't have an exact quote, use an empty string "" rather than inventing or translating one.
 - The "summary" MUST cover the entire lecture from start to finish (not just the beginning), in the order topics were presented, so a student who missed the lecture understands what was taught.
-- Look for phrases indicating exam relevance: "this is important", "remember this", "this will be on the exam", repeated explanations, etc.
+- Look for phrases indicating exam relevance: "this is important", "remember this", "this will be on the exam", repeated explanations, etc. (in any language, e.g. Arabic «هذا مهم», «ركّزوا على», «راح يجي في الاختبار»).
+- HIGHEST PRIORITY SIGNAL — EXPLICIT MARKS/WEIGHTS: if the professor states a specific number of MARKS, points, or degrees for a topic, OR explicitly calls a topic important (e.g. "this chapter will be 8 marks", "هذا الفصل عليه ٨ درجات", "البرمجة الخطية ٨ درجات ومهمة", "worth 8 points"), that topic is automatically "emphasisLevel":"high" AND a high-confidence (≥0.9) exam hint. Put the stated mark count in the hint text (e.g. "Linear Programming — ~8 marks, professor said it's important"). Do NOT rate such a topic medium/low just because it was mentioned briefly — a stated mark count is the strongest possible exam signal.
+- Ignore filler/transcription noise: repeated boilerplate lines, subtitle credits, or a phrase echoed many times are transcription artifacts, not emphasis — never treat repetition of such noise as importance.
 - Confidence scores range from 0.0 to 1.0 — higher means stronger exam signal.
 - emphasisLevel: "high" = professor explicitly flagged as important, "medium" = repeated or elaborated on, "low" = mentioned once.
 - Do NOT include any markdown code blocks, conversational text, or explanation outside the JSON.
@@ -355,7 +359,7 @@ You MUST respond ONLY with a clean, raw JSON object matching this exact schema:
 For EACH section, set examLikelihood and examWeight based on how heavily the topic appeared in the past exams and how much the professor emphasized it:
 - "high" = frequently tested / strongly emphasized; "medium" = sometimes; "low" = rarely or never.
 - examWeight is a rough estimate (0-100) of how much of the exam's marks this topic is likely to take. The weights across sections should roughly add up to 100.
-Order the sections from highest exam likelihood/weight to lowest.
+Order the sections in the COURSE'S OWN ORDER — follow the chapter/lecture sequence of the materials (Chapter 1 before Chapter 2, earlier lectures before later ones), NOT by exam likelihood. The examLikelihood/examWeight tags carry the exam signal; the reading order must mirror how the course is taught.
 
 Do NOT include markdown code blocks, commentary, or any text outside the JSON. Return ONLY the raw JSON.
 """

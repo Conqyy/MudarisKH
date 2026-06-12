@@ -407,7 +407,7 @@ export default function MultiUploadModal({
                   isDone
                     ? { borderColor: "#6b7d5b" }
                     : {
-                        borderColor: "#e9e4da",
+                        borderColor: "rgb(var(--c-bg-alt))",
                         borderTopColor: accent,
                       }
                 }
@@ -463,7 +463,7 @@ export default function MultiUploadModal({
                             ? { backgroundColor: "#6b7d5b", color: "#faf7f2" }
                             : isActive
                             ? { backgroundColor: accent, color: "#faf7f2" }
-                            : { backgroundColor: "#e9e4da", color: "#6b6256" }
+                            : { backgroundColor: "rgb(var(--c-bg-alt))", color: "rgb(var(--c-ink-mute))" }
                         }
                       >
                         {stepDone ? "✓" : i + 1}

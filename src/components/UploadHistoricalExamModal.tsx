@@ -25,12 +25,13 @@ export default function UploadHistoricalExamModal({ courseId, onClose, onSuccess
       endpoint="/api/historical-exams/upload"
       accent="#c8472f"
       icon="📋"
-      acceptExts={["pdf"]}
-      acceptAttr="application/pdf,.pdf"
+      acceptExts={["pdf", "jpg", "jpeg", "png", "webp", "heic", "heif"]}
+      acceptAttr="application/pdf,.pdf,image/*"
       heading="Upload past exams"
-      subtitle="Mudaris will study the past exam to learn its format, question types, and how marks are distributed."
+      subtitle="Upload a PDF or photos of the exam pages. Mudaris will study its format, question types, and how marks are distributed."
       fileNoun="past exam"
       steps={STEPS}
+      footerNote="Each PDF or photo is analyzed as a separate exam, one at a time."
     />
   );
 }

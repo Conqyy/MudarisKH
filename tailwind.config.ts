@@ -9,17 +9,20 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        bg: "#f7f3ec",
-        "bg-alt": "#efe9dd",
-        ink: "#1a1814",
-        "ink-soft": "#4a4640",
-        "ink-mute": "#8a847a",
-        accent: "#c8472f",
-        "accent-soft": "#e8a594",
-        gold: "#b8923a",
-        sage: "#6b7d5b",
-        paper: "#fffbf3",
-        line: "#d8d0c0",
+        // RGB-triplet CSS variables (set in globals.css) so the whole palette
+        // swaps for dark mode while opacity modifiers (e.g. bg-sage/10) keep
+        // working via <alpha-value>.
+        bg: "rgb(var(--c-bg) / <alpha-value>)",
+        "bg-alt": "rgb(var(--c-bg-alt) / <alpha-value>)",
+        ink: "rgb(var(--c-ink) / <alpha-value>)",
+        "ink-soft": "rgb(var(--c-ink-soft) / <alpha-value>)",
+        "ink-mute": "rgb(var(--c-ink-mute) / <alpha-value>)",
+        accent: "rgb(var(--c-accent) / <alpha-value>)",
+        "accent-soft": "rgb(var(--c-accent-soft) / <alpha-value>)",
+        gold: "rgb(var(--c-gold) / <alpha-value>)",
+        sage: "rgb(var(--c-sage) / <alpha-value>)",
+        paper: "rgb(var(--c-paper) / <alpha-value>)",
+        line: "rgb(var(--c-line) / <alpha-value>)",
       },
       fontFamily: {
         // Direct font names — match prototype exactly

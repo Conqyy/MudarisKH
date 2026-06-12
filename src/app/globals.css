@@ -2,24 +2,60 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ============ THEME PALETTES (RGB triplets for Tailwind <alpha-value>) ============ */
 :root {
-  --background: #f7f3ec;
-  --foreground: #1a1814;
+  --c-bg: 247 243 236;        /* #f7f3ec */
+  --c-bg-alt: 239 233 221;    /* #efe9dd */
+  --c-ink: 26 24 20;          /* #1a1814 */
+  --c-ink-soft: 74 70 64;     /* #4a4640 */
+  --c-ink-mute: 138 132 122;  /* #8a847a */
+  --c-accent: 200 71 47;      /* #c8472f */
+  --c-accent-soft: 232 165 148; /* #e8a594 */
+  --c-gold: 184 146 58;       /* #b8923a */
+  --c-sage: 107 125 91;       /* #6b7d5b */
+  --c-paper: 255 251 243;     /* #fffbf3 */
+  --c-line: 216 208 192;      /* #d8d0c0 */
+  --grain-opacity: 0.4;
+  color-scheme: light;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #f7f3ec;
-    --foreground: #1a1814;
-  }
+/* Warm dark theme — same identity, inverted values. */
+[data-theme="dark"] {
+  --c-bg: 21 19 15;           /* #15130f */
+  --c-bg-alt: 35 32 26;       /* #23201a */
+  --c-ink: 234 229 218;       /* #eae5da */
+  --c-ink-soft: 184 177 164;  /* #b8b1a4 */
+  --c-ink-mute: 134 128 117;  /* #868075 */
+  --c-accent: 217 94 68;      /* #d95e44 — brighter for dark contrast */
+  --c-accent-soft: 122 62 47; /* #7a3e2f */
+  --c-gold: 201 162 80;       /* #c9a250 */
+  --c-sage: 139 159 117;      /* #8b9f75 */
+  --c-paper: 31 28 22;        /* #1f1c16 — card surface above bg */
+  --c-line: 60 55 45;         /* #3c372d */
+  --grain-opacity: 0.2;
+  color-scheme: dark;
 }
 
 html,
 body {
-  background: #f7f3ec !important;
-  color: #1a1814 !important;
+  background: rgb(var(--c-bg)) !important;
+  color: rgb(var(--c-ink)) !important;
   min-height: 100vh;
   overflow-x: hidden;
+}
+
+/* Scale the whole UI up on larger screens. Tailwind sizes are rem-based, so
+   raising the root font-size proportionally enlarges text, cards, buttons,
+   and spacing together — no per-component changes needed. */
+@media (min-width: 1280px) {
+  html {
+    font-size: 17px;
+  }
+}
+@media (min-width: 1700px) {
+  html {
+    font-size: 18px;
+  }
 }
 
 /* Grain texture — exact match to prototype (subtle and easy on the eyes) */
@@ -29,7 +65,7 @@ body::before {
   inset: 0;
   pointer-events: none;
   z-index: 1;
-  opacity: 0.4;
+  opacity: var(--grain-opacity, 0.4);
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9'/%3E%3CfeColorMatrix values='0 0 0 0 0.1 0 0 0 0 0.1 0 0 0 0 0.08 0 0 0 0.08 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
@@ -101,8 +137,8 @@ body > * {
 
 .deco-card {
   position: absolute;
-  background: #fffbf3;
-  border: 1px solid #d8d0c0;
+  background: rgb(var(--c-paper));
+  border: 1px solid rgb(var(--c-line));
   border-radius: 16px;
   padding: 20px;
   box-shadow: 0 1px 3px rgba(26, 24, 20, 0.04),
@@ -164,14 +200,14 @@ body > * {
 }
 
 ::-webkit-scrollbar-track {
-  background: #efe9dd;
+  background: rgb(var(--c-bg-alt));
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #d8d0c0;
+  background: rgb(var(--c-line));
   border-radius: 10px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #8a847a;
+  background: rgb(var(--c-ink-mute));
 }

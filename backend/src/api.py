@@ -1,5 +1,6 @@
 import os
 import sys
+import re
 import logging
 from typing import Dict, Any, List, Optional
 from pathlib import Path
@@ -628,8 +629,14 @@ async def upload_historical_exam(
 
     content_type = file.content_type or ""
     ext = (file.filename or "").rsplit(".", 1)[-1].lower()
-    if content_type != "application/pdf" and ext != "pdf":
-        raise HTTPException(status_code=400, detail="Historical exams must be PDF files.")
+    _IMAGE_EXTS = {"jpg", "jpeg", "png", "webp", "heic", "heif", "bmp", "gif"}
+    is_pdf = content_type == "application/pdf" or ext == "pdf"
+    is_image = content_type.startswith("image/") or ext in _IMAGE_EXTS
+    if not (is_pdf or is_image):
+        raise HTTPException(
+            status_code=400,
+            detail="Past exams must be a PDF or an image (photo).",
+        )
 
     file_bytes = await file.read()
     file_size = len(file_bytes)
@@ -651,7 +658,6 @@ async def upload_historical_exam(
     logger.info(f"Historical exam {exam_id} saved, starting analysis...")
 
     try:
-        extracted_text = hist_analyzer.extract_exam_text(file_bytes)
         course_doc = None
         try:
             from firebase_admin import firestore as _fs
@@ -660,10 +666,19 @@ async def upload_historical_exam(
             pass
         course_title = course_doc.to_dict().get("title", course_id) if course_doc and course_doc.exists else course_id
 
-        # Render the exam pages to images so the analyzer (vision model) can read
-        # equations, diagrams, figures, and code — not just the extracted text.
-        from src.utils.pdf_extract import pdf_to_image_uris
-        page_images = pdf_to_image_uris(file_bytes)
+        if is_pdf:
+            extracted_text = hist_analyzer.extract_exam_text(file_bytes)
+            # Render the exam pages to images so the analyzer (vision model) can
+            # read equations, diagrams, figures, and code — not just the text.
+            from src.utils.pdf_extract import pdf_to_image_uris
+            page_images = pdf_to_image_uris(file_bytes)
+        else:
+            # A photo / image of the exam: there's no embedded text, so the
+            # vision model reads the page straight from the (normalized) image.
+            from src.utils.pdf_extract import image_to_image_uri
+            extracted_text = ""
+            page_images = [image_to_image_uri(file_bytes)]
+
         analysis = hist_analyzer.analyze_exam(extracted_text, course_title, image_uris=page_images)
 
         db_client.update_historical_exam(exam_id, {
@@ -2071,15 +2086,69 @@ def delete_summary_endpoint(doc_id: str):
     return {"status": "success", "deleted": doc_id}
 
 
-def _latex_escape(s) -> str:
+# Common non-ASCII characters the LLM emits in technical summaries. pdflatex
+# (T1 fontenc, no Unicode setup) hard-fails on these with "Unicode character
+# not set up for use with LaTeX", so map them to LaTeX equivalents. Math symbols
+# are wrapped in $...$; typographic ones map to their text form.
+_UNICODE_LATEX = {
+    # Greek lowercase
+    "α": r"$\alpha$", "β": r"$\beta$", "γ": r"$\gamma$", "δ": r"$\delta$",
+    "ε": r"$\varepsilon$", "ζ": r"$\zeta$", "η": r"$\eta$", "θ": r"$\theta$",
+    "ι": r"$\iota$", "κ": r"$\kappa$", "λ": r"$\lambda$", "μ": r"$\mu$",
+    "ν": r"$\nu$", "ξ": r"$\xi$", "π": r"$\pi$", "ρ": r"$\rho$",
+    "σ": r"$\sigma$", "τ": r"$\tau$", "υ": r"$\upsilon$", "φ": r"$\varphi$",
+    "χ": r"$\chi$", "ψ": r"$\psi$", "ω": r"$\omega$", "ϕ": r"$\phi$",
+    # Greek uppercase
+    "Γ": r"$\Gamma$", "Δ": r"$\Delta$", "Θ": r"$\Theta$", "Λ": r"$\Lambda$",
+    "Ξ": r"$\Xi$", "Π": r"$\Pi$", "Σ": r"$\Sigma$", "Φ": r"$\Phi$",
+    "Ψ": r"$\Psi$", "Ω": r"$\Omega$",
+    # Relations
+    "≤": r"$\leq$", "≥": r"$\geq$", "≠": r"$\neq$", "≈": r"$\approx$",
+    "≡": r"$\equiv$", "∈": r"$\in$", "∉": r"$\notin$", "⊂": r"$\subset$",
+    "⊆": r"$\subseteq$", "⊃": r"$\supset$", "⊇": r"$\supseteq$", "∝": r"$\propto$",
+    # Arrows
+    "→": r"$\rightarrow$", "←": r"$\leftarrow$", "↔": r"$\leftrightarrow$",
+    "⇒": r"$\Rightarrow$", "⇐": r"$\Leftarrow$", "⇔": r"$\Leftrightarrow$",
+    "↦": r"$\mapsto$",
+    # Operators / misc math
+    "×": r"$\times$", "÷": r"$\div$", "±": r"$\pm$", "∓": r"$\mp$",
+    "·": r"$\cdot$", "∗": r"$*$", "∘": r"$\circ$", "∑": r"$\sum$",
+    "∏": r"$\prod$", "∫": r"$\int$", "√": r"$\sqrt{\,}$", "∞": r"$\infty$",
+    "∂": r"$\partial$", "∇": r"$\nabla$", "∧": r"$\wedge$", "∨": r"$\vee$",
+    "¬": r"$\neg$", "∀": r"$\forall$", "∃": r"$\exists$", "∅": r"$\emptyset$",
+    "°": r"$^{\circ}$", "′": r"$'$", "″": r"$''$",
+    # Typographic
+    "–": "--", "—": "---", "•": r"$\bullet$", "…": r"\ldots{}",
+    "‘": "`", "’": "'", "“": "``", "”": "''", " ": " ",
+}
+
+_LATEX_SPECIALS = {
+    "\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$",
+    "#": r"\#", "_": r"\_", "{": r"\{", "}": r"\}",
+    "~": r"\textasciitilde{}", "^": r"\textasciicircum{}",
+}
+
+
+def _latex_escape(s, keep_unknown_unicode: bool = False) -> str:
+    """Escape text for LaTeX.
+
+    For pdflatex (default), unknown non-ASCII is dropped (pdflatex can't render
+    it and would hard-fail). For XeLaTeX (keep_unknown_unicode=True), unknown
+    non-ASCII — e.g. Arabic — is kept verbatim so a Unicode font can render it.
+    Known math/typographic symbols are always mapped to LaTeX equivalents."""
     if not s:
         return ""
-    repl = {
-        "\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$",
-        "#": r"\#", "_": r"\_", "{": r"\{", "}": r"\}",
-        "~": r"\textasciitilde{}", "^": r"\textasciicircum{}",
-    }
-    return "".join(repl.get(ch, ch) for ch in str(s))
+    out = []
+    for ch in str(s):
+        if ch in _LATEX_SPECIALS:
+            out.append(_LATEX_SPECIALS[ch])
+        elif ch in _UNICODE_LATEX:
+            out.append(_UNICODE_LATEX[ch])
+        elif ord(ch) > 127:
+            out.append(ch if keep_unknown_unicode else "")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def _summary_to_latex(summary: dict) -> str:
@@ -2158,6 +2227,151 @@ def get_summary_pdf(doc_id: str):
         raise
     except Exception as e:
         logger.error(f"Summary PDF compile failed: {e}")
+        raise HTTPException(status_code=500, detail=f"PDF error: {str(e)}")
+
+
+def _audio_to_latex(rec: dict) -> str:
+    """Build a printable LaTeX document that mirrors the UI's audio view: the AI
+    analysis only — Lecture Summary, Exam Hints, Key Emphasis, Chapter Breakdown
+    (no raw transcript).
+
+    A plain left-to-right document (like the web UI). Compiled with XeLaTeX (see
+    get_audio_pdf) with a Unicode font, so the professor's verbatim quotes — which
+    may be Arabic — render correctly inline instead of being stripped, while the
+    summary/headings stay English."""
+    insights = rec.get("insights") or {}
+    title = rec.get("title", "Lecture Recording")
+
+    # Escape that PRESERVES non-ASCII (Arabic etc.) so XeLaTeX can render quotes.
+    esc = lambda x: _latex_escape(x, keep_unknown_unicode=True)
+
+    # Arabic-aware: if a field contains Arabic, wrap it in \textarabic so XeLaTeX
+    # shapes it correctly (RTL + the Arabic font); otherwise leave it in the
+    # default serif font so Latin text keeps the original look.
+    def aw(x: str) -> str:
+        body = esc(x)
+        if any(0x0600 <= ord(c) <= 0x06FF for c in (x or "")):
+            # \upshape: Arabic (Arial) has no italic face, so in an italic
+            # context (e.g. quotes) it would fall back to tofu boxes. Force
+            # upright so the Arabic always renders.
+            return r"\textarabic{\upshape " + body + r"}"
+        return body
+
+    def quoted(x: str) -> str:
+        """Quote a snippet correctly for its script. Arabic uses guillemets
+        («…») INSIDE the RTL run so the marks sit on the right side (curly
+        quotes placed outside land on the wrong side); Latin uses ``…''."""
+        if any(0x0600 <= ord(c) <= 0x06FF for c in (x or "")):
+            return "\\textarabic{\\upshape «" + esc(x) + "»}"
+        return r"``" + esc(x) + r"''"
+
+    parts = [
+        r"\documentclass[12pt,a4paper]{article}",
+        r"\usepackage[a4paper,margin=2.2cm]{geometry}",
+        r"\usepackage{fontspec}",
+        r"\usepackage{polyglossia}",
+        r"\setmainlanguage{english}",
+        r"\setotherlanguage{arabic}",
+        # No \setmainfont: keep XeLaTeX's default Latin Modern (the original
+        # serif look). Only Arabic runs use an Arabic-capable font, shaped.
+        r"\newfontfamily\arabicfont[Script=Arabic]{Arial}",
+        r"\usepackage{enumitem}",
+        r"\usepackage{parskip}",
+        r"\usepackage{eso-pic}",
+        r"\usepackage{xcolor}",
+        r"\AddToShipoutPictureFG{\AtPageLowerLeft{\put(28,20){\textcolor{gray}{\small Mudaris}}}}",
+        r"\begin{document}",
+        r"\begin{center}{\LARGE\bfseries " + aw(title) + r"}\\[0.3em]"
+        + r"{\small\itshape Lecture analysis}\end{center}",
+        r"\vspace{0.5em}",
+    ]
+
+    summary = insights.get("summary") or ""
+    if summary.strip():
+        parts.append(r"\section*{Lecture Summary}")
+        for para in re.split(r"\n\n+", summary):
+            if para.strip():
+                parts.append(aw(para.strip()) + r"\par\vspace{0.3em}")
+
+    hints = insights.get("examHints") or []
+    if hints:
+        parts.append(r"\section*{Exam Hints}")
+        parts.append(r"\begin{itemize}[leftmargin=*]")
+        for h in hints:
+            line = aw(h.get("hint", ""))
+            conf = h.get("confidence")
+            if isinstance(conf, (int, float)) and conf:
+                line += r"\hfill {\small\itshape (" + str(int(conf * 100)) + r"\% confidence)}"
+            if h.get("source"):
+                line += r"\\{\small\itshape " + quoted(h["source"]) + r"}"
+            parts.append(r"\item " + line)
+        parts.append(r"\end{itemize}")
+
+    emphasis = insights.get("keyEmphasis") or []
+    if emphasis:
+        parts.append(r"\section*{Key Emphasis}")
+        parts.append(r"\begin{itemize}[leftmargin=*]")
+        for e in emphasis:
+            level = (e.get("emphasisLevel") or "").strip()
+            lbl = f"[{esc(level)}] " if level else ""
+            line = r"\textbf{" + lbl + aw(e.get("topic", "")) + r"}"
+            if e.get("quote"):
+                line += r"\\{\small\itshape " + quoted(e["quote"]) + r"}"
+            parts.append(r"\item " + line)
+        parts.append(r"\end{itemize}")
+
+    chapters = insights.get("chapterMapping") or []
+    if chapters:
+        parts.append(r"\section*{Chapter Breakdown}")
+        for ch in chapters:
+            parts.append(r"\subsection*{" + aw(ch.get("chapter", "")) + r"}")
+            segs = ch.get("segments") or []
+            if segs:
+                parts.append(r"\begin{itemize}[leftmargin=*]")
+                for seg in segs:
+                    parts.append(r"\item " + aw(seg))
+                parts.append(r"\end{itemize}")
+
+    parts.append(r"\end{document}")
+    return "\n".join(parts)
+
+
+@app.get("/api/audio/{rec_id}/pdf")
+def get_audio_pdf(rec_id: str):
+    """Compile and serve a PDF of a recording's analysis + transcript."""
+    import tempfile
+    from src.utils.compile_pdf import compile_tex_to_pdf
+
+    rec = db_client.get_audio_recording(rec_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    if not (rec.get("insights") or rec.get("transcript")):
+        raise HTTPException(
+            status_code=409,
+            detail="This recording hasn't been analyzed yet.",
+        )
+
+    tex = _audio_to_latex(rec)
+    name = (rec.get("title") or rec_id).strip() or rec_id
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name)[:60] or rec_id
+    try:
+        tmpdir = tempfile.mkdtemp()
+        tex_path = os.path.join(tmpdir, f"{safe}.tex")
+        with open(tex_path, "w", encoding="utf-8") as f:
+            f.write(tex)
+        # XeLaTeX so the professor's original-language (Arabic / mixed) speech
+        # renders with correct shaping + RTL instead of being stripped.
+        pdf_path = compile_tex_to_pdf(tex_path, engine="xelatex")
+        if not pdf_path or not os.path.exists(pdf_path):
+            raise HTTPException(status_code=422, detail="Audio PDF compilation failed")
+        return FileResponse(
+            pdf_path, media_type="application/pdf",
+            filename=f"{safe}.pdf", content_disposition_type="inline",
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Audio PDF compile failed: {e}")
         raise HTTPException(status_code=500, detail=f"PDF error: {str(e)}")
 
 

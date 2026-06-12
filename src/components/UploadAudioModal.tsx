@@ -473,7 +473,7 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
                 style={
                   isDone
                     ? { borderColor: "#6b7d5b" }
-                    : { borderColor: "#e9e4da", borderTopColor: ACCENT }
+                    : { borderColor: "rgb(var(--c-bg-alt))", borderTopColor: ACCENT }
                 }
               />
               <div
@@ -526,7 +526,7 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
                             ? { backgroundColor: "#6b7d5b", color: "#faf7f2" }
                             : isActive
                             ? { backgroundColor: ACCENT, color: "#faf7f2" }
-                            : { backgroundColor: "#e9e4da", color: "#6b6256" }
+                            : { backgroundColor: "rgb(var(--c-bg-alt))", color: "rgb(var(--c-ink-mute))" }
                         }
                       >
                         {stepDone ? "✓" : i + 1}
