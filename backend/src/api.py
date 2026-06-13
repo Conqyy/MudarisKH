@@ -2000,6 +2000,23 @@ def _derive_section_exam_weights(sections: list, historical_analyses: list) -> l
     return sections
 
 
+def _compose_summary_title(doc_titles: list, llm_title: str | None) -> str:
+    """Title the summary after the documents/chapters it was built from, so a
+    student can tell at a glance which material it covers. Falls back to the
+    model's title (then a dated default) when no documents were selected."""
+    import time as _time
+    titles = [t.strip() for t in (doc_titles or []) if t and t.strip()]
+    if titles:
+        if len(titles) == 1:
+            base = titles[0]
+        elif len(titles) <= 3:
+            base = ", ".join(titles)
+        else:
+            base = ", ".join(titles[:3]) + f" +{len(titles) - 3} more"
+        return f"Summary — {base}"
+    return (llm_title or "").strip() or f"Summary · {_time.strftime('%b %d')}"
+
+
 @app.post("/api/summaries/generate")
 def generate_summary_endpoint(payload: SummaryGenerateRequest):
     import uuid
@@ -2040,7 +2057,16 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest):
         intelligence.get("historical_analyses", []),
     )
 
-    title = summary.get("title") or f"Summary · {_time.strftime('%b %d')}"
+    # Name the summary after the documents/chapters it was generated from
+    # (in the order they were selected), so it's identifiable in the list.
+    course_docs = db_client.get_course_documents(payload.course_id)
+    course_docs = [d for d in course_docs if d.get("status") == "completed" and d.get("analysis")]
+    if payload.document_ids:
+        by_id = {d.get("id"): d for d in course_docs}
+        course_docs = [by_id[i] for i in payload.document_ids if i in by_id]
+    doc_titles = [(d.get("title") or "") for d in course_docs]
+    title = _compose_summary_title(doc_titles, summary.get("title"))
+
     doc_db_id = db_client.save_summary(payload.user_id, payload.course_id, {
         "summaryId": summary_id,
         "title": title,
