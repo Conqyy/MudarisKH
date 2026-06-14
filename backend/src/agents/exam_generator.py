@@ -203,16 +203,36 @@ class ExamGeneratorAgent:
             hist_parts = []
             for h in historical_analysis:
                 weights = h.get("topicWeights", [])[:15]
-                # Flag each past-exam topic against the CURRENT course scope. A
-                # topic not covered by today's lecture documents was likely
-                # removed from the course — mark it so the model excludes it.
-                def _weight_line(w):
-                    topic = w.get("topic", "")
-                    base = f"- {topic}: {w.get('weight', 0):.0%} ({w.get('questionCount', 0)} questions)"
-                    if course_topics and topic and not _topic_in_scope(topic, scope_words):
-                        base += "   [OUT OF SCOPE — not in current lecture documents; DO NOT ask this; replace with an in-scope topic of the same type/marks]"
-                    return base
-                weights_str = "\n".join([_weight_line(w) for w in weights])
+                # Re-weight against the CURRENT course scope. Topics removed from
+                # the syllabus shouldn't count toward the distribution, so we drop
+                # them and RENORMALIZE the in-scope topics to sum to 100% — their
+                # share absorbs the removed topics' weight. (Keeping the raw past-
+                # exam weights would understate the in-scope topics.)
+                if course_topics:
+                    in_scope = [w for w in weights if _topic_in_scope(w.get("topic", ""), scope_words)]
+                    out_scope = [w for w in weights if not _topic_in_scope(w.get("topic", ""), scope_words)]
+                    total_in = sum(float(w.get("weight", 0) or 0) for w in in_scope) or 1.0
+                    lines = [
+                        f"- {w.get('topic', '')}: {float(w.get('weight', 0) or 0) / total_in:.0%}"
+                        f" ({w.get('questionCount', 0)} questions in the old exam)"
+                        for w in in_scope
+                    ]
+                    for w in out_scope:
+                        lines.append(
+                            f"- {w.get('topic', '')}: REMOVED FROM COURSE — not in the current "
+                            "lecture documents; DO NOT ask this. Its questions are reassigned to the "
+                            "in-scope topics above (keep the same question type and marks)."
+                        )
+                    weights_str = "\n".join(lines)
+                    weights_str += (
+                        "\n(The in-scope percentages above are renormalized to total 100% over the "
+                        "topics still in the course — distribute questions/marks by these.)"
+                    )
+                else:
+                    weights_str = "\n".join([
+                        f"- {w.get('topic', '')}: {w.get('weight', 0):.0%} ({w.get('questionCount', 0)} questions)"
+                        for w in weights
+                    ])
                 qtypes = h.get("questionTypes", [])[:10]
                 # Give the EXACT count of each question type (not just %), so the
                 # generated exam reproduces the same number of MCQs, etc.
