@@ -8,82 +8,21 @@ from src.utils.ai_retry import chat_with_retry
 
 logger = logging.getLogger("MudarisExamGenerator")
 
-# Generic words that shouldn't decide whether a topic is "in the course".
-_SCOPE_STOPWORDS = {
-    "the", "and", "for", "with", "that", "this", "from", "into", "using", "use",
-    "based", "introduction", "overview", "concepts", "concept", "fundamentals",
-    "basics", "topic", "topics", "chapter", "section", "part", "general",
-    "review", "advanced", "basic", "methods", "method", "analysis", "design",
-    "system", "systems", "problem", "problems",
-}
 
-
-def _core_words(text: str) -> set:
-    """Meaningful lowercase words (drops generic/stop words)."""
-    return {
-        w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
-        if len(w) > 2 and w not in _SCOPE_STOPWORDS
-    }
-
-
-def _variants(w: str) -> set:
-    """A word plus its singular form, so plural/singular phrasing differences
-    (e.g. "trees" vs "tree") still match."""
-    v = {w}
-    if w.endswith("ies") and len(w) > 4:
-        v.add(w[:-3] + "y")
-    elif w.endswith("es") and len(w) > 4:
-        v.add(w[:-2])
-    if w.endswith("s") and len(w) > 3:
-        v.add(w[:-1])
-    return v
-
-
-def _scope_words(text: str) -> set:
-    """Expanded word set (with singular variants) used to build course scope."""
-    out = set()
-    for w in _core_words(text):
-        out |= _variants(w)
-    return out
-
-
-def _course_scope_from_docs(document_insights: list) -> tuple:
-    """Build (display_topics, scope_word_set) from the current lecture documents.
-    These define the course as taught NOW — the authoritative topic whitelist."""
-    display, words = [], set()
+def _course_topic_list(document_insights: list) -> list:
+    """The current course's topic whitelist (display only), from the lecture
+    documents. Used as context for generation — the in/out-of-scope DECISION for
+    past-exam topics is made by the Historical Exam Analyzer, not here."""
+    seen, out = set(), []
     for doc in document_insights or []:
-        for t in (doc.get("topics", []) or []):
+        title = re.sub(r"^\s*\d+\s*[-.)]\s*", "", (doc.get("documentTitle") or "")).strip()
+        names = ([title] if title else []) + list(doc.get("topics", []) or [])
+        for t in names:
             t = (t or "").strip()
-            if t:
-                display.append(t)
-                words |= _scope_words(t)
-        for d in (doc.get("definitions", []) or [])[:25]:
-            if isinstance(d, dict) and d.get("term"):
-                words |= _scope_words(d["term"])
-        for dg in (doc.get("diagrams", []) or [])[:15]:
-            if isinstance(dg, dict) and dg.get("name"):
-                words |= _scope_words(dg["name"])
-    # De-dup display list while preserving order.
-    seen, uniq = set(), []
-    for t in display:
-        k = t.lower()
-        if k not in seen:
-            seen.add(k)
-            uniq.append(t)
-    return uniq, words
-
-
-def _topic_in_scope(topic: str, scope_words: set) -> bool:
-    """A past-exam topic is in scope only if MOST of its distinctive words are
-    covered by the current course documents — not just one shared word. This
-    distinguishes e.g. "Linear Programming" (only the generic "programming"
-    overlaps a course that teaches "Dynamic Programming") from a genuine match.
-    Topics with no extractable words are treated as in scope (can't judge)."""
-    core = _core_words(topic)
-    if not core:
-        return True
-    matched = sum(1 for w in core if _variants(w) & scope_words)
-    return matched / len(core) > 0.5
+            if t and t.lower() not in seen:
+                seen.add(t.lower())
+                out.append(t)
+    return out
 
 
 class ExamGeneratorAgent:
@@ -174,11 +113,11 @@ class ExamGeneratorAgent:
                 doc_parts.append(part)
             doc_section = "\n--- DOCUMENT ANALYSIS SUMMARY ---\n" + "\n\n".join(doc_parts)
 
-        # COURSE SCOPE: the current lecture documents define the topics that are
-        # actually in the course NOW. We use this to (a) give the model an
-        # explicit allow-list and (b) flag past-exam topics that have since been
-        # removed from the course, so out-of-scope questions aren't generated.
-        course_topics, scope_words = _course_scope_from_docs(document_insights)
+        # COURSE SCOPE: the current lecture documents' topics, shown as the
+        # allow-list. Whether each PAST-EXAM topic is in/out of this scope is
+        # decided by the Historical Exam Analyzer (stored as inScope per topic);
+        # here we just present that decision to the model.
+        course_topics = _course_topic_list(document_insights)
         scope_section = ""
         if course_topics:
             scope_section = (
@@ -203,14 +142,14 @@ class ExamGeneratorAgent:
             hist_parts = []
             for h in historical_analysis:
                 weights = h.get("topicWeights", [])[:15]
-                # Re-weight against the CURRENT course scope. Topics removed from
-                # the syllabus shouldn't count toward the distribution, so we drop
-                # them and RENORMALIZE the in-scope topics to sum to 100% — their
-                # share absorbs the removed topics' weight. (Keeping the raw past-
-                # exam weights would understate the in-scope topics.)
-                if course_topics:
-                    in_scope = [w for w in weights if _topic_in_scope(w.get("topic", ""), scope_words)]
-                    out_scope = [w for w in weights if not _topic_in_scope(w.get("topic", ""), scope_words)]
+                # Use the in/out-of-scope decision the ANALYZER already made and
+                # stored (inScope per topic). Topics removed from the syllabus
+                # (inScope == False) are dropped and the remaining in-scope topics
+                # are RENORMALIZED to sum to 100% so their share absorbs the
+                # removed topics' weight.
+                if any(w.get("inScope") is False for w in weights):
+                    in_scope = [w for w in weights if w.get("inScope") is not False]
+                    out_scope = [w for w in weights if w.get("inScope") is False]
                     total_in = sum(float(w.get("weight", 0) or 0) for w in in_scope) or 1.0
                     lines = [
                         f"- {w.get('topic', '')}: {float(w.get('weight', 0) or 0) / total_in:.0%}"

@@ -27,7 +27,8 @@ class HistoricalExamAnalyzer:
         from src.utils.pdf_extract import extract_pdf_text
         return extract_pdf_text(file_bytes)
 
-    def analyze_exam(self, text: str, course_title: str, image_uris: list = None) -> dict:
+    def analyze_exam(self, text: str, course_title: str, image_uris: list = None,
+                     document_insights: list = None) -> dict:
         logger.info(f"Analyzing historical exam for course: {course_title}"
                     + (f" (+{len(image_uris)} page images)" if image_uris else ""))
 
@@ -93,4 +94,35 @@ class HistoricalExamAnalyzer:
                 "re-analyzing — the model may have been overloaded."
             )
 
+        # Scope check: decide HERE (at analysis time) whether each of this past
+        # exam's topics is still covered by the course's current lecture
+        # documents. The result is stored on the analysis so the generator just
+        # reads the flag — it never re-decides scope itself.
+        self.tag_topic_scope(result, document_insights)
+
+        return result
+
+    @staticmethod
+    def tag_topic_scope(result: dict, document_insights: list) -> dict:
+        """Annotate each topicWeight with inScope (True/False) against the course's
+        current lecture documents, and add a top-level outOfCourseTopics list.
+        If no documents are available, scope is left undetermined (inScope=None)."""
+        from src.utils.topic_scope import course_scope_from_docs, topic_in_scope
+
+        topics = result.get("topicWeights") or []
+        _, words = course_scope_from_docs(document_insights)
+        out_of_course = []
+        for w in topics:
+            name = w.get("topic", "")
+            if not words:                 # no documents → can't judge scope
+                w["inScope"] = None
+                continue
+            in_scope = topic_in_scope(name, words)
+            w["inScope"] = in_scope
+            if not in_scope and name:
+                out_of_course.append(name)
+        result["outOfCourseTopics"] = out_of_course
+        result["scopeChecked"] = bool(words)
+        if out_of_course:
+            logger.info(f"Past exam: {len(out_of_course)} topic(s) no longer in the course: {', '.join(out_of_course)}")
         return result

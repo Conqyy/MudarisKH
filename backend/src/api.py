@@ -349,6 +349,27 @@ ALLOWED_DOC_TYPES = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
 }
 
+
+def _recheck_past_exam_scope(course_id: str):
+    """Re-tag every past exam's topics as in/out of the CURRENT course (using the
+    Historical Exam Analyzer's scope logic). Cheap — pure string match, no LLM
+    call. Called when the course's documents change so the analyzer's scope
+    decision stays current even if a past exam was uploaded before the lectures."""
+    try:
+        intel = db_client.get_course_intelligence(course_id)
+        doc_insights = intel.get("document_analyses", [])
+        if not doc_insights:
+            return
+        for h in db_client.get_course_historical_exams(course_id):
+            analysis = h.get("analysis") or {}
+            if not analysis.get("topicWeights"):
+                continue
+            hist_analyzer.tag_topic_scope(analysis, doc_insights)
+            db_client.update_historical_exam(h.get("id"), {"analysis": analysis})
+    except Exception as e:
+        logger.warning(f"Past-exam scope re-check failed for course {course_id}: {e}")
+
+
 @app.post("/api/documents/upload")
 async def upload_document(
     file: UploadFile = File(...),
@@ -437,6 +458,10 @@ async def upload_document(
             "processedAt": int(_time.time() * 1000),
         })
         logger.info(f"Document {doc_id} processed successfully.")
+
+        # A new document changes the course scope — refresh the in/out-of-course
+        # tags on this course's already-analyzed past exams.
+        _recheck_past_exam_scope(course_id)
 
         return {
             "status": "success",
@@ -679,7 +704,15 @@ async def upload_historical_exam(
             extracted_text = ""
             page_images = [image_to_image_uri(file_bytes)]
 
-        analysis = hist_analyzer.analyze_exam(extracted_text, course_title, image_uris=page_images)
+        # Pass the course's CURRENT lecture-document analyses so the analyzer can
+        # tag each past-exam topic as in/out of the course as it is taught now.
+        course_intel = db_client.get_course_intelligence(course_id)
+        document_insights = course_intel.get("document_analyses", [])
+
+        analysis = hist_analyzer.analyze_exam(
+            extracted_text, course_title, image_uris=page_images,
+            document_insights=document_insights,
+        )
 
         db_client.update_historical_exam(exam_id, {
             "extractedText": extracted_text[:50000],

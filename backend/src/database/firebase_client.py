@@ -414,7 +414,14 @@ class FirebaseClient:
         completed_docs = [d for d in docs if d.get("status") == "completed" and d.get("analysis")]
         if document_ids:
             completed_docs = [d for d in completed_docs if d.get("id") in document_ids]
-        doc_analyses = [d.get("analysis", {}) for d in completed_docs]
+        # Merge the document's title into its analysis — the title is often the
+        # clearest topic name (e.g. "13- NP-Completeness") and is used for course
+        # scope matching alongside the extracted topics.
+        doc_analyses = []
+        for d in completed_docs:
+            a = dict(d.get("analysis", {}) or {})
+            a.setdefault("documentTitle", d.get("title", ""))
+            doc_analyses.append(a)
         doc_texts = [d.get("extractedText", "") for d in completed_docs if d.get("extractedText")]
 
         completed_audio = [a for a in audio if a.get("status") == "completed" and a.get("insights")]
