@@ -2050,6 +2050,86 @@ def _compose_summary_title(doc_titles: list, llm_title: str | None) -> str:
     return (llm_title or "").strip() or f"Summary · {_time.strftime('%b %d')}"
 
 
+def _parse_exclusions(instructions: str) -> list:
+    """Pull excluded-topic phrases out of free-text custom instructions, e.g.
+    "don't include Division & Additional Operations" -> ["Division & Additional
+    Operations"]. Used as a safety net so an excluded topic is stripped even if
+    the model ignores the instruction."""
+    text = (instructions or "").replace("’", "'")
+    pat = re.compile(
+        r"(?:do not|don'?t|exclude|omit|skip|without|remove|leave out|ignore)\s+"
+        r"(?:include|including|add|adding|cover|covering|mention(?:ing)?|have|put|the|any)?\s*[:\-]?\s*"
+        r"(.+?)(?=\s+(?:in chapter|in the|from |for chapter|chapter\b)|[.\n;]|$)",
+        re.IGNORECASE,
+    )
+    out = []
+    for m in pat.finditer(text):
+        ph = m.group(1).strip(" .,:;-–")
+        if len(ph) > 2:
+            out.append(ph)
+    return out
+
+
+def _apply_summary_exclusions(summary: dict, instructions: str) -> dict:
+    """Remove any section / keyTerm / examFocus that matches a topic the user
+    asked to exclude. Conservative: only drops entries that share most of an
+    excluded phrase's words or >= 2 distinctive words, so it won't over-prune."""
+    from src.utils.topic_scope import core_words, variants
+    phrases = _parse_exclusions(instructions)
+    if not phrases:
+        return summary
+
+    # An exclusion like "Division & Additional Operations (Outer Join, Outer
+    # Union)" is really a LIST. Split it into sub-phrases so a section is removed
+    # only if it strongly matches one of the listed items — not just because it
+    # shares a generic word ("operations", "join") with the whole phrase.
+    excl_subs = []
+    for phrase in phrases:
+        for part in re.split(r"[&/,()]|\band\b|\bor\b", phrase, flags=re.IGNORECASE):
+            w = core_words(part)
+            if w:
+                excl_subs.append(w)
+        whole = core_words(phrase)
+        if whole and whole not in excl_subs:
+            excl_subs.append(whole)
+    if not excl_subs:
+        return summary
+
+    def expand(words: set) -> set:
+        out = set()
+        for w in words:
+            out |= variants(w)
+        return out
+
+    def is_excluded(text: str) -> bool:
+        tw = expand(core_words(text))
+        if not tw:
+            return False
+        for sub in excl_subs:
+            matched = sum(1 for w in sub if variants(w) & tw)
+            # Require most of the sub-phrase's words to be present, so generic
+            # single-word overlaps (e.g. "operations") don't trigger removal.
+            if sub and matched / len(sub) >= 0.6:
+                return True
+        return False
+
+    before = len(summary.get("sections", []) or [])
+    summary["sections"] = [
+        s for s in (summary.get("sections", []) or [])
+        if not is_excluded(f"{s.get('heading', '')} {s.get('content', '')[:120]}")
+    ]
+    summary["keyTerms"] = [
+        t for t in (summary.get("keyTerms", []) or []) if not is_excluded(t.get("term", ""))
+    ]
+    summary["examFocus"] = [
+        f for f in (summary.get("examFocus", []) or []) if not is_excluded(f)
+    ]
+    removed = before - len(summary["sections"])
+    if removed:
+        logger.info(f"Summary: stripped {removed} section(s) matching user exclusion(s) {phrases}")
+    return summary
+
+
 @app.post("/api/summaries/generate")
 def generate_summary_endpoint(payload: SummaryGenerateRequest):
     import uuid
@@ -2081,6 +2161,10 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest):
 
     if not summary or not summary.get("sections"):
         raise HTTPException(status_code=422, detail="Could not generate a summary. Make sure documents are analyzed.")
+
+    # Safety net: strip any topic the user asked to exclude, in case the model
+    # still included it despite the instruction.
+    summary = _apply_summary_exclusions(summary, payload.instructions)
 
     # Replace the LLM's eyeballed exam weights with values DERIVED from the past
     # exams' topic weights (when past exams are available), so the percentages

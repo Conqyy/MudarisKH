@@ -694,12 +694,21 @@ class ExamGeneratorAgent:
 
         topics_line = ", ".join(topics) if topics else "All key topics"
         custom_block = ""
+        exclusion_reminder = ""
         if (instructions or "").strip():
             custom_block = (
-                "=== USER'S CUSTOM INSTRUCTIONS (HIGHEST PRIORITY — follow these "
-                "closely; they override the defaults below where they conflict) ===\n"
+                "=== USER'S CUSTOM INSTRUCTIONS (HIGHEST PRIORITY — follow these EXACTLY; "
+                "they OVERRIDE every default rule below where they conflict) ===\n"
                 f"{instructions.strip()}\n"
+                "If these instructions EXCLUDE/omit/skip a topic, that topic must NOT appear "
+                "anywhere in the output (no section, heading, keyPoint, keyTerm, or examFocus) "
+                "even though the guidance below says to cover everything.\n"
                 "(Still return the same JSON schema.)\n\n"
+            )
+            exclusion_reminder = (
+                "\n- REMINDER: obey the user's custom instructions above. If they asked to "
+                "EXCLUDE a topic, leave it out ENTIRELY — do NOT create a section, keyPoint, "
+                "keyTerm, or examFocus for it, even though it appears in the materials/past exams."
             )
         user_payload = (
             custom_block
@@ -715,7 +724,9 @@ class ExamGeneratorAgent:
             f"- For EVERY tutorial practice problem, explain the underlying concept AND the "
             f"step-by-step method/formula for solving that problem type (these reappear on exams).\n"
             f"- Produce a long, comprehensive keyTerms list (aim for 20-40 terms) drawn from the "
-            f"lectures, past exams, and tutorials.\n\n"
+            f"lectures, past exams, and tutorials."
+            + exclusion_reminder
+            + "\n\n"
             + "\n\n".join(sections)
         )
 
