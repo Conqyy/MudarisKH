@@ -31,7 +31,7 @@ class ExamGeneratorAgent:
             api_key=settings.OPENROUTER_API_KEY,
             base_url=settings.OPENROUTER_BASE_URL,
             default_headers={
-                "HTTP-Referer": "[https://mudaris-app.com](https://mudaris-app.com)",
+                "HTTP-Referer": "https://mudaris-app.com",
                 "X-Title": "Mudaris AI Engine"
             }
         )
