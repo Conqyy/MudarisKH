@@ -9,6 +9,33 @@ from src.utils.ai_retry import chat_with_retry
 logger = logging.getLogger("MudarisExamGenerator")
 
 
+def _as_text(item) -> str:
+    """Coerce an analysis item to a display string. Some documents store
+    topics / formulas / workedExamples as dicts (e.g. {"title":..,"solution":..})
+    instead of plain strings — handle both so ", ".join(...) never crashes."""
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict):
+        for k in ("statement", "problem", "title", "name", "text", "description",
+                  "example", "formula", "equation", "topic", "term", "concept", "skill"):
+            v = item.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        parts = [str(v).strip() for v in item.values()
+                 if isinstance(v, (str, int, float)) and str(v).strip()]
+        return " — ".join(parts) if parts else ""
+    return str(item).strip() if item is not None else ""
+
+
+def _join_texts(items, sep: str = ", ", limit: int | None = None) -> str:
+    """Join a list of analysis items into a string, tolerating dict/non-string
+    items (see _as_text). Replaces bare ", ".join(...) on raw analysis lists."""
+    items = list(items or [])
+    if limit is not None:
+        items = items[:limit]
+    return sep.join(t for t in (_as_text(i) for i in items) if t)
+
+
 def _course_topic_list(document_insights: list) -> list:
     """The current course's topic whitelist (display only), from the lecture
     documents. Used as context for generation — the in/out-of-scope DECISION for
@@ -94,15 +121,15 @@ class ExamGeneratorAgent:
         if document_insights:
             doc_parts = []
             for doc in document_insights:
-                topics_str = ", ".join(doc.get("topics", [])[:20])
-                formulas_str = ", ".join(doc.get("formulas", [])[:10])
+                topics_str = _join_texts(doc.get("topics"), ", ", 20)
+                formulas_str = _join_texts(doc.get("formulas"), ", ", 10)
                 defs = doc.get("definitions", [])[:10]
                 defs_str = "; ".join([f"{d['term']}: {d['definition']}" for d in defs if 'term' in d])
                 diags = doc.get("diagrams", [])[:8]
                 diag_str = "; ".join([d.get("name", "") for d in diags if d.get("name")])
                 code = doc.get("codeSnippets", [])[:6]
                 code_str = "; ".join([f"{c.get('language','')}: {c.get('purpose','')}" for c in code if c.get('purpose')])
-                examples = ", ".join(doc.get("workedExamples", [])[:6])
+                examples = _join_texts(doc.get("workedExamples"), ", ", 6)
                 part = f"Topics: {topics_str}\nFormulas/equations: {formulas_str}\nDefinitions: {defs_str}"
                 if diag_str:
                     part += f"\nDiagrams: {diag_str}"
@@ -181,7 +208,7 @@ class ExamGeneratorAgent:
                     for q in qtypes
                 ])
                 total_q = h.get("totalQuestions", 0)
-                skills_str = ", ".join(h.get("skills", [])[:10])
+                skills_str = _join_texts(h.get("skills"), ", ", 10)
                 patterns_str = "\n".join([f"  - {p}" for p in h.get("patterns", [])[:8]])
                 part = f"Total questions on this exam: {total_q}\n"
                 part += f"Topic Weights:\n{weights_str}\n"
@@ -214,7 +241,7 @@ class ExamGeneratorAgent:
         tut_parts = []
         if tutorial_insights:
             for t in tutorial_insights:
-                topics_str = ", ".join(t.get("topics", [])[:15])
+                topics_str = _join_texts(t.get("topics"), ", ", 15)
                 header = f"Topics practiced: {topics_str}" if topics_str else ""
                 # New tutorial schema: a list of solvable problems.
                 problems = t.get("problems", [])[:12]
@@ -222,7 +249,7 @@ class ExamGeneratorAgent:
                 for p in problems:
                     label = p.get("label", "")
                     statement = p.get("statement", "")
-                    asks = "; ".join(p.get("asks", [])[:5])
+                    asks = _join_texts(p.get("asks"), "; ", 5)
                     concept = p.get("concept", "")
                     method = p.get("method", "")
                     given = p.get("given", "")
@@ -242,10 +269,10 @@ class ExamGeneratorAgent:
                              + "\n".join(prob_lines))
                 # Fallback for older tutorials analyzed with the document schema.
                 if not problems:
-                    examples = ", ".join(t.get("workedExamples", [])[:8])
+                    examples = _join_texts(t.get("workedExamples"), ", ", 8)
                     if examples:
                         part += f"\nWorked problems / exercises: {examples}"
-                formulas_str = ", ".join(t.get("formulas", [])[:10])
+                formulas_str = _join_texts(t.get("formulas"), ", ", 10)
                 if formulas_str:
                     part += f"\nFormulas/methods used: {formulas_str}"
                 if part.strip():
@@ -609,7 +636,7 @@ class ExamGeneratorAgent:
         problem ideas + methods) — shared by summary/flashcard generation."""
         parts = []
         for t in (tutorial_insights or []):
-            topics_str = ", ".join(t.get("topics", [])[:15])
+            topics_str = _join_texts(t.get("topics"), ", ", 15)
             block = f"Topics practiced: {topics_str}" if topics_str else ""
             lines = []
             for p in t.get("problems", [])[:max_problems]:
@@ -623,7 +650,7 @@ class ExamGeneratorAgent:
             if lines:
                 block += "\nPractice problems & how to solve them:\n" + "\n".join(lines)
             elif t.get("workedExamples"):
-                block += "\nExercises: " + ", ".join(t.get("workedExamples", [])[:8])
+                block += "\nExercises: " + _join_texts(t.get("workedExamples"), ", ", 8)
             if block.strip():
                 parts.append(block)
         if tutorial_texts:
@@ -649,10 +676,10 @@ class ExamGeneratorAgent:
         if document_insights:
             parts = []
             for doc in document_insights:
-                topics_str = ", ".join(doc.get("topics", [])[:20])
+                topics_str = _join_texts(doc.get("topics"), ", ", 20)
                 defs = doc.get("definitions", [])[:15]
                 defs_str = "; ".join([f"{d['term']}: {d['definition']}" for d in defs if 'term' in d])
-                formulas_str = ", ".join(doc.get("formulas", [])[:10])
+                formulas_str = _join_texts(doc.get("formulas"), ", ", 10)
                 parts.append(f"Topics: {topics_str}\nDefinitions: {defs_str}\nFormulas: {formulas_str}")
             sections.append("--- DOCUMENT ANALYSIS ---\n" + "\n\n".join(parts))
         if audio_insights:
@@ -815,10 +842,10 @@ class ExamGeneratorAgent:
         if document_insights:
             parts = []
             for doc in document_insights:
-                topics_str = ", ".join(doc.get("topics", [])[:20])
+                topics_str = _join_texts(doc.get("topics"), ", ", 20)
                 defs = doc.get("definitions", [])[:15]
                 defs_str = "; ".join([f"{d['term']}: {d['definition']}" for d in defs if 'term' in d])
-                formulas_str = ", ".join(doc.get("formulas", [])[:10])
+                formulas_str = _join_texts(doc.get("formulas"), ", ", 10)
                 parts.append(f"Topics: {topics_str}\nDefinitions: {defs_str}\nFormulas: {formulas_str}")
             sections.append("--- DOCUMENT ANALYSIS ---\n" + "\n\n".join(parts))
         if document_texts:

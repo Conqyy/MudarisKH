@@ -56,6 +56,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# Catch-all: log the FULL traceback for any unhandled error and return the real
+# reason to the client, instead of a bare "Internal Server Error" with no detail.
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request, exc):
+    import traceback
+    from fastapi.responses import JSONResponse
+    logger.error(
+        f"Unhandled error on {request.method} {request.url.path}: "
+        f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}"},
+    )
+
 # تهيئة عملاء الاتصال بقاعدة البيانات والذكاء الاصطناعي - نقوم هنا بتمرير كائن الإعدادات المورد من الـ Canvas
 db_client = FirebaseClient(settings)
 ai_agent = ExamGeneratorAgent()
