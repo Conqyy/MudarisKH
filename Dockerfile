@@ -15,7 +15,7 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     fontconfig \
-    fonts-amiri \
+    fonts-hosny-amiri \
     latexmk \
     texlive-latex-base \
     texlive-latex-recommended \
