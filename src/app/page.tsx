@@ -25,12 +25,6 @@ export default function Home() {
       <main className="pt-20">
         {/* ============ HERO ============ */}
         <section className="px-6 md:px-12 pt-20 pb-32 max-w-7xl mx-auto relative">
-          {/* Badge */}
-          <div className="inline-flex items-center gap-2 bg-paper border border-line px-3.5 py-1.5 rounded-full text-xs text-ink-soft mb-8 font-mono">
-            <span className="w-1.5 h-1.5 bg-sage rounded-full animate-pulse-soft"></span>
-            {t("AI · Built for Saudi Students")}
-          </div>
-
           <h1 className="font-serif text-5xl md:text-7xl lg:text-8xl font-normal leading-[0.95] tracking-tight mb-8 max-w-5xl">
             {t("Your lectures,")}{" "}
             <em className="italic font-light text-accent">{t("finally")}</em>

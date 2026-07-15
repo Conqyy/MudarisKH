@@ -15,7 +15,7 @@ const FEEDBACK_URL = "";
 export default function Navbar() {
   const router = useRouter();
   const { user, profile, signOut, loading } = useAuth();
-  const { t, lang, toggle } = useLang();
+  const { t } = useLang();
   const { theme, toggle: toggleTheme } = useTheme();
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -135,14 +135,6 @@ export default function Navbar() {
           title={theme === "dark" ? t("Switch to light mode") : t("Switch to dark mode")}
         >
           {theme === "dark" ? "☀" : "☾"}
-        </button>
-        {/* Language toggle (Arabic ⇄ English) */}
-        <button
-          onClick={toggle}
-          className="px-3 py-1.5 rounded-full border border-line hover:bg-bg-alt text-xs font-medium text-ink-soft transition"
-          title={lang === "ar" ? "Switch to English" : "التبديل إلى العربية"}
-        >
-          {lang === "ar" ? "EN" : "ع"}
         </button>
         {loading ? (
           <div className="w-28 h-10 bg-bg-alt rounded-full animate-pulse"></div>
