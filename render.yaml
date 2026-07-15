@@ -1,0 +1,46 @@
+# Render blueprint for the Mudaris backend (FastAPI + LaTeX + ffmpeg).
+# Deploy: Render Dashboard → New → Blueprint → pick this repo.
+#
+# TIER: free — the container filesystem is EPHEMERAL. Anything written to
+# backend/uploads/ (uploaded docs, generated exam/summary PDFs) is WIPED on
+# every deploy/restart, and the service sleeps after ~15 min idle (~50s cold
+# start on the next request). Persistent data lives in Firestore, which is
+# unaffected. To keep files across restarts, upgrade `plan` to `starter` and
+# add a `disk:` block mounted at /app/backend/uploads.
+services:
+  - type: web
+    name: mudaris-backend
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /
+    envVars:
+      # --- Secrets: set values in the Render dashboard, do NOT commit them ---
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      # Full service-account JSON, pasted as one line. Read by firebase_client.py.
+      - key: FIREBASE_CREDENTIALS_JSON
+        sync: false
+      # Comma-separated allowed origins; set to your Vercel URL after deploying
+      # the frontend, e.g. https://mudaris.vercel.app
+      - key: CORS_ALLOW_ORIGINS
+        sync: false
+
+      # --- Non-secret config ---
+      - key: OPENROUTER_MODEL
+        value: anthropic/claude-opus-4.8
+      - key: OPENROUTER_BASE_URL
+        value: https://openrouter.ai/api/v1
+      - key: OPENROUTER_MAX_TOKENS
+        value: "8192"
+      - key: GROQ_WHISPER_MODEL
+        value: whisper-large-v3
+      - key: AUDIO_ARABIC_FONT
+        value: Amiri
+      - key: STORAGE_BUCKET
+        value: mudariskh-e74a3.firebasestorage.app
+      - key: PYTHON_VERSION
+        value: "3.11.9"

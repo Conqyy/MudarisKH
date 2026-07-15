@@ -1,0 +1,41 @@
+# Keep the backend image small and secret-free.
+# The build context is the repo root, but the image only needs backend/.
+
+# Frontend — never needed in the backend image
+node_modules
+.next
+src
+public
+package.json
+package-lock.json
+next.config.mjs
+next-env.d.ts
+postcss.config.mjs
+tailwind.config.ts
+tsconfig.json
+.eslintrc.json
+.env.local
+
+# VCS / tooling
+.git
+.gitignore
+.claude
+docs
+README.md
+
+# Python local artifacts
+backend/venv
+backend/.venv
+backend/env
+**/__pycache__
+**/*.pyc
+
+# Secrets — supplied via Render env vars, must NOT be baked into the image
+backend/.env
+backend/src/config/firebase-key.json
+**/firebase-key.json
+
+# Runtime-generated data — ephemeral, not part of the build
+backend/uploads
+backend/mudaris_local_db.json
+mudaris_local_db.json
