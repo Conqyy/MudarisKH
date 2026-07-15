@@ -47,10 +47,13 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# تفعيل الـ CORS لتسمح لصفحة الـ HTML بالاتصال بالخادم حتى لو كانت تعمل محلياً كملف عادي في المتصفح
+# CORS: allow the frontend (local dev + the deployed Vercel domain) to call the API.
+# Default "*" keeps local/dev open; in production set CORS_ALLOW_ORIGINS to a
+# comma-separated list of allowed origins (e.g. https://mudaris.vercel.app).
+_cors_origins = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # يسمح لجميع نطاقات الويب والملفات المحلية بالاتصال بالخادم أثناء الاختبار والتطوير
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -2443,7 +2446,9 @@ def _audio_to_latex(rec: dict) -> str:
         r"\setotherlanguage{arabic}",
         # No \setmainfont: keep XeLaTeX's default Latin Modern (the original
         # serif look). Only Arabic runs use an Arabic-capable font, shaped.
-        r"\newfontfamily\arabicfont[Script=Arabic]{Arial}",
+        # Font family is platform-configurable: Windows dev defaults to "Arial";
+        # the Linux/Docker deploy sets AUDIO_ARABIC_FONT=Amiri (bundled TTF).
+        r"\newfontfamily\arabicfont[Script=Arabic]{" + os.getenv("AUDIO_ARABIC_FONT", "Arial") + r"}",
         r"\usepackage{enumitem}",
         r"\usepackage{parskip}",
         r"\usepackage{eso-pic}",
@@ -2740,4 +2745,8 @@ if __name__ == "__main__":
     # must not be interrupted, so reload is off. Set MUDARIS_RELOAD=1 to enable
     # it during active development.
     _reload = os.getenv("MUDARIS_RELOAD", "0") == "1"
-    uvicorn.run("src.api:app", host="127.0.0.1", port=8000, reload=_reload)
+    # Cloud hosts (Render) inject $PORT and require binding to 0.0.0.0.
+    # Local dev keeps the original 127.0.0.1:8000 defaults.
+    _host = os.getenv("HOST", "127.0.0.1")
+    _port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("src.api:app", host=_host, port=_port, reload=_reload)

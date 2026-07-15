@@ -20,19 +20,32 @@ class FirebaseClient:
         try:
             import firebase_admin
             from firebase_admin import credentials, firestore
-            
-            # Smart key path resolution
+
+            # Credential resolution:
+            #  1) Cloud deploy (e.g. Render) — the whole service-account JSON is
+            #     supplied in the FIREBASE_CREDENTIALS_JSON env var (no file on disk).
+            #  2) Local dev — a firebase-key.json file resolved by path.
+            cred = None
+            cred_json = os.getenv("FIREBASE_CREDENTIALS_JSON")
+            if cred_json:
+                try:
+                    cred = credentials.Certificate(json.loads(cred_json))
+                except Exception as e:
+                    logger.warning(f"⚠️ FIREBASE_CREDENTIALS_JSON is set but invalid ({e}).")
+
+            # Smart key path resolution (used when no env-var credential was given)
             key_path = getattr(settings, 'FIREBASE_KEY_PATH', None)
-            
-            if not key_path or not os.path.exists(key_path):
+
+            if cred is None and (not key_path or not os.path.exists(key_path)):
                 if os.path.exists("src/config/firebase-key.json"):
                     key_path = "src/config/firebase-key.json"
                 elif os.path.exists("config/firebase-key.json"):
                     key_path = "config/firebase-key.json"
-                
-            if key_path and os.path.exists(key_path):
+
+            if cred is not None or (key_path and os.path.exists(key_path)):
                 if not firebase_admin._apps:
-                    cred = credentials.Certificate(key_path)
+                    if cred is None:
+                        cred = credentials.Certificate(key_path)
                     bucket_name = getattr(settings, 'STORAGE_BUCKET', None)
                     init_opts = {}
                     if bucket_name:
