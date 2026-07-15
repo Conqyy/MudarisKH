@@ -38,7 +38,6 @@ export const AR: Record<string, string> = {
   "Delete": "حذف",
   "Edit": "تعديل",
   "Close": "إغلاق",
-  "Add": "إضافة",
   "Generate": "توليد",
   "Download": "تنزيل",
   "Open": "فتح",
@@ -179,7 +178,6 @@ export const AR: Record<string, string> = {
   "Drop recordings or click to browse": "أفلت التسجيلات أو اضغط للاختيار",
   "Drop your recordings here": "أفلت تسجيلاتك هنا",
   "Fetch & Analyze": "اجلب وحلّل",
-  "Video URLs": "روابط فيديو",
   "URLs detected · processed one at a time.": "روابط — تتحلّل وحدة وحدة.",
   "We fetch each video, extract the audio to MP3, and transcribe it.":
     "مُدرّس بيجلب كل فيديو، يطلّع الصوت MP3، ويفرّغه.",
@@ -336,7 +334,6 @@ export const AR: Record<string, string> = {
   "Structured Summaries": "ملخّصات منظّمة",
   "Your chapters become key concepts, definitions, and formulas — with each section tagged high / medium / low likelihood for the exam, based on your past papers.":
     "فصولك تصير مفاهيم وتعاريف ومعادلات — وكل قسم معلّم باحتمال عالي / متوسط / منخفض للاختبار، حسب اختباراتك السابقة.",
-  "Practice Exams": "اختبارات تجريبية",
   "Generate full Quiz, Midterm, or Final practice papers that match the format of your real past exams. Download the PDF, or answer in-app and get auto-graded with explanations.":
     "ولّد اختبارات كويز أو نصفي أو نهائي كاملة تطابق صيغة اختباراتك الحقيقية السابقة. نزّل الـPDF، أو جاوب داخل التطبيق وشوف نموذج الإجابة.",
   "Smart Flashcards": "بطاقات ذكية",
