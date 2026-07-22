@@ -27,26 +27,40 @@ const STEPS = [
   { id: "hints", label: "Extracting exam hints", duration: 4000 },
 ];
 
+// Typed notes skip transcription — same analysis AI, different steps.
+const NOTE_STEPS = [
+  { id: "read", label: "Reading your notes", duration: 4000 },
+  { id: "hints", label: "Extracting exam hints & emphasis", duration: 9000 },
+  { id: "save", label: "Saving to your course", duration: 4000 },
+];
+
 type Phase = "select" | "processing" | "done";
 type ItemStatus = "queued" | "processing" | "done" | "failed";
 
 interface QueueItem {
-  kind: "file" | "url";
-  label: string; // file name or the URL
+  kind: "file" | "url" | "notes";
+  label: string; // file name, the URL, or the notes title
   file?: File;
   url?: string;
+  notesText?: string;
+  notesTitle?: string;
   status: ItemStatus;
   error?: string;
 }
+
+const stepsFor = (item?: QueueItem) =>
+  item?.kind === "notes" ? NOTE_STEPS : STEPS;
 
 export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props) {
   const { user } = useAuth();
   const { t } = useLang();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [mode, setMode] = useState<"file" | "url">("file");
+  const [mode, setMode] = useState<"file" | "url" | "notes">("file");
   const [items, setItems] = useState<QueueItem[]>([]);
   const [urlText, setUrlText] = useState("");
+  const [notesText, setNotesText] = useState("");
+  const [notesTitle, setNotesTitle] = useState("");
   const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState("");
 
@@ -62,7 +76,7 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
     };
   }, []);
 
-  const switchMode = (m: "file" | "url") => {
+  const switchMode = (m: "file" | "url" | "notes") => {
     setMode(m);
     setError("");
     setItems([]);
@@ -149,6 +163,23 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
       }
       return;
     }
+    if (item.kind === "notes") {
+      const res = await fetch(`${API_URL}/api/audio/upload-notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: user!.uid,
+          course_id: courseId,
+          notes: item.notesText,
+          title: item.notesTitle || "",
+        }),
+      });
+      if (!res.ok) {
+        const e = await res.json().catch(() => null);
+        throw new Error(e?.detail || `Analysis failed (${res.status})`);
+      }
+      return;
+    }
     // URL
     const res = await fetch(`${API_URL}/api/audio/upload-url`, {
       method: "POST",
@@ -168,6 +199,7 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
   };
 
   const processOne = async (item: QueueItem): Promise<{ ok: boolean; error?: string }> => {
+    const steps = stepsFor(item);
     setCurrentStep(0);
     setCompleted(new Set());
 
@@ -175,13 +207,13 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
     const uploadPromise = uploadOne(item);
 
     (async () => {
-      for (let i = 0; i < STEPS.length; i++) {
+      for (let i = 0; i < steps.length; i++) {
         if (cancelledRef.current || finished) return;
         setCurrentStep(i);
-        if (i === STEPS.length - 1) return;
-        await new Promise((r) => setTimeout(r, STEPS[i].duration));
+        if (i === steps.length - 1) return;
+        await new Promise((r) => setTimeout(r, steps[i].duration));
         if (cancelledRef.current || finished) return;
-        setCompleted((prev) => new Set(prev).add(STEPS[i].id));
+        setCompleted((prev) => new Set(prev).add(steps[i].id));
       }
     })();
 
@@ -189,8 +221,8 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
       await uploadPromise;
       finished = true;
       if (!cancelledRef.current) {
-        setCompleted(new Set(STEPS.map((s) => s.id)));
-        setCurrentStep(STEPS.length);
+        setCompleted(new Set(steps.map((s) => s.id)));
+        setCurrentStep(steps.length);
       }
       return { ok: true };
     } catch (e: any) {
@@ -244,6 +276,27 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
       url: u,
       status: "queued",
     }));
+    setItems(queue);
+    runQueue(queue);
+  };
+
+  const startNotes = () => {
+    if (!user) return;
+    if (notesText.trim().length < 20) {
+      setError(t("Please write at least a couple of sentences about the lecture."));
+      return;
+    }
+    setError("");
+    const title = notesTitle.trim() || t("Typed Lecture Notes");
+    const queue: QueueItem[] = [
+      {
+        kind: "notes",
+        label: title,
+        notesText: notesText.trim(),
+        notesTitle: notesTitle.trim(),
+        status: "queued",
+      },
+    ];
     setItems(queue);
     runQueue(queue);
   };
@@ -328,6 +381,15 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
               >
                 {t("Paste video URLs")}
               </button>
+              <button
+                type="button"
+                onClick={() => switchMode("notes")}
+                className={`flex-1 py-2 rounded-full text-sm font-medium transition ${
+                  mode === "notes" ? "bg-ink text-paper" : "text-ink-soft hover:text-ink"
+                }`}
+              >
+                {t("Type notes")}
+              </button>
             </div>
 
             {error && (
@@ -339,7 +401,50 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
               </div>
             )}
 
-            {mode === "url" ? (
+            {mode === "notes" ? (
+              <>
+                <label className="block text-sm font-medium text-ink-soft mb-2">
+                  {t("Title (optional)")}
+                </label>
+                <input
+                  type="text"
+                  value={notesTitle}
+                  onChange={(e) => setNotesTitle(e.target.value)}
+                  placeholder={t("e.g. Week 6 — what the prof emphasized")}
+                  maxLength={80}
+                  className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition mb-4"
+                />
+                <label className="block text-sm font-medium text-ink-soft mb-2">
+                  {t("What happened in the lecture?")}{" "}
+                  <span className="text-accent">*</span>
+                </label>
+                <textarea
+                  value={notesText}
+                  onChange={(e) => {
+                    setNotesText(e.target.value);
+                    setError("");
+                  }}
+                  rows={7}
+                  placeholder={t(
+                    "e.g. The professor said section 3 will come in the midterm. He spent most of the time on backpropagation examples and repeated the chain rule twice. Skip the history part — he said it's not on the exam."
+                  )}
+                  className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition mb-2 text-sm leading-relaxed resize-y"
+                />
+                <p className="text-xs text-ink-mute mb-6">
+                  {t(
+                    "The AI extracts exam hints and emphasis from your notes — exam generation and summaries will use them, just like a recording."
+                  )}
+                </p>
+                <button
+                  type="button"
+                  onClick={startNotes}
+                  disabled={notesText.trim().length < 20}
+                  className="w-full bg-[var(--accent)] text-paper py-3.5 rounded-full font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {t("Analyze notes")} →
+                </button>
+              </>
+            ) : mode === "url" ? (
               <>
                 <label className="block text-sm font-medium text-ink-soft mb-2">
                   {t("Video URLs")} <span className="text-accent">*</span>{" "}
@@ -508,7 +613,7 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
 
             {!isDone && (
               <div className="bg-bg border border-line rounded-2xl p-4 text-left mb-5">
-                {STEPS.map((step, i) => {
+                {stepsFor(items[currentIndex]).map((step, i, activeSteps) => {
                   const stepDone = completed.has(step.id);
                   const isActive = i === currentStep && !stepDone;
                   const isPending = i > currentStep;
@@ -516,7 +621,7 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
                     <div
                       key={step.id}
                       className={`flex items-center gap-3 py-2 ${
-                        i < STEPS.length - 1 ? "border-b border-line" : ""
+                        i < activeSteps.length - 1 ? "border-b border-line" : ""
                       } ${isPending ? "opacity-40" : "opacity-100"}`}
                     >
                       <div

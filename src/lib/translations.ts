@@ -180,6 +180,17 @@ export const AR: Record<string, string> = {
 
   // Upload — shared UI
   "Upload files": "ارفع ملفات",
+  "Type notes": "اكتب ملاحظات",
+  "Title (optional)": "العنوان (اختياري)",
+  "e.g. Week 6 — what the prof emphasized": "مثال: الأسبوع ٦ — وش ركّز عليه الدكتور",
+  "What happened in the lecture?": "وش صار في المحاضرة؟",
+  "e.g. The professor said section 3 will come in the midterm. He spent most of the time on backpropagation examples and repeated the chain rule twice. Skip the history part — he said it's not on the exam.":
+    "مثال: الدكتور قال القسم الثالث بيجي في النصفي. قضى أغلب الوقت على أمثلة الـ backpropagation وكرر الـ chain rule مرتين. اترك جزء التاريخ — قال ما بيجي في الاختبار.",
+  "The AI extracts exam hints and emphasis from your notes — exam generation and summaries will use them, just like a recording.":
+    "الذكاء الاصطناعي يستخرج تلميحات الاختبار وتركيز الدكتور من ملاحظاتك — وتوليد الاختبارات والملخصات بيستخدمها، مثل التسجيل تمامًا.",
+  "Analyze notes": "حلّل الملاحظات",
+  "Please write at least a couple of sentences about the lecture.": "اكتب على الأقل جملتين عن المحاضرة.",
+  "Typed Lecture Notes": "ملاحظات محاضرة مكتوبة",
   "Paste video URLs": "الصق روابط فيديو",
   "Drop files or click to browse": "أفلت الملفات أو اضغط للاختيار",
   "Drop recordings or click to browse": "أفلت التسجيلات أو اضغط للاختيار",

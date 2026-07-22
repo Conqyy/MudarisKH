@@ -1133,6 +1133,69 @@ def upload_audio_from_url(payload: AudioUrlRequest):
     return {"status": "success", "recording_id": rec_id}
 
 
+class LectureNotesRequest(BaseModel):
+    user_id: str
+    course_id: str
+    notes: str
+    title: str = ""
+    lecture_id: str = ""
+
+
+@app.post("/api/audio/upload-notes")
+def upload_lecture_notes(payload: LectureNotesRequest):
+    """Typed lecture notes: the student writes what happened in the lecture and
+    what the professor emphasized (e.g. "the prof said section 3 will come in
+    the midterm"). The same AI that analyzes recordings runs on the text — no
+    transcription step — and the insights are saved exactly like a recording's,
+    so exam generation, the intelligence view, and the tutor all use them."""
+    import time as _time
+
+    notes = (payload.notes or "").strip()
+    if len(notes) < 20:
+        raise HTTPException(
+            status_code=400,
+            detail="Please write at least a couple of sentences about the lecture.",
+        )
+
+    title = (payload.title or "").strip() or "Typed Lecture Notes"
+    rec_data = {
+        "title": title,
+        "fileUrl": "",
+        "storagePath": "",
+        "sourceType": "notes",
+        "fileSize": len(notes.encode("utf-8")),
+        "status": "analyzing",
+        "uploadedAt": int(_time.time() * 1000),
+    }
+    if payload.lecture_id:
+        rec_data["lectureId"] = payload.lecture_id
+
+    rec_id = db_client.save_audio_recording(payload.user_id, payload.course_id, rec_data)
+
+    # Give the analyzer honest context: these are a student's notes ABOUT the
+    # lecture, not a verbatim transcript — hints like "section 3 will come in
+    # the midterm" should be treated as high-confidence exam signals.
+    framed = (
+        "[Student's typed notes about this lecture — not a verbatim transcript. "
+        "Statements about what the professor emphasized or promised for the exam "
+        "are first-hand exam hints.]\n\n" + notes
+    )
+    try:
+        insights = audio_agent.analyze_transcript(framed, _resolve_course_title(payload.course_id))
+        db_client.update_audio_recording(rec_id, {
+            "transcript": notes[:50000],
+            "insights": insights,
+            "status": "completed",
+            "processedAt": int(_time.time() * 1000),
+        })
+    except Exception as e:
+        logger.error(f"Notes analysis failed for {rec_id}: {e}")
+        db_client.update_audio_recording(rec_id, {"status": "failed", "errorMessage": str(e)})
+        raise HTTPException(status_code=500, detail=f"Could not analyze the notes: {e}")
+
+    return {"status": "success", "recording_id": rec_id, "title": title}
+
+
 @app.get("/api/audio/{course_id}")
 def get_course_audio_recordings(course_id: str):
     recordings = db_client.get_course_audio_recordings(course_id)
