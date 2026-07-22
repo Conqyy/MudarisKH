@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { Course } from "@/lib/firestore-helpers";
@@ -15,6 +16,12 @@ export default function Sidebar({ courses }: SidebarProps) {
   const router = useRouter();
   const { signOut } = useAuth();
   const { t } = useLang();
+
+  // Archived courses are hidden from the main list, but reachable through a
+  // collapsed "Archived" toggle below it.
+  const visibleCourses = courses.filter((c) => !c.archived);
+  const archivedCourses = courses.filter((c) => c.archived);
+  const [showArchived, setShowArchived] = useState(false);
 
   const handleSignOut = async () => {
     await signOut();
@@ -71,6 +78,44 @@ export default function Sidebar({ courses }: SidebarProps) {
           <span className="text-base opacity-70">★</span>
           {t("Bookmarked")}
         </Link>
+
+        {/* Archived courses — collapsed toggle, muted list */}
+        {archivedCourses.length > 0 && (
+          <>
+            <button
+              onClick={() => setShowArchived((v) => !v)}
+              className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-ink-soft hover:bg-bg-alt hover:text-ink transition mt-0.5"
+            >
+              <span className="text-base opacity-70">🗄</span>
+              <span className="flex-1 text-start truncate">{t("Archived")}</span>
+              <span className="font-mono text-[10px] bg-bg-alt px-1.5 py-0.5 rounded-full">
+                {archivedCourses.length}
+              </span>
+              <span
+                className={`text-[10px] transition-transform ${
+                  showArchived ? "rotate-180" : ""
+                }`}
+              >
+                ▾
+              </span>
+            </button>
+
+            {showArchived &&
+              archivedCourses.map((course) => (
+                <Link
+                  key={course.id}
+                  href={`/course/${course.id}`}
+                  className="flex items-center gap-3 px-3 py-2.5 ps-6 rounded-lg text-sm text-ink-mute hover:bg-bg-alt hover:text-ink transition mb-0.5 opacity-70 hover:opacity-100"
+                >
+                  <span
+                    className="w-2 h-2 rounded-full flex-shrink-0 opacity-50"
+                    style={{ background: course.color }}
+                  />
+                  <span className="truncate">{course.code}</span>
+                </Link>
+              ))}
+          </>
+        )}
       </div>
 
       {/* COURSES */}
@@ -79,10 +124,10 @@ export default function Sidebar({ courses }: SidebarProps) {
           {t("Courses")}
         </div>
 
-        {courses.length === 0 ? (
+        {visibleCourses.length === 0 ? (
           <div className="text-xs text-ink-mute px-3 py-2">{t("No courses yet")}</div>
         ) : (
-          courses.map((course) => (
+          visibleCourses.map((course) => (
             <Link
               key={course.id}
               href={`/course/${course.id}`}
@@ -96,6 +141,7 @@ export default function Sidebar({ courses }: SidebarProps) {
             </Link>
           ))
         )}
+
       </div>
 
       {/* Spacer pushes Account to the bottom and fills the panel */}
