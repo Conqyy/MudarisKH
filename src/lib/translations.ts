@@ -64,6 +64,13 @@ export const AR: Record<string, string> = {
   "analyzed": "تم تحليلها",
   "generated": "تم توليدها",
   "Your courses": "موادك",
+  "Archive course": "أرشفة المادة",
+  "Unarchive": "استرجاع من الأرشيف",
+  "Archived courses": "المواد المؤرشفة",
+  "Archived": "مؤرشفة",
+  "No active courses": "ما عندك مواد نشطة",
+  "All your courses are archived. Restore one below, or create a new course.":
+    "كل موادك مؤرشفة. استرجع وحدة من تحت، أو أنشئ مادة جديدة.",
   "Create your first course, then upload its lecture documents and past exams to generate AI practice exams.":
     "أنشئ أول مادة، بعدها ارفع مستندات محاضراتها واختباراتها السابقة عشان نولّد اختبارات تجريبية.",
   "Create your first course": "أنشئ أول مادة لك",

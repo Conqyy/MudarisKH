@@ -36,6 +36,12 @@ export default function DashboardPage() {
   const [stats, setStats] = useState<Record<string, CourseStats>>({});
   const [dataLoading, setDataLoading] = useState(true);
   const [showCreateCourse, setShowCreateCourse] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+
+  // Archived courses are hidden from the active grid, stats, sidebar, and
+  // reminders; they live in their own collapsible section below.
+  const activeCourses = courses.filter((c) => !c.archived);
+  const archivedCourses = courses.filter((c) => c.archived);
 
   useEffect(() => {
     if (!loading && !user) router.push("/signin");
@@ -109,7 +115,23 @@ export default function DashboardPage() {
     return t("Good evening");
   };
 
-  const totals = courses.reduce(
+  // Archive / restore a course from its card. Optimistic update; reconcile on error.
+  const handleToggleArchive = async (e: React.MouseEvent, course: Course) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const next = !course.archived;
+    setCourses((prev) =>
+      prev.map((c) => (c.id === course.id ? { ...c, archived: next } : c))
+    );
+    try {
+      await updateCourse(course.id, { archived: next });
+    } catch (error) {
+      console.error("Failed to update archive state:", error);
+      loadData();
+    }
+  };
+
+  const totals = activeCourses.reduce(
     (acc, c) => {
       const s = stats[c.id];
       if (s) {
@@ -131,13 +153,13 @@ export default function DashboardPage() {
   };
 
   // Soonest upcoming exam, for the status line
-  const upcomingExam = courses
+  const upcomingExam = activeCourses
     .map((c) => ({ c, d: getDaysUntilExam(c.examDate) }))
     .filter((x) => x.d !== null)
     .sort((a, b) => (a.d! - b.d!))[0];
 
   const getStatusMessage = () => {
-    if (courses.length === 0)
+    if (activeCourses.length === 0)
       return t("Create a course to start building your exam prep.");
     if (upcomingExam)
       return `${upcomingExam.c.code} — ${t("exam in")} ${upcomingExam.d} ${t("days")}`;
@@ -175,7 +197,7 @@ export default function DashboardPage() {
   if (!user) return null;
 
   const statCards = [
-    { label: t("Courses"), value: courses.length, accent: "text-ink", note: t("active subjects") },
+    { label: t("Courses"), value: activeCourses.length, accent: "text-ink", note: t("active subjects") },
     { label: t("Documents"), value: totals.documents, accent: "text-sage", note: t("analyzed") },
     { label: t("Past Exams"), value: totals.historical, accent: "text-gold", note: t("analyzed") },
     { label: t("Practice Exams"), value: totals.generated, accent: "text-accent", note: t("generated") },
@@ -186,7 +208,7 @@ export default function DashboardPage() {
       <Navbar />
 
       <div className="pt-20 flex">
-        <Sidebar courses={courses} />
+        <Sidebar courses={activeCourses} />
 
         <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-7xl mx-auto w-full">
           {/* Header */}
@@ -241,14 +263,18 @@ export default function DashboardPage() {
                   />
                 ))}
               </div>
-            ) : courses.length === 0 ? (
+            ) : activeCourses.length === 0 ? (
               <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-16 text-center">
                 <div className="text-5xl mb-4">📚</div>
                 <h3 className="font-serif text-2xl font-medium mb-2">
-                  {t("No courses yet")}
+                  {archivedCourses.length > 0
+                    ? t("No active courses")
+                    : t("No courses yet")}
                 </h3>
                 <p className="text-ink-soft mb-6 max-w-md mx-auto">
-                  {t("Create your first course, then upload its lecture documents and past exams to generate AI practice exams.")}
+                  {archivedCourses.length > 0
+                    ? t("All your courses are archived. Restore one below, or create a new course.")
+                    : t("Create your first course, then upload its lecture documents and past exams to generate AI practice exams.")}
                 </p>
                 <button
                   onClick={() => setShowCreateCourse(true)}
@@ -259,7 +285,7 @@ export default function DashboardPage() {
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-                {courses.map((course) => {
+                {activeCourses.map((course) => {
                   const daysUntilExam = getDaysUntilExam(course.examDate);
                   const s = stats[course.id] || {
                     documents: 0,
@@ -281,6 +307,13 @@ export default function DashboardPage() {
                         title="Delete course"
                       >
                         ×
+                      </button>
+                      <button
+                        onClick={(e) => handleToggleArchive(e, course)}
+                        className="absolute top-4 right-12 w-7 h-7 rounded-full bg-bg-alt text-ink-mute opacity-0 group-hover:opacity-100 hover:bg-ink hover:text-paper transition flex items-center justify-center text-xs"
+                        title={t("Archive course")}
+                      >
+                        ⤓
                       </button>
 
                       <div className="flex items-center gap-2 mb-2">
@@ -339,17 +372,87 @@ export default function DashboardPage() {
             )}
           </section>
 
-          {/* Reminders — aggregated across all courses */}
+          {/* Archived courses — collapsed by default, restorable */}
+          {!dataLoading && archivedCourses.length > 0 && (
+            <section className="mt-12">
+              <button
+                onClick={() => setShowArchived((v) => !v)}
+                className="w-full flex items-center justify-between bg-bg-alt/60 border border-line rounded-2xl px-6 py-4 hover:bg-bg-alt transition"
+              >
+                <span className="flex items-center gap-3">
+                  <span className="text-lg">🗄</span>
+                  <span className="font-serif text-lg font-medium tracking-tight">
+                    {t("Archived courses")}
+                  </span>
+                  <span className="text-xs font-mono bg-paper border border-line text-ink-mute px-2 py-0.5 rounded-full">
+                    {archivedCourses.length}
+                  </span>
+                </span>
+                <span
+                  className={`text-ink-mute transition-transform ${
+                    showArchived ? "rotate-180" : ""
+                  }`}
+                >
+                  ▾
+                </span>
+              </button>
+
+              {showArchived && (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 mt-5">
+                  {archivedCourses.map((course) => (
+                    <Link
+                      key={course.id}
+                      href={`/course/${course.id}`}
+                      className="group bg-paper/70 border border-line rounded-3xl p-6 hover:shadow-soft transition-all relative block opacity-75 hover:opacity-100"
+                      style={{ borderTop: `4px solid ${course.color}55` }}
+                    >
+                      <button
+                        onClick={(e) => handleDeleteCourse(e, course.id)}
+                        className="absolute top-4 right-4 w-7 h-7 rounded-full bg-bg-alt text-ink-mute opacity-0 group-hover:opacity-100 hover:bg-accent hover:text-paper transition flex items-center justify-center text-sm"
+                        title="Delete course"
+                      >
+                        ×
+                      </button>
+
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="font-mono text-xs text-ink-mute uppercase tracking-widest">
+                          {course.code}
+                        </span>
+                        <span className="text-[10px] font-mono bg-bg-alt text-ink-mute px-2 py-0.5 rounded-full">
+                          {t("Archived")}
+                        </span>
+                      </div>
+                      <h3 className="font-serif text-lg font-medium mb-1 tracking-tight pr-6">
+                        {course.title}
+                      </h3>
+                      <p className="text-sm text-ink-mute mb-4">
+                        {course.instructor}
+                      </p>
+
+                      <button
+                        onClick={(e) => handleToggleArchive(e, course)}
+                        className="text-xs font-medium border border-line px-4 py-2 rounded-full hover:bg-ink hover:text-paper hover:border-ink transition"
+                      >
+                        ↩ {t("Unarchive")}
+                      </button>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* Reminders — aggregated across active courses */}
           {!dataLoading && (
             <DashboardReminders
-              courses={courses}
+              courses={activeCourses}
               onToggle={handleToggleReminder}
             />
           )}
 
           {/* Weekly schedule */}
           <div className="mt-12">
-            {user && <WeeklySchedule userId={user.uid} courses={courses} />}
+            {user && <WeeklySchedule userId={user.uid} courses={activeCourses} />}
           </div>
         </main>
       </div>

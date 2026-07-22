@@ -52,6 +52,9 @@ export interface Course {
   // Student-managed reminders (quizzes, assignments, midterms, etc.) — stored
   // on the course doc since courses are client-writable.
   reminders?: CourseReminder[];
+  // Archived courses are hidden from the active dashboard grid, sidebar, and
+  // stats, but keep all their materials and remain fully restorable.
+  archived?: boolean;
   createdAt: number;
 }
 
