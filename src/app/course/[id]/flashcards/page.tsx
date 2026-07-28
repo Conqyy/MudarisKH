@@ -344,7 +344,9 @@ export default function FlashcardsPage() {
           Select lecture documents
         </h3>
         <p className="text-sm text-ink-soft mb-4">
-          Flashcards are built from these documents, weighted by your past exams and professor emphasis.
+          Cards cover <span className="text-ink font-medium">only</span> the topics in
+          the documents you tick, weighted within that scope by your past exams and
+          professor emphasis.
         </p>
 
         {documents.length === 0 ? (

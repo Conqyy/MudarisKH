@@ -81,6 +81,37 @@ def course_scope_from_docs(document_insights: list) -> tuple:
     return uniq, words
 
 
+def retag_topic_weights(historical_analyses: list, document_insights: list) -> list:
+    """Re-decide each past-exam topic's ``inScope`` flag against the documents
+    the student SELECTED for this generation (not the whole course).
+
+    The Historical Exam Analyzer tags ``inScope`` once at upload time, against
+    every document in the course — so picking only "Chapter 1" would still leave
+    every other chapter's topics flagged in-scope and the past exam would drag
+    the whole course back into the output. Re-tagging here makes the selection
+    the scope: topics outside the selected documents come back ``inScope=False``,
+    which the generators already know how to drop and renormalize around.
+
+    Returns shallow copies (the stored analyses are never mutated). When no
+    documents were selected there is nothing to scope against, so the analyses
+    are returned unchanged and the caller falls back to previous behavior."""
+    _, words = course_scope_from_docs(document_insights)
+    if not words:
+        return historical_analyses or []
+
+    out = []
+    for h in historical_analyses or []:
+        h2 = dict(h or {})
+        weights = []
+        for w in (h2.get("topicWeights") or []):
+            w2 = dict(w or {})
+            w2["inScope"] = topic_in_scope(w2.get("topic", ""), words)
+            weights.append(w2)
+        h2["topicWeights"] = weights
+        out.append(h2)
+    return out
+
+
 def topic_in_scope(topic: str, words: set) -> bool:
     """A past-exam topic is in scope only if MOST of its distinctive words are
     covered by the current course documents — not just one shared word. This

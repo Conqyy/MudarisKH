@@ -2082,6 +2082,8 @@ def _derive_section_exam_weights(sections: list, historical_analyses: list) -> l
     topics = []  # (normalized_word_set, weight)
     for h in historical_analyses or []:
         for tw in (h.get("topicWeights", []) or []):
+            if tw.get("inScope") is False:
+                continue  # outside the selected documents — carries no weight here
             name = tw.get("topic", "")
             w = float(tw.get("weight", 0) or 0)
             words = _topic_word_set(name)
@@ -2212,6 +2214,61 @@ def _apply_summary_exclusions(summary: dict, instructions: str) -> dict:
     return summary
 
 
+def _apply_summary_scope(summary: dict, document_analyses: list) -> dict:
+    """Drop sections about material outside the documents the student SELECTED.
+
+    The prompt already scopes the summary; this is the safety net for when the
+    model drifts back to the whole course because the past exams cover it. A
+    section survives if its heading matches the selected documents' vocabulary,
+    or if its body names enough of that vocabulary to show it really belongs to
+    the selected material — so only sections with no connection at all are cut.
+    (``topic_in_scope`` can't judge the body on its own: it needs MOST of a
+    string's words to match, which a full sentence never manages.)
+
+    Deliberately conservative: with no selected documents there's nothing to
+    scope against, and if the filter would remove more than half the sections we
+    assume the heuristic — not the model — is wrong and keep everything."""
+    from src.utils.topic_scope import (
+        course_scope_from_docs, topic_in_scope, core_words, variants,
+    )
+
+    _, words = course_scope_from_docs(document_analyses)
+    sections = summary.get("sections", []) or []
+    if not words or not sections:
+        return summary
+
+    def body_touches_scope(sec: dict, min_hits: int = 2) -> bool:
+        """True when the section's body names at least `min_hits` DISTINCT
+        in-scope terms — enough signal that it's about the selected material."""
+        text = " ".join(
+            [sec.get("content", "") or ""] + list(sec.get("keyPoints", []) or [])[:8]
+        )
+        hits = {w for w in core_words(text) if variants(w) & words}
+        return len(hits) >= min_hits
+
+    def section_in_scope(sec: dict) -> bool:
+        return topic_in_scope(sec.get("heading", ""), words) or body_touches_scope(sec)
+
+    kept = [s for s in sections if section_in_scope(s)]
+    dropped = len(sections) - len(kept)
+    if not dropped:
+        return summary
+    if len(kept) < len(sections) / 2:
+        logger.warning(
+            f"Summary: scope filter would drop {dropped}/{len(sections)} sections — "
+            "treating that as a bad match and keeping all of them."
+        )
+        return summary
+
+    logger.info(
+        "Summary: dropped %d section(s) outside the selected documents: %s",
+        dropped,
+        ", ".join(s.get("heading", "?") for s in sections if s not in kept),
+    )
+    summary["sections"] = kept
+    return summary
+
+
 @app.post("/api/summaries/generate")
 def generate_summary_endpoint(payload: SummaryGenerateRequest):
     import uuid
@@ -2248,12 +2305,23 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest):
     # still included it despite the instruction.
     summary = _apply_summary_exclusions(summary, payload.instructions)
 
+    # Safety net: strip sections about material outside the SELECTED documents
+    # (e.g. chapters the past exams cover but the student didn't pick).
+    summary = _apply_summary_scope(summary, intelligence.get("document_analyses", []))
+
     # Replace the LLM's eyeballed exam weights with values DERIVED from the past
     # exams' topic weights (when past exams are available), so the percentages
-    # are traceable rather than guessed.
+    # are traceable rather than guessed. Only the weights of topics inside the
+    # selected scope count, so a one-chapter summary's percentages aren't
+    # diluted by the chapters the student left out.
+    from src.utils.topic_scope import retag_topic_weights
+    scoped_hist = retag_topic_weights(
+        intelligence.get("historical_analyses", []),
+        intelligence.get("document_analyses", []),
+    )
     summary["sections"] = _derive_section_exam_weights(
         summary.get("sections", []),
-        intelligence.get("historical_analyses", []),
+        scoped_hist,
     )
 
     # Name the summary after the documents/chapters it was generated from

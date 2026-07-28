@@ -149,7 +149,9 @@ class ExamGeneratorAgent:
         if course_topics:
             scope_section = (
                 "\n--- ALLOWED COURSE TOPICS (HARD SCOPE — only generate questions "
-                "on these; they come from the CURRENT lecture documents) ---\n"
+                "on these; they come from the lecture documents the student SELECTED "
+                "for this exam. Topics from other chapters of the course are OUT OF "
+                "SCOPE even if past exams cover them heavily) ---\n"
                 + ", ".join(course_topics[:60])
             )
 
@@ -163,6 +165,13 @@ class ExamGeneratorAgent:
                 emph_str = "\n".join([f"- [{e.get('emphasisLevel', 'low')}] {e.get('topic', '')}" for e in emphasis])
                 audio_parts.append(f"Exam Hints:\n{hints_str}\nKey Emphasis:\n{emph_str}")
             audio_section = "\n--- AUDIO INTELLIGENCE ---\n" + "\n\n".join(audio_parts)
+
+        # The stored inScope flags were decided at upload time against EVERY
+        # document in the course. Re-decide them against the documents the
+        # student selected for THIS exam, so picking one chapter doesn't let the
+        # past exam pull the whole course back in.
+        from src.utils.topic_scope import retag_topic_weights
+        historical_analysis = retag_topic_weights(historical_analysis, document_insights)
 
         hist_section = ""
         if historical_analysis:
@@ -185,7 +194,7 @@ class ExamGeneratorAgent:
                     ]
                     for w in out_scope:
                         lines.append(
-                            f"- {w.get('topic', '')}: REMOVED FROM COURSE — not in the current "
+                            f"- {w.get('topic', '')}: OUT OF SCOPE — not covered by the SELECTED "
                             "lecture documents; DO NOT ask this. Its questions are reassigned to the "
                             "in-scope topics above (keep the same question type and marks)."
                         )
@@ -230,7 +239,9 @@ class ExamGeneratorAgent:
             combined_hist = "\n\n---\n\n".join([t[:5000] for t in historical_texts[:2]])
             hist_raw_section = (
                 "\n--- SELECTED PAST EXAM(S) RAW TEXT (match this format/sections/question-types AND "
-                "the marks assigned to each question; weight topics by how heavily they appear here) ---\n"
+                "the marks assigned to each question. Use it for FORMAT and for weighting the "
+                "ALLOWED COURSE TOPICS only — a question here about a topic outside the allowed "
+                "scope must be re-asked on an allowed topic, keeping its type and marks) ---\n"
                 + combined_hist[:10000]
             )
 
@@ -669,7 +680,28 @@ class ExamGeneratorAgent:
         Returns {title, overview, sections[], keyTerms[], examFocus[]}."""
         logger.info("Generating study summary from course intelligence...")
 
+        from src.utils.topic_scope import retag_topic_weights
+
+        # Past-exam topics are re-scoped against the documents the student
+        # SELECTED for this summary (their stored inScope flags were decided
+        # against the whole course at upload time). Without this, selecting one
+        # chapter still produced a whole-course summary, because the past exams
+        # cover every chapter and the prompt tells the model to cover them.
+        historical_analysis = retag_topic_weights(historical_analysis, document_insights)
+
         sections = []
+
+        # HARD SCOPE: only the selected documents' topics may appear.
+        course_topics = _course_topic_list(document_insights)
+        if course_topics:
+            sections.append(
+                "--- SELECTED SCOPE (HARD LIMIT — the summary must cover ONLY these "
+                "topics, from the lecture documents the student selected. Any topic "
+                "outside this list is OUT OF SCOPE and gets NO section, keyPoint, "
+                "keyTerm, or examFocus entry — even if the past exams cover it "
+                "heavily) ---\n" + ", ".join(course_topics[:60])
+            )
+
         if document_texts:
             combined = "\n\n---\n\n".join([t[:4000] for t in document_texts[:4]])
             sections.append(f"--- LECTURE CONTENT (primary source) ---\n{combined[:14000]}")
@@ -696,19 +728,29 @@ class ExamGeneratorAgent:
         if historical_analysis:
             parts = []
             for h in historical_analysis:
-                weights = h.get("topicWeights", [])[:15]
+                # Out-of-scope topics are dropped outright — they exist only to
+                # tell the model how the IN-SCOPE topics are weighted.
+                weights = [w for w in h.get("topicWeights", []) if w.get("inScope") is not False][:15]
+                if not weights:
+                    continue
                 weights_str = "\n".join([f"- {w.get('topic','')}: {w.get('weight',0):.0%}" for w in weights])
                 parts.append(f"Exam topic weights (prioritize these):\n{weights_str}")
-            sections.append("--- HISTORICAL EXAM PATTERNS ---\n" + "\n\n".join(parts))
+            if parts:
+                sections.append("--- HISTORICAL EXAM PATTERNS (in-scope topics only) ---\n" + "\n\n".join(parts))
         # The actual past-exam questions: richest source of the specific concepts
-        # the student will be tested on. Make a detailed section covering each.
+        # the student will be tested on — but only for the topics in scope.
         if historical_texts:
             combined_hist = "\n\n---\n\n".join([t[:5000] for t in historical_texts[:2]])
             if combined_hist.strip():
+                scope_note = (
+                    " Cover ONLY the questions whose topic is inside the SELECTED SCOPE above; "
+                    "skip every question about another chapter entirely."
+                    if course_topics else ""
+                )
                 sections.append(
-                    "--- PAST EXAM QUESTIONS (cover EVERY concept these questions test, in "
-                    "depth — explain the topic behind each question and how to answer it) ---\n"
-                    + combined_hist[:12000]
+                    "--- PAST EXAM QUESTIONS (for the concepts these questions test, explain the "
+                    "topic behind the question and how to answer it, in depth." + scope_note
+                    + ") ---\n" + combined_hist[:12000]
                 )
 
         tut_brief = self._tutorial_brief(tutorial_insights, tutorial_texts)
@@ -737,21 +779,33 @@ class ExamGeneratorAgent:
                 "EXCLUDE a topic, leave it out ENTIRELY — do NOT create a section, keyPoint, "
                 "keyTerm, or examFocus for it, even though it appears in the materials/past exams."
             )
+        scope_rule = (
+            "- SCOPE IS ABSOLUTE: the summary covers ONLY the topics in the SELECTED SCOPE "
+            "list below. The student picked specific lecture documents — a topic from any "
+            "other part of the course must NOT appear, no matter how heavily the past exams "
+            "test it. Do not add background sections for material outside the scope.\n"
+            if course_topics else ""
+        )
         user_payload = (
             custom_block
             + f"Target topics: {topics_line}\n"
             f"Write a DETAILED, comprehensive study summary from the materials below — this is "
             f"a full revision document, so be thorough, not brief.\n"
-            f"- Make a SEPARATE, in-depth section for every major topic (aim for 8-15 sections "
-            f"when the material supports it); each section must actually teach the concept "
-            f"with its definitions and formulas.\n"
-            f"- Cover EVERY topic, concept, and question type that appears in the PAST EXAMS in "
-            f"depth — these are the most important. Pull out the specific concepts the past "
-            f"exams test and explain them fully.\n"
-            f"- For EVERY tutorial practice problem, explain the underlying concept AND the "
-            f"step-by-step method/formula for solving that problem type (these reappear on exams).\n"
-            f"- Produce a long, comprehensive keyTerms list (aim for 20-40 terms) drawn from the "
-            f"lectures, past exams, and tutorials."
+            + scope_rule
+            + f"- Make a SEPARATE, in-depth section for every major topic IN SCOPE (aim for 8-15 "
+            f"sections when the selected material supports it — fewer if the student selected "
+            f"only one chapter; never pad with out-of-scope topics to reach a count); each "
+            f"section must actually teach the concept with its definitions and formulas.\n"
+            f"- Go deep on the in-scope topics the PAST EXAMS test — pull out the specific "
+            f"concepts those questions cover and explain them fully. Past-exam questions about "
+            f"topics outside the selected scope are IGNORED.\n"
+            f"- For EVERY tutorial practice problem whose topic is in scope, explain the "
+            f"underlying concept AND the step-by-step method/formula for solving that problem "
+            f"type (these reappear on exams).\n"
+            f"- Produce a comprehensive keyTerms list drawn from the in-scope lectures, past "
+            f"exams, and tutorials (aim for 20-40 terms when the selected material supports it; "
+            f"a single chapter will yield fewer, and that is correct — do NOT reach outside the "
+            f"scope to pad the list)."
             + exclusion_reminder
             + "\n\n"
             + "\n\n".join(sections)
@@ -801,24 +855,48 @@ class ExamGeneratorAgent:
         of {front, back, topic} dicts, prioritizing exam-likely content."""
         logger.info("Generating flashcards from course intelligence...")
 
+        from src.utils.topic_scope import retag_topic_weights
+
+        # Scope the past exams to the documents the student selected (see
+        # generate_summary) so picking one chapter doesn't produce whole-course cards.
+        historical_analysis = retag_topic_weights(historical_analysis, document_insights)
+
         sections = []
+
+        # HARD SCOPE: only the selected documents' topics may become cards.
+        course_topics = _course_topic_list(document_insights)
+        if course_topics:
+            sections.append(
+                "--- SELECTED SCOPE (HARD LIMIT — every card must be about one of these "
+                "topics, from the lecture documents the student selected. Make NO card on "
+                "any other topic, even one the past exams test heavily) ---\n"
+                + ", ".join(course_topics[:60])
+            )
 
         # 1) Strongest exam signal first: actual past-exam questions
         if historical_texts:
             combined_hist = "\n\n---\n\n".join([t[:5000] for t in historical_texts[:2]])
+            scope_note = (
+                " — skip any question whose topic is outside the SELECTED SCOPE"
+                if course_topics else ""
+            )
             sections.append(
-                "--- PAST EXAM QUESTIONS (HIGHEST PRIORITY — turn these into flashcards) ---\n"
+                "--- PAST EXAM QUESTIONS (HIGHEST PRIORITY — turn these into flashcards"
+                + scope_note + ") ---\n"
                 + combined_hist[:10000]
             )
         if historical_analysis:
             parts = []
             for h in historical_analysis:
-                weights = h.get("topicWeights", [])[:15]
+                weights = [w for w in h.get("topicWeights", []) if w.get("inScope") is not False][:15]
+                if not weights:
+                    continue
                 weights_str = "\n".join([f"- {w.get('topic','')}: {w.get('weight',0):.0%} ({w.get('questionCount',0)} Qs)" for w in weights])
                 qtypes = h.get("questionTypes", [])[:5]
                 qtypes_str = ", ".join([f"{q.get('type','')}: {q.get('percentage',0):.0f}%" for q in qtypes])
                 parts.append(f"Topic weights (how often each appears on exams):\n{weights_str}\nQuestion types: {qtypes_str}")
-            sections.append("--- HISTORICAL EXAM PATTERNS ---\n" + "\n\n".join(parts))
+            if parts:
+                sections.append("--- HISTORICAL EXAM PATTERNS (in-scope topics only) ---\n" + "\n\n".join(parts))
 
         # 2) Professor's explicit exam hints + emphasis from recordings
         if audio_insights:
@@ -861,13 +939,22 @@ class ExamGeneratorAgent:
             )
 
         topics_line = ", ".join(topics) if topics else "All key topics"
+        scope_rule = (
+            "SCOPE IS ABSOLUTE: every card must be about a topic in the SELECTED SCOPE list "
+            "below. The student selected specific lecture documents — make NO card on any "
+            "other part of the course, however heavily the past exams test it. If the "
+            "selected material yields fewer than the requested number of cards, return "
+            "fewer cards rather than going out of scope.\n"
+            if course_topics else ""
+        )
         user_payload = (
             f"Target topics: {topics_line}\n"
             f"Create about {count} flashcards from the materials below.\n"
-            f"PRIORITIZE content that the past exams asked about and that the professor "
-            f"flagged for the exam — those cards are most valuable. Weight the number of "
-            f"cards per topic by how heavily it appears in the past exams. Also include "
-            f"cards on how to solve the problem types shown in the tutorials.\n\n"
+            + scope_rule
+            + f"PRIORITIZE the in-scope content that the past exams asked about and that the "
+            f"professor flagged for the exam — those cards are most valuable. Weight the number "
+            f"of cards per topic by how heavily it appears in the past exams. Also include "
+            f"cards on how to solve the in-scope problem types shown in the tutorials.\n\n"
             + "\n\n".join(sections)
         )
 

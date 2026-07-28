@@ -488,7 +488,9 @@ export default function SummaryPage() {
           Select lecture documents
         </h3>
         <p className="text-sm text-ink-soft mb-4">
-          The summary is built from these documents, with more depth on topics your past exams emphasize.
+          The summary covers <span className="text-ink font-medium">only</span> the
+          topics in the documents you tick — pick one chapter and you get that chapter.
+          Past exams are used to prioritize within that scope, never to add other chapters.
         </p>
 
         {documents.length === 0 ? (

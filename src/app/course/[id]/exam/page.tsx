@@ -427,7 +427,10 @@ export default function ExamPage() {
           Select lecture documents
         </h3>
         <p className="text-sm text-ink-soft mb-4">
-          Choose which uploaded documents to include as source material.
+          Questions are asked <span className="text-ink font-medium">only</span> on the
+          topics in the documents you tick. Past exams still set the format, question
+          types, and marks — a past-exam question on a chapter you didn&apos;t select is
+          re-asked on one you did.
         </p>
 
         {documents.length === 0 ? (
