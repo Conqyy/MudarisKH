@@ -30,7 +30,6 @@ export default function CreateCourseModal({
   const [code, setCode] = useState("");
   const [title, setTitle] = useState("");
   const [instructor, setInstructor] = useState("");
-  const [examDate, setExamDate] = useState("");
   const [selectedColor, setSelectedColor] = useState(
     COLORS[existingCoursesCount % COLORS.length].value
   );
@@ -53,7 +52,6 @@ export default function CreateCourseModal({
         title: title.trim(),
         instructor: instructor.trim() || "—",
         color: selectedColor,
-        examDate: examDate || undefined,
       });
       onSuccess();
       onClose();
@@ -137,20 +135,6 @@ export default function CreateCourseModal({
               placeholder="e.g. Dr. Qaisar Abbas"
               className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition"
               maxLength={60}
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-ink-soft mb-2">
-              Final exam date{" "}
-              <span className="text-ink-mute font-normal">(optional)</span>
-            </label>
-            <input
-              type="date"
-              value={examDate}
-              onChange={(e) => setExamDate(e.target.value)}
-              className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition"
-              min={new Date().toISOString().split("T")[0]}
             />
           </div>
 
