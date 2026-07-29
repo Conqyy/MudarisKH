@@ -103,53 +103,6 @@ class FirebaseClient:
         with open(self.local_db_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
 
-    def get_selected_context(self, user_id: str, course_id: str, selected_lectures: list) -> dict:
-        if self.use_local:
-            data = self._read_local_db()
-            course_node = data.get("users", {}).get(user_id, {}).get("courses", {}).get(course_id, {})
-            lectures_content = [
-                course_node.get("lectures", {}).get(lec_id, {}).get("text", "") 
-                for lec_id in selected_lectures if lec_id in course_node.get("lectures", {})
-            ]
-            return {
-                "transcripts": "\n".join(lectures_content) if lectures_content else "No lecture data.",
-                "cues": "Focus heavily on Backpropagation chain rules and Convolution matrix dimensions.",
-                "university": course_node.get("university", "Imam University"),
-                "college": course_node.get("college", "")
-            }
-        
-        try:
-            course_ref = self.db.collection('users').document(user_id) \
-                                .collection('courses').document(course_id)
-            course_doc = course_ref.get()
-            context = {
-                "transcripts": "No transcripts found.",
-                "cues": "Standard academic prep.",
-                "university": "Imam Mohammad Ibn Saud Islamic University",
-                "college": "College of Computer and Information Sciences"
-            }
-            if course_doc.exists:
-                course_data = course_doc.to_dict()
-                context["university"] = course_data.get("university", context["university"])
-                context["college"] = course_data.get("college", context["college"])
-                lectures_content = []
-                for lec_id in selected_lectures:
-                    lec_doc = course_ref.collection('lectures').document(lec_id).get()
-                    if lec_doc.exists:
-                        lectures_content.append(lec_doc.to_dict().get("text", ""))
-                if lectures_content:
-                    context["transcripts"] = "\n".join(lectures_content)
-            return context
-        except Exception as e:
-            logger.error(f"Error fetching context: {e}")
-            return {"transcripts": "", "cues": "", "university": "", "college": ""}
-
-    def upload_generated_exam(self, user_id: str, course_id: str, exam_id: str, html_content: str) -> str:
-        output_file = f"mock_exam_{exam_id}.html"
-        with open(output_file, "w", encoding="utf-8") as f:
-            f.write(html_content)
-        return f"file:///{os.path.abspath(output_file)}"
-
     # ──────────────────────────────────────────────────
     # Flat-collection methods for Models 1/2/3/4
     # ──────────────────────────────────────────────────

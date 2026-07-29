@@ -38,11 +38,6 @@ def _find_engine(engine: str = "pdflatex") -> str | None:
     return None
 
 
-def _find_pdflatex() -> str | None:
-    """Back-compat shim."""
-    return _find_engine("pdflatex")
-
-
 def compile_tex_to_pdf(
     tex_path: str,
     output_dir: str | None = None,
