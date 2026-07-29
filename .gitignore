@@ -73,3 +73,6 @@ mudaris_local_db.json
 # IDE
 .vscode/
 .idea/
+# Visual Studio local state: file index, window layout, slnx.sqlite (~4 MB,
+# machine-specific — nothing another clone can use).
+.vs/
