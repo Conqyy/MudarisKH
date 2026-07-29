@@ -1180,11 +1180,7 @@ def upload_lecture_notes(payload: LectureNotesRequest):
     # Give the analyzer honest context: these are a student's notes ABOUT the
     # lecture, not a verbatim transcript — hints like "section 3 will come in
     # the midterm" should be treated as high-confidence exam signals.
-    framed = (
-        "[Student's typed notes about this lecture — not a verbatim transcript. "
-        "Statements about what the professor emphasized or promised for the exam "
-        "are first-hand exam hints.]\n\n" + notes
-    )
+    framed = _frame_notes(notes)
     try:
         insights = audio_agent.analyze_transcript(framed, _resolve_course_title(payload.course_id))
         db_client.update_audio_recording(rec_id, {
@@ -1200,6 +1196,62 @@ def upload_lecture_notes(payload: LectureNotesRequest):
         raise HTTPException(status_code=500, detail=f"Could not analyze the notes: {e}")
 
     return {"status": "success", "recording_id": rec_id, "title": title}
+
+
+def _frame_notes(notes: str) -> str:
+    """Wrap typed notes so the analyzer knows they're a student's account of the
+    lecture, not a verbatim transcript, and treats "the prof said X is on the
+    exam" as a first-hand exam hint."""
+    return (
+        "[Student's typed notes about this lecture — not a verbatim transcript. "
+        "Statements about what the professor emphasized or promised for the exam "
+        "are first-hand exam hints.]\n\n" + notes
+    )
+
+
+@app.post("/api/audio/{rec_id}/reanalyze")
+def reanalyze_audio_recording(rec_id: str):
+    """Re-run the AI analysis on a recording or typed note using its stored
+    transcript — so a failure caused by a transient problem (no OpenRouter
+    credit, model overloaded) can be retried without re-uploading or retyping.
+    """
+    import time as _time
+
+    rec = db_client.get_audio_recording(rec_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    transcript = (rec.get("transcript") or "").strip()
+    if len(transcript) < 20:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "No stored text is available for this entry, so it can't be "
+                "re-analyzed — please upload or type it again."
+            ),
+        )
+
+    db_client.update_audio_recording(rec_id, {"status": "analyzing", "errorMessage": ""})
+
+    is_notes = rec.get("sourceType") == "notes"
+    text = _frame_notes(transcript) if is_notes else transcript
+
+    try:
+        insights = audio_agent.analyze_transcript(
+            text, _resolve_course_title(rec.get("courseId", ""))
+        )
+        db_client.update_audio_recording(rec_id, {
+            "insights": insights,
+            "status": "completed",
+            "errorMessage": "",
+            "processedAt": int(_time.time() * 1000),
+        })
+        logger.info(f"Audio/notes record {rec_id} re-analyzed successfully.")
+        return {"status": "success", "recording_id": rec_id, "insights": insights}
+    except Exception as e:
+        logger.error(f"Re-analysis failed for {rec_id}: {e}")
+        db_client.update_audio_recording(rec_id, {"status": "failed", "errorMessage": str(e)})
+        raise HTTPException(status_code=500, detail=f"Re-analysis failed: {e}")
 
 
 @app.get("/api/audio/{course_id}")

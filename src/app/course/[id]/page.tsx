@@ -351,6 +351,48 @@ export default function CoursePage() {
     }
   };
 
+  // ---- Re-analyze a recording / typed note (retry after a failed AI call) ----
+  const handleReanalyzeRecording = async (rec: AudioRecording) => {
+    if (
+      !confirm(
+        `Re-analyze "${rec.title}"? This runs the AI again on the saved text.`
+      )
+    )
+      return;
+
+    setAudioRecordings((prev) =>
+      prev.map((r) =>
+        r.id === rec.id ? { ...r, status: "analyzing", errorMessage: "" } : r
+      )
+    );
+
+    try {
+      const res = await fetch(`${API_URL}/api/audio/${rec.id}/reanalyze`, {
+        method: "POST",
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(data?.detail || `Re-analysis failed (${res.status}).`);
+      }
+      setAudioRecordings((prev) =>
+        prev.map((r) =>
+          r.id === rec.id
+            ? { ...r, status: "completed", insights: data.insights, errorMessage: "" }
+            : r
+        )
+      );
+    } catch (e: any) {
+      setAudioRecordings((prev) =>
+        prev.map((r) =>
+          r.id === rec.id
+            ? { ...r, status: "failed", errorMessage: e.message || "" }
+            : r
+        )
+      );
+      alert(e.message || "Re-analysis failed. Try again in a moment.");
+    }
+  };
+
   // True if a completed document has an essentially empty analysis.
   const isEmptyAnalysis = (doc: CourseDocument) => {
     if (doc.status !== "completed" || !doc.analysis) return false;
@@ -1029,10 +1071,29 @@ export default function CoursePage() {
                       <span className="text-gold">● {t("Analyzing…")}</span>
                     )}
                     {rec.status === "failed" && (
-                      <span className="text-accent">● {t("Failed")}</span>
+                      <span
+                        className="text-accent"
+                        title={rec.errorMessage || "Analysis failed"}
+                      >
+                        ● {t("Failed")}
+                      </span>
                     )}
                     {rec.status === "pending" && (
                       <span className="text-ink-mute">● {t("Pending")}</span>
+                    )}
+                    {/* Retry is only possible when the text was saved (typed
+                        notes always are; recordings once transcribed). */}
+                    {rec.status === "failed" && !!rec.transcript && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleReanalyzeRecording(rec);
+                        }}
+                        className="ms-2 text-[10px] underline text-accent hover:text-ink"
+                        title="Run AI analysis again"
+                      >
+                        {t("retry")}
+                      </button>
                     )}
                   </>
                 )}
