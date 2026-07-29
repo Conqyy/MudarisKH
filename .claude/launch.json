@@ -2,10 +2,21 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "//frontend": "autoPort: Firebase authorizes localhost by domain, not port, so sign-in works on any port.",
       "name": "frontend",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
-      "port": 3000
+      "port": 3000,
+      "autoPort": true
+    },
+    {
+      "//": "Must run from backend/ — the Firebase key path and uploads/ resolve relative to the working directory.",
+      "name": "backend",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "cd backend && venv\\Scripts\\python.exe -m src.api"],
+      "port": 8000,
+      "//autoPort": "Fixed port: .env.local points the frontend at http://127.0.0.1:8000.",
+      "autoPort": false
     }
   ]
 }
