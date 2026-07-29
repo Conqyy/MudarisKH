@@ -55,7 +55,10 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
-  const [day, setDay] = useState("sunday");
+  // A lecture usually repeats on several days (e.g. Sun/Tue/Thu). The user
+  // picks all of them at once; each becomes its own calendar entry so it can
+  // still be edited or deleted on its own.
+  const [days, setDays] = useState<string[]>([]);
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [courseId, setCourseId] = useState("");
@@ -100,8 +103,13 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
   const totalHours = Math.max(1, (gridEnd - gridStart) / 60);
   const hours = Array.from({ length: totalHours + 1 }, (_, i) => gridStart + i * 60);
 
+  const toggleDay = (key: string) =>
+    setDays((prev) =>
+      prev.includes(key) ? prev.filter((d) => d !== key) : [...prev, key]
+    );
+
   const resetForm = () => {
-    setDay("sunday"); setStart(""); setEnd("");
+    setDays([]); setStart(""); setEnd("");
     setCourseId(courses[0]?.id || ""); setTitle(""); setHall(""); setError("");
   };
 
@@ -113,28 +121,55 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
 
   const handleAdd = async () => {
     setError("");
+    if (days.length === 0) { setError("Pick at least one day."); return; }
     if (!courseId) { setError("Please select a course for this lecture."); return; }
     if (!start || !end) { setError("Enter start and end time."); return; }
     if ((toMin(end) ?? 0) <= (toMin(start) ?? 0)) { setError("End time must be after start time."); return; }
     setSaving(true);
+
+    // One request per day, in calendar order. A day can legitimately fail on
+    // its own (the backend rejects overlaps per day), so report exactly which
+    // ones didn't make it instead of failing the whole batch silently.
+    const chosen = DAYS.filter((d) => days.includes(d.key));
+    const failures: string[] = [];
     try {
-      const res = await fetch(`${API_URL}/api/schedule`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user_id: userId, day, start_time: start, end_time: end,
-          hall: hall.trim(), courseId, title: title.trim(),
-        }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => null);
-        throw new Error(err?.detail || "Failed to add lecture.");
+      for (const d of chosen) {
+        try {
+          const res = await fetch(`${API_URL}/api/schedule`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              user_id: userId, day: d.key, start_time: start, end_time: end,
+              hall: hall.trim(), courseId, title: title.trim(),
+            }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => null);
+            failures.push(`${d.label}: ${err?.detail || `failed (${res.status})`}`);
+          }
+        } catch {
+          failures.push(`${d.label}: network error`);
+        }
+      }
+
+      await load();
+
+      if (failures.length === chosen.length) {
+        setError(failures.join(" · "));
+        return;
+      }
+      if (failures.length > 0) {
+        // Some days were added — keep the form open showing what to fix.
+        setDays(
+          chosen
+            .filter((d) => failures.some((f) => f.startsWith(`${d.label}:`)))
+            .map((d) => d.key)
+        );
+        setError(`Added the other days. Not added — ${failures.join(" · ")}`);
+        return;
       }
       resetForm();
       setShowForm(false);
-      load();
-    } catch (e: any) {
-      setError(e.message || "Failed to add lecture.");
     } finally {
       setSaving(false);
     }
@@ -221,14 +256,35 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
               {error}
             </div>
           )}
-          <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
-            <div>
-              <label className="block text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-1.5">Day</label>
-              <select value={day} onChange={(e) => setDay(e.target.value)}
-                className="w-full px-3 py-2.5 border border-line rounded-xl bg-bg text-sm focus:outline-none focus:border-accent transition">
-                {DAYS.map((d) => <option key={d.key} value={d.key}>{d.label}</option>)}
-              </select>
+          {/* Day picker — multi-select: one lecture, repeated on several days */}
+          <div className="mb-4">
+            <label className="block text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-1.5">
+              Days <span className="text-accent">*</span>{" "}
+              <span className="text-ink-mute normal-case font-sans">(pick one or more)</span>
+            </label>
+            <div className="flex flex-wrap gap-2">
+              {DAYS.map((d) => {
+                const on = days.includes(d.key);
+                return (
+                  <button
+                    key={d.key}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => { toggleDay(d.key); setError(""); }}
+                    className={`px-4 py-2 rounded-full text-xs font-medium border transition ${
+                      on
+                        ? "bg-ink text-paper border-ink"
+                        : "border-line text-ink-soft hover:bg-bg-alt"
+                    }`}
+                  >
+                    {t(d.label)}
+                  </button>
+                );
+              })}
             </div>
+          </div>
+
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
             <div>
               <label className="block text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-1.5">Start</label>
               <input type="time" value={start} onChange={(e) => setStart(e.target.value)}
@@ -268,9 +324,13 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
           <div className="flex justify-end gap-2 mt-4">
             <button onClick={() => { setShowForm(false); resetForm(); }}
               className="px-4 py-2 border border-line rounded-full text-xs font-medium hover:bg-bg-alt transition">Cancel</button>
-            <button onClick={handleAdd} disabled={saving}
+            <button onClick={handleAdd} disabled={saving || days.length === 0}
               className="px-5 py-2 bg-ink text-paper rounded-full text-xs font-medium hover:bg-accent transition disabled:opacity-50">
-              {saving ? "Adding…" : "Add to calendar"}
+              {saving
+                ? "Adding…"
+                : days.length > 1
+                ? `Add to calendar (${days.length} days)`
+                : "Add to calendar"}
             </button>
           </div>
         </div>
