@@ -144,25 +144,9 @@ export default function DashboardPage() {
     { documents: 0, historical: 0, generated: 0 }
   );
 
-  const getDaysUntilExam = (examDate?: string) => {
-    if (!examDate) return null;
-    const days = Math.ceil(
-      (new Date(examDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24)
-    );
-    return days > 0 ? days : null;
-  };
-
-  // Soonest upcoming exam, for the status line
-  const upcomingExam = activeCourses
-    .map((c) => ({ c, d: getDaysUntilExam(c.examDate) }))
-    .filter((x) => x.d !== null)
-    .sort((a, b) => (a.d! - b.d!))[0];
-
   const getStatusMessage = () => {
     if (activeCourses.length === 0)
       return t("Create a course to start building your exam prep.");
-    if (upcomingExam)
-      return `${upcomingExam.c.code} — ${t("exam in")} ${upcomingExam.d} ${t("days")}`;
     if (totals.generated > 0)
       return `${t("You've generated")} ${totals.generated} ${t("practice exams. Keep practicing.")}`;
     return t("Upload your lecture documents and past exams to generate practice exams.");
@@ -286,7 +270,6 @@ export default function DashboardPage() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
                 {activeCourses.map((course) => {
-                  const daysUntilExam = getDaysUntilExam(course.examDate);
                   const s = stats[course.id] || {
                     documents: 0,
                     audio: 0,
@@ -350,20 +333,6 @@ export default function DashboardPage() {
                         <span className="text-xs text-accent font-medium opacity-0 group-hover:opacity-100 transition">
                           {t("Open course")} →
                         </span>
-                        {daysUntilExam !== null && (
-                          <div className="text-right">
-                            <div
-                              className={`font-serif text-xl font-medium ${
-                                daysUntilExam <= 7 ? "text-accent" : ""
-                              }`}
-                            >
-                              {daysUntilExam}d
-                            </div>
-                            <div className="text-[10px] text-ink-mute font-mono uppercase tracking-wider mt-0.5">
-                              {t("Until exam")}
-                            </div>
-                          </div>
-                        )}
                       </div>
                     </Link>
                   );

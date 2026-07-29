@@ -39,7 +39,6 @@ export interface Course {
   title: string;
   instructor: string;
   color: string;
-  examDate?: string; // final exam date
   // User-defined ordering of materials (arrays of item ids), stored on the
   // course doc because the materials collections are backend-only (the client
   // can't write to them, but it CAN write to its own courses).

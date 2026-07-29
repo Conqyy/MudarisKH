@@ -24,7 +24,6 @@ export default function EditCourseModal({ course, onClose, onSuccess }: Props) {
   const [instructor, setInstructor] = useState(
     course.instructor === "—" ? "" : course.instructor
   );
-  const [examDate, setExamDate] = useState(course.examDate || "");
   const [selectedColor, setSelectedColor] = useState(course.color);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -43,7 +42,6 @@ export default function EditCourseModal({ course, onClose, onSuccess }: Props) {
         title: title.trim(),
         instructor: instructor.trim() || "—",
         color: selectedColor,
-        examDate: examDate || undefined,
       });
       onSuccess();
       onClose();
@@ -124,18 +122,6 @@ export default function EditCourseModal({ course, onClose, onSuccess }: Props) {
               placeholder="e.g. Dr. Qaisar Abbas"
               className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition"
               maxLength={60}
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-ink-soft mb-2">
-              Final exam date
-            </label>
-            <input
-              type="date"
-              value={examDate}
-              onChange={(e) => setExamDate(e.target.value)}
-              className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition"
             />
           </div>
 

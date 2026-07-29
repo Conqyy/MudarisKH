@@ -405,14 +405,6 @@ export default function CoursePage() {
     );
   };
 
-  const getDaysUntilExam = () => {
-    if (!course?.examDate) return null;
-    const days = Math.ceil(
-      (new Date(course.examDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24)
-    );
-    return days > 0 ? days : null;
-  };
-
   if (loading || pageLoading) {
     return (
       <>
@@ -451,7 +443,6 @@ export default function CoursePage() {
     );
   }
 
-  const daysUntilExam = getDaysUntilExam();
   const completedDocs = documents.filter((d) => d.status === "completed").length;
   const completedHist = historicalExams.filter((h) => h.status === "completed").length;
   const examReady = completedDocs > 0 && completedHist > 0;
@@ -516,26 +507,6 @@ export default function CoursePage() {
                 <span className="opacity-60">👤</span>
                 {course.instructor}
               </span>
-              {course.examDate && (
-                <span className="flex items-center gap-2">
-                  <span className="opacity-60">📅</span>
-                  Final:{" "}
-                  {new Date(course.examDate).toLocaleDateString("en-US", {
-                    month: "short",
-                    day: "numeric",
-                    year: "numeric",
-                  })}
-                  {daysUntilExam !== null && (
-                    <span
-                      className={`ml-1 font-mono text-xs ${
-                        daysUntilExam <= 7 ? "text-accent" : "text-ink-mute"
-                      }`}
-                    >
-                      ({daysUntilExam}d left)
-                    </span>
-                  )}
-                </span>
-              )}
             </div>
           </div>
 

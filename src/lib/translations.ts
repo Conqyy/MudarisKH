@@ -53,7 +53,6 @@ export const AR: Record<string, string> = {
   "Good evening": "مساء الخير",
   "Create a course to start building your exam prep.":
     "أنشئ مادة وابدأ تجهّز للاختبار.",
-  "exam in": "الاختبار بعد",
   "days": "يوم",
   "You've generated": "ولّدت",
   "practice exams. Keep practicing.": "اختبار تجريبي. واصل التمرين.",
@@ -75,7 +74,6 @@ export const AR: Record<string, string> = {
     "أنشئ أول مادة، بعدها ارفع مستندات محاضراتها واختباراتها السابقة عشان نولّد اختبارات تجريبية.",
   "Create your first course": "أنشئ أول مادة لك",
   "Open course": "افتح المادة",
-  "Until exam": "باقي للاختبار",
   "My Courses": "موادي",
   "New Course": "مادة جديدة",
   "Add Course": "أضف مادة",
