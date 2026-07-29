@@ -31,7 +31,7 @@ services:
 
       # --- Non-secret config ---
       - key: OPENROUTER_MODEL
-        value: anthropic/claude-opus-4.8
+        value: anthropic/claude-opus-5
       - key: OPENROUTER_BASE_URL
         value: https://openrouter.ai/api/v1
       - key: OPENROUTER_MAX_TOKENS

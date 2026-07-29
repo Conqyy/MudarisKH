@@ -158,7 +158,7 @@ Each feature lists **what it does**, **how it works today**, and **acceptance cr
         ▼                                     ▼              ▼
 ┌──────────────────┐              ┌────────────────┐   ┌──────────────────┐
 │ Firebase Auth /  │              │ Firestore      │   │ OpenRouter        │
-│ Firestore (client)│             │ (Admin bypass) │   │ (claude-opus-4.8) │
+│ Firestore (client)│             │ (Admin bypass) │   │ (claude-opus-5)   │
 └──────────────────┘              │ local uploads/ │   │ Groq Whisper      │
                                   │ pdflatex/XeLaTeX│  │ (whisper-large-v3)│
                                   └────────────────┘   └──────────────────┘
@@ -193,7 +193,7 @@ Each feature lists **what it does**, **how it works today**, and **acceptance cr
 - **File storage:** local `backend/uploads/` (served via `GET /api/files/serve`).
 
 ### 6.3 AI / model configuration (`backend/.env`)
-- `OPENROUTER_MODEL=anthropic/claude-opus-4.8` (+ base URL, temperature, max tokens, app name/URL referer header).
+- `OPENROUTER_MODEL=anthropic/claude-opus-5` (+ base URL, temperature, max tokens, app name/URL referer header).
 - `GROQ_WHISPER_MODEL=whisper-large-v3`, `WHISPER_LANGUAGE`.
 - Firebase Admin credentials path + collection name overrides; `STORAGE_BUCKET`; `LOG_LEVEL`.
 
