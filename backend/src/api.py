@@ -1165,6 +1165,11 @@ def upload_lecture_notes(payload: LectureNotesRequest):
         "sourceType": "notes",
         "fileSize": len(notes.encode("utf-8")),
         "status": "analyzing",
+        # Store what the student typed BEFORE calling the AI. Unlike a recording
+        # (whose audio file is still on disk if analysis fails), these notes exist
+        # nowhere else — if we only saved them on success, a failed AI call would
+        # throw away everything the student wrote and force them to retype it.
+        "transcript": notes[:50000],
         "uploadedAt": int(_time.time() * 1000),
     }
     if payload.lecture_id:
@@ -1183,12 +1188,13 @@ def upload_lecture_notes(payload: LectureNotesRequest):
     try:
         insights = audio_agent.analyze_transcript(framed, _resolve_course_title(payload.course_id))
         db_client.update_audio_recording(rec_id, {
-            "transcript": notes[:50000],
             "insights": insights,
             "status": "completed",
             "processedAt": int(_time.time() * 1000),
         })
     except Exception as e:
+        # The typed notes stay on the record (saved above), so nothing the
+        # student wrote is lost — the entry can be re-analyzed instead.
         logger.error(f"Notes analysis failed for {rec_id}: {e}")
         db_client.update_audio_recording(rec_id, {"status": "failed", "errorMessage": str(e)})
         raise HTTPException(status_code=500, detail=f"Could not analyze the notes: {e}")
