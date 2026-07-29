@@ -64,42 +64,6 @@ class ExamGeneratorAgent:
         )
         self.model_id = settings.OPENROUTER_MODEL
 
-    def compile_exam(self, academic_data: dict, topics: list, preference: str, exam_id: str, user_id: str = "sultan_123", course_id: str = "cs464") -> str:
-        logger.info(f"Compiling custom LaTeX PDF structure for exam: {exam_id}")
-
-        user_payload = f"""
-        --- SYSTEM STATE DATA ---
-        USER_ID: {user_id}
-        COURSE_ID: {course_id}
-        EXAM_ID: {exam_id}
-
-        --- INPUT STUDY STREAMS ---
-        Syllabus Chapters Selected: {academic_data.get('transcripts', '')[:3000]}
-        Professor Voice Cues: {academic_data.get('cues', 'None provided')}
-        Custom Target Topics Checklist: {", ".join(topics)}
-        Student Overrides & Preferences: {preference}
-        """
-
-        response = chat_with_retry(
-            self.client,
-            model=self.model_id,
-            messages=[
-                {"role": "system", "content": prompts.EXAM_GEN_SYSTEM_PROMPT},
-                {"role": "user", "content": user_payload}
-            ],
-            temperature=0.2,
-            max_tokens=16000,
-        )
-
-        raw_tex = (response.choices[0].message.content or "").strip()
-        raw_tex = self._sanitize_latex(raw_tex)
-
-        raw_tex = raw_tex.replace("{{EXAM_ID}}", exam_id)
-        raw_tex = raw_tex.replace("{{USER_ID}}", user_id)
-        raw_tex = raw_tex.replace("{{COURSE_ID}}", course_id)
-
-        return raw_tex.strip()
-
     def compile_enhanced_exam(self, academic_data: dict, topics: list, preference: str, exam_id: str,
                               user_id: str = "sultan_123", course_id: str = "cs464",
                               document_insights: list = None, audio_insights: list = None,
@@ -987,86 +951,6 @@ class ExamGeneratorAgent:
         except Exception as e:
             logger.error(f"Failed to parse flashcards JSON: {e}")
             return []
-
-    def grade_document_submission(self, questions_rubrics: dict, exam_text: str,
-                                  submission_text: str = None,
-                                  image_data_uris: list = None) -> dict:
-        """Grade a student's uploaded solved exam (typed text OR handwritten images)
-        against the rubric. Returns a {q_id: {score, feedback}} dict — the caller
-        applies max_scores and totals."""
-        logger.info("Grading uploaded exam submission...")
-
-        key_lines = []
-        for qid, r in sorted(questions_rubrics.items()):
-            qtype = r.get("question_type", "written")
-            maxs = r.get("max_score", 5 if qtype in ("mcq", "true_false") else 15)
-            if qtype in ("mcq", "true_false"):
-                key_lines.append(
-                    f"{qid} ({qtype}, max {maxs} marks): correct answer = "
-                    f"{r.get('correct_answer','')}. {r.get('explanation','')}"
-                )
-            else:
-                key_lines.append(
-                    f"{qid} ({qtype}, max {maxs} marks): full-mark criteria = {r.get('criteria','')}"
-                )
-        key_str = "\n".join(key_lines)
-
-        instructions = f"""You are an exam grader. A student has submitted their completed exam (it may be TYPED or HANDWRITTEN).
-
-EXAM QUESTIONS (for reference):
-{exam_text[:8000]}
-
-ANSWER KEY / RUBRIC:
-{key_str}
-
-The submission may contain ANY form of answer — prose, DIAGRAMS, CODE, or MATHEMATICAL
-equations/derivations. Interpret all of them:
-- Diagrams (flowcharts, UML, ER, graphs, sketches): judge whether the diagram is correct and complete for what the question asks.
-- Code: judge correctness and logic — does it solve the problem? Minor syntax slips are fine if the intent is clear.
-- Math equations / derivations: check the steps and the final result.
-
-TASK: Read the student's submission, locate their answer to EACH question (q1, q2, ...),
-and grade it. Judge correctness YOURSELF from the exam question and the subject matter —
-the answer key is only a hint and may be imperfect, so never penalize an answer that is
-actually correct.
-- MCQ / true-false: work out the correct option from the question itself; full marks if the student's answer is correct, otherwise 0.
-- Written / diagram / code / math: award partial marks out of the max based on correctness and how well it meets the criteria; give credit for correct diagrams, working code, and valid derivations.
-- If a question has no answer in the submission, score 0 and set student_answer to "No answer found".
-
-For EVERY question return THREE things so the student can compare and learn:
-1. "student_answer": EXACTLY what the student wrote, transcribed faithfully. For MCQ/true-false give their chosen option (e.g. "B" / "TRUE"). For handwriting, diagrams, code, or math, transcribe/describe what they actually put.
-2. "model_answer": the FULL correct (model) answer to the question — the complete worked answer, not just a letter. For MCQ/true-false, give the correct option AND a one-line reason. For calculation/derivation, show the key steps and final result. For code/diagram, describe the correct solution.
-3. "feedback": a short note on WHERE the student's answer differs from the model answer / where they lost marks (empty string if fully correct).
-
-Respond ONLY with raw JSON (no markdown, no commentary):
-{{"results": {{"q1": {{"score": <number>, "student_answer": "...", "model_answer": "...", "feedback": "..."}}, "q2": {{...}}}}}}"""
-
-        content = [{"type": "text", "text": instructions}]
-        if submission_text:
-            content.append({
-                "type": "text",
-                "text": f"\n--- STUDENT SUBMISSION (typed) ---\n{submission_text[:15000]}",
-            })
-        if image_data_uris:
-            content.append({"type": "text", "text": "\n--- STUDENT SUBMISSION (handwritten images below) ---"})
-            for uri in image_data_uris[:5]:
-                content.append({"type": "image_url", "image_url": {"url": uri}})
-
-        from src.utils.json_parse import extract_json_object
-        response = chat_with_retry(
-            self.client,
-            model=self.model_id,
-            messages=[{"role": "user", "content": content}],
-            temperature=0.1,
-            # Model answers for every question can be long; give plenty of room.
-            max_tokens=max(settings.OPENROUTER_MAX_TOKENS, 12000),
-        )
-        raw = (response.choices[0].message.content or "").strip()
-        try:
-            return extract_json_object(raw).get("results", {})
-        except Exception as ex:
-            logger.error(f"Failed to parse submission grade JSON: {ex}")
-            return {}
 
     def repair_latex(self, tex_content: str, error_hint: str = "") -> str:
         """Ask the model to fix a LaTeX document that fails to compile.

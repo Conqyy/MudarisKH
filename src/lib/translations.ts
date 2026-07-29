@@ -350,8 +350,8 @@ export const AR: Record<string, string> = {
   "Structured Summaries": "ملخّصات منظّمة",
   "Your chapters become key concepts, definitions, and formulas — with each section tagged high / medium / low likelihood for the exam, based on your past papers.":
     "فصولك تصير مفاهيم وتعاريف ومعادلات — وكل قسم معلّم باحتمال عالي / متوسط / منخفض للاختبار، حسب اختباراتك السابقة.",
-  "Generate full Quiz, Midterm, or Final practice papers that match the format of your real past exams. Download the PDF, or answer in-app and get auto-graded with explanations.":
-    "ولّد اختبارات كويز أو نصفي أو نهائي كاملة تطابق صيغة اختباراتك الحقيقية السابقة. نزّل الـPDF، أو جاوب داخل التطبيق وشوف نموذج الإجابة.",
+  "Generate full Quiz, Midterm, or Final practice papers that match the format of your real past exams. Download the PDF, solve it yourself, then reveal the model answer key in red.":
+    "ولّد اختبارات كويز أو نصفي أو نهائي كاملة تطابق صيغة اختباراتك الحقيقية السابقة. نزّل الـPDF، وحلّه بنفسك، وبعدين اكشف نموذج الإجابة بالأحمر.",
   "Smart Flashcards": "بطاقات ذكية",
   "Cards auto-built from your documents — weighted toward the topics your past exams emphasize, so you study what's actually likely to show up.":
     "بطاقات تُبنى تلقائيًا من مستنداتك — موزونة نحو المواضيع اللي تركّز عليها اختباراتك السابقة، عشان تذاكر اللي فعلاً غالب يجي.",
