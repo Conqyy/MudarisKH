@@ -66,14 +66,14 @@ const sameItem = (
 
 // ---------- Recents ----------
 
-export function getRecents(uid: string | null | undefined): StoredRecent[] {
+function getRecents(uid: string | null | undefined): StoredRecent[] {
   if (!uid) return [];
   return readArray<StoredRecent>(keyRecent(uid)).sort(
     (a, b) => b.lastAt - a.lastAt
   );
 }
 
-export function trackRecent(
+function trackRecent(
   uid: string | null | undefined,
   item: ActivityItem
 ): void {
@@ -102,7 +102,7 @@ export function clearRecents(uid: string): void {
 
 // ---------- Bookmarks ----------
 
-export function getBookmarks(
+function getBookmarks(
   uid: string | null | undefined
 ): StoredBookmark[] {
   if (!uid) return [];
@@ -111,7 +111,7 @@ export function getBookmarks(
   );
 }
 
-export function isBookmarked(
+function isBookmarked(
   uid: string | null | undefined,
   kind: ActivityKind,
   id: string

@@ -5,7 +5,7 @@
 
 // Sort items to match an array of ids. Items not present in `order`
 // (e.g. newly uploaded) keep their original relative position at the end.
-export function sortByIdOrder<T extends { id: string }>(
+function sortByIdOrder<T extends { id: string }>(
   items: T[],
   order?: string[]
 ): T[] {
@@ -19,7 +19,7 @@ export function sortByIdOrder<T extends { id: string }>(
 }
 
 // Replace each item's title with the user's custom name when one exists.
-export function applyTitleOverrides<T extends { id: string; title: string }>(
+function applyTitleOverrides<T extends { id: string; title: string }>(
   items: T[],
   overrides?: Record<string, string>
 ): T[] {
