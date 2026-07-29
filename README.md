@@ -51,7 +51,7 @@ back from the database. The database is the single shared source of truth.
 | Frontend | Next.js 14 (App Router), Tailwind CSS, Firebase client SDK |
 | i18n | Lightweight `LanguageProvider` + Najdi-Arabic dictionary; Arabic/RTL default with an English toggle (interface-only) |
 | Backend | Python FastAPI + Uvicorn, Firebase Admin SDK |
-| AI | OpenRouter LLM (currently `google/gemini-2.5-pro`) — analysis, generation, answer keys, tutoring |
+| AI | OpenRouter LLM (currently `anthropic/claude-opus-5`) — analysis, generation, answer keys, tutoring |
 | Transcription | Groq-hosted **Whisper-large-v3** (set `GROQ_API_KEY`); long audio auto-chunked |
 | Video / URL ingest | yt-dlp + ffmpeg — extract audio from MP4/MOV files and video URLs to MP3 |
 | Text / file handling | PyPDF2, python-pptx, python-docx, PyMuPDF (scanned-PDF → image) |
@@ -95,7 +95,7 @@ Ensure `backend/.env` exists:
 ```
 OPENROUTER_API_KEY=your-openrouter-key
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-OPENROUTER_MODEL=google/gemini-2.5-pro
+OPENROUTER_MODEL=anthropic/claude-opus-5
 OPENROUTER_MAX_TOKENS=8192
 FIREBASE_KEY_PATH=src/config/firebase-key.json
 STORAGE_BUCKET=your-bucket.firebasestorage.app
@@ -145,7 +145,7 @@ Then open **http://localhost:3000** and sign in.
 1. Sign in → create a course (it appears on the dashboard; add lectures to the weekly calendar there too).
 2. On the course page, upload **documents**, **voice recordings**, **past exams**, and **tutorials** (one or many at a time) — each is analyzed by its model (status badge shows progress).
 3. Use the four study tools: **AI Tutor**, **Practice Exam**, **Flashcards**, **Summary** — each lets you pick which documents / past exams / tutorials to draw from.
-4. For an exam: choose total marks (Quiz/Midterm/Final) and generate (this takes **~2–3 minutes** on Pro — keep the tab open). You land on the exam page; solve it yourself, then **Reveal model answers** to get the red answer-key PDF. Optionally drop in your own solved file to compare side-by-side.
+4. For an exam: choose total marks (Quiz/Midterm/Final) and generate (this takes **~2–3 minutes** on Opus — keep the tab open). You land on the exam page; solve it yourself, then **Reveal model answers** to get the red answer-key PDF. Optionally drop in your own solved file to compare side-by-side.
 
 ---
 
@@ -198,8 +198,10 @@ mudaris-dev/
 ## Notes
 
 - AI features need OpenRouter credit. The model is one line in `backend/.env`
-  (`OPENROUTER_MODEL`). It currently uses `google/gemini-2.5-pro` for best quality;
-  `google/gemini-2.5-flash` is ~5× cheaper if you want to cut costs. Pro is a reasoning
+  (`OPENROUTER_MODEL`) — and the matching value in `render.yaml` for the deployed
+  backend. It currently uses `anthropic/claude-opus-5` for best quality
+  ($5 / $25 per M input / output tokens). To cut costs, `anthropic/claude-sonnet-5`
+  is ~2.5× cheaper and `anthropic/claude-haiku-4.5` ~5× cheaper. Opus is a reasoning
   model, so exam generation can take ~2–3 minutes and costs more per call.
 - The **model-answer key** is built from the exam's own answer rubric (no extra AI call in
   the common case) and compiled locally, so revealing answers is usually fast and free.
