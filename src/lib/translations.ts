@@ -30,6 +30,8 @@ export const AR: Record<string, string> = {
   "English": "الإنجليزية",
   "Switch to dark mode": "الوضع الليلي",
   "Switch to light mode": "الوضع النهاري",
+  "Collapse sidebar": "طيّ القائمة",
+  "Expand sidebar": "توسيع القائمة",
 
   // ---- Common actions ----
   "Upload": "ارفع",

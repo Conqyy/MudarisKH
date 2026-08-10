@@ -102,6 +102,49 @@ body > * {
   unicode-bidi: isolate;
 }
 
+/* ============ COLLAPSIBLE SIDEBAR ============ */
+/* The rail's width, padding, and label visibility live here rather than in
+   Tailwind classes so the inline pre-paint script in the root layout can size
+   a collapsed rail on the very first frame — React only flips the attribute
+   afterwards. Both the flex-row spacer and the fixed panel carry .sidebar-rail
+   so they stay the same width. */
+.sidebar-rail {
+  width: 260px;
+  transition: width 0.22s ease;
+}
+[data-sidebar="collapsed"] .sidebar-rail {
+  width: 68px;
+}
+
+.sidebar-panel {
+  padding: 20px;
+}
+[data-sidebar="collapsed"] .sidebar-panel {
+  padding: 20px 10px;
+}
+
+/* Collapsed: icons only, centered in their row. */
+[data-sidebar="collapsed"] .sidebar-label {
+  display: none;
+}
+[data-sidebar="collapsed"] .sidebar-item {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+/* A section heading with its text hidden becomes the divider between groups. */
+[data-sidebar="collapsed"] .sidebar-heading {
+  margin-inline: 10px;
+  padding: 0;
+  border-top: 1px solid rgb(var(--c-line));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-rail {
+    transition: none;
+  }
+}
+
 /* Flashcard 3D flip */
 .flashcard-scene {
   perspective: 1500px;

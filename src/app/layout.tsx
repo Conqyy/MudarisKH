@@ -3,6 +3,7 @@ import "./globals.css";
 import { AuthProvider } from "@/lib/auth-context";
 import { LanguageProvider } from "@/lib/i18n";
 import { ThemeProvider } from "@/lib/theme";
+import { SidebarProvider } from "@/lib/sidebar";
 
 export const metadata: Metadata = {
   title: "Mudaris — AI Study Assistant",
@@ -20,11 +21,13 @@ export default function RootLayout({
   return (
     <html lang="en" dir="ltr" suppressHydrationWarning>
       <head>
-        {/* Apply the saved theme before first paint to avoid a light flash. */}
+        {/* Apply the saved theme and sidebar width before first paint, to avoid
+            a light flash and a wide-then-narrow sidebar snap. */}
         <script
           dangerouslySetInnerHTML={{
             __html:
-              "try{var t=localStorage.getItem('mudaris_theme');if(t==='dark'){document.documentElement.dataset.theme='dark'}}catch(e){}",
+              "try{var t=localStorage.getItem('mudaris_theme');if(t==='dark'){document.documentElement.dataset.theme='dark'}}catch(e){}" +
+              "try{var s=localStorage.getItem('mudaris_sidebar');if(s==='collapsed'){document.documentElement.dataset.sidebar='collapsed'}}catch(e){}",
           }}
         />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -41,7 +44,9 @@ export default function RootLayout({
       <body className="antialiased" suppressHydrationWarning>
         <ThemeProvider>
           <LanguageProvider>
-            <AuthProvider>{children}</AuthProvider>
+            <SidebarProvider>
+              <AuthProvider>{children}</AuthProvider>
+            </SidebarProvider>
           </LanguageProvider>
         </ThemeProvider>
       </body>
