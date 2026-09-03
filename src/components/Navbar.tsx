@@ -52,7 +52,7 @@ export default function Navbar() {
     .toUpperCase();
 
   // Mask the email for privacy (shoulder-surfing) — keep first + last char of
-  // the local part and the full domain, e.g. "sultan7amz@gmail.com" → "s••••z@gmail.com".
+  // the local part and the full domain, e.g. "student.name@example.com" → "s••••e@example.com".
   const maskEmail = (email?: string | null): string => {
     if (!email) return "";
     const at = email.lastIndexOf("@");
