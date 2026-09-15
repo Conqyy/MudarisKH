@@ -318,6 +318,10 @@ class FirebaseClient:
         independent of the other AI agents. Optional id lists restrict which
         items are included (None = include all of that type)."""
         course = self._flat_get("courses", course_id)
+        # The courses collection is client-writable and course_id comes from
+        # the request, so don't hand back another student's course metadata.
+        if user_id is not None and course.get("userId") != user_id:
+            course = {}
         docs = [d for d in self.get_course_documents(course_id) if d.get("status") == "completed"]
         recs = [a for a in self.get_course_audio_recordings(course_id) if a.get("status") == "completed"]
         exams = [h for h in self.get_course_historical_exams(course_id) if h.get("status") == "completed"]
