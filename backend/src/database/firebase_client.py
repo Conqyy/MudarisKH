@@ -208,6 +208,10 @@ class FirebaseClient:
     def get_course_historical_exams(self, course_id: str) -> list:
         return self._flat_query_by_course("historical_exams", course_id)
 
+    def get_historical_exam(self, exam_id: str) -> dict:
+        # Needed to check ownership before update/delete.
+        return self._flat_get("historical_exams", exam_id)
+
     def delete_historical_exam(self, exam_id: str):
         self._flat_delete("historical_exams", exam_id)
 
@@ -292,6 +296,10 @@ class FirebaseClient:
         ).stream()
         return [{**d.to_dict(), "id": d.id} for d in docs]
 
+    def get_schedule_entry(self, entry_id: str) -> dict:
+        # Needed to check ownership before update/delete.
+        return self._flat_get("schedule_entries", entry_id)
+
     def update_schedule_entry(self, entry_id: str, data: dict):
         self._flat_update("schedule_entries", entry_id, data)
 
@@ -304,7 +312,7 @@ class FirebaseClient:
 
     def get_tutor_resources(self, course_id: str, document_ids=None,
                             recording_ids=None, historical_exam_ids=None,
-                            tutorial_ids=None) -> dict:
+                            tutorial_ids=None, user_id: str = None) -> dict:
         """Resource bundle for the AI Tutor, read DIRECTLY from the course,
         voice-recording, past-exam, tutorial, and document collections —
         independent of the other AI agents. Optional id lists restrict which
@@ -314,6 +322,14 @@ class FirebaseClient:
         recs = [a for a in self.get_course_audio_recordings(course_id) if a.get("status") == "completed"]
         exams = [h for h in self.get_course_historical_exams(course_id) if h.get("status") == "completed"]
         tuts = [t for t in self.get_course_tutorials(course_id) if t.get("status") == "completed"]
+
+        # course_id arrives from the client, so scope every source to the
+        # caller before any of it reaches the model.
+        if user_id is not None:
+            docs = [d for d in docs if d.get("userId") == user_id]
+            recs = [a for a in recs if a.get("userId") == user_id]
+            exams = [h for h in exams if h.get("userId") == user_id]
+            tuts = [t for t in tuts if t.get("userId") == user_id]
 
         if document_ids is not None:
             docs = [d for d in docs if d.get("id") in document_ids]
@@ -371,11 +387,20 @@ class FirebaseClient:
     def get_course_intelligence(self, course_id: str, document_ids: list = None,
                                 historical_exam_ids: list = None,
                                 tutorial_ids: list = None,
-                                audio_ids: list = None) -> dict:
+                                audio_ids: list = None,
+                                user_id: str = None) -> dict:
         docs = self.get_course_documents(course_id)
         audio = self.get_course_audio_recordings(course_id)
         historical = self.get_course_historical_exams(course_id)
         tutorials = self.get_course_tutorials(course_id)
+
+        # course_id arrives from the client, so scope every source to the
+        # caller before aggregating.
+        if user_id is not None:
+            docs = [d for d in docs if d.get("userId") == user_id]
+            audio = [a for a in audio if a.get("userId") == user_id]
+            historical = [h for h in historical if h.get("userId") == user_id]
+            tutorials = [t for t in tutorials if t.get("userId") == user_id]
 
         completed_docs = [d for d in docs if d.get("status") == "completed" and d.get("analysis")]
         if document_ids:

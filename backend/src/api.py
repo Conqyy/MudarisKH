@@ -12,7 +12,7 @@ if project_root not in sys.path:
 
 # 1. التحقق من وجود المكتبات الأساسية لتشغيل الخادم
 try:
-    from fastapi import FastAPI, HTTPException
+    from fastapi import FastAPI, HTTPException, Depends
     from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel
     import uvicorn
@@ -26,6 +26,7 @@ except ImportError as e:
 # 2. التحقق من وجود مكتبات المشروع والربط مع قاعدة البيانات والذكاء الاصطناعي
 try:
     from src.config.settings import settings
+    from src.auth import require_uid, assert_owner, owned_only
     from src.database.firebase_client import FirebaseClient
     from src.agents.exam_generator import ExamGeneratorAgent
 except ImportError as e:
@@ -121,17 +122,20 @@ ALLOWED_DOC_TYPES = {
 }
 
 
-def _recheck_past_exam_scope(course_id: str):
+def _recheck_past_exam_scope(course_id: str, user_id: str = None):
     """Re-tag every past exam's topics as in/out of the CURRENT course (using the
     Historical Exam Analyzer's scope logic). Cheap — pure string match, no LLM
     call. Called when the course's documents change so the analyzer's scope
     decision stays current even if a past exam was uploaded before the lectures."""
     try:
-        intel = db_client.get_course_intelligence(course_id)
+        intel = db_client.get_course_intelligence(course_id, user_id=user_id)
         doc_insights = intel.get("document_analyses", [])
         if not doc_insights:
             return
-        for h in db_client.get_course_historical_exams(course_id):
+        past_exams = db_client.get_course_historical_exams(course_id)
+        if user_id:
+            past_exams = owned_only(past_exams, user_id)
+        for h in past_exams:
             analysis = h.get("analysis") or {}
             if not analysis.get("topicWeights"):
                 continue
@@ -147,8 +151,8 @@ async def upload_document(
     user_id: str = Form(...),
     course_id: str = Form(...),
     title: str = Form(""),
-    lecture_id: str = Form(""),
-):
+    lecture_id: str = Form(""), uid: str = Depends(require_uid),):
+    user_id = uid  # the token decides the owner, not the form field
     import time as _time
 
     content_type = file.content_type or ""
@@ -232,7 +236,7 @@ async def upload_document(
 
         # A new document changes the course scope — refresh the in/out-of-course
         # tags on this course's already-analyzed past exams.
-        _recheck_past_exam_scope(course_id)
+        _recheck_past_exam_scope(course_id, user_id)
 
         return {
             "status": "success",
@@ -255,13 +259,14 @@ async def upload_document(
 
 
 @app.get("/api/documents/{course_id}")
-def get_course_documents(course_id: str):
-    docs = db_client.get_course_documents(course_id)
+def get_course_documents(course_id: str, uid: str = Depends(require_uid)):
+    docs = owned_only(db_client.get_course_documents(course_id), uid)
     return {"status": "success", "documents": docs}
 
 
 @app.get("/api/documents/detail/{doc_id}")
-def get_document_detail(doc_id: str):
+def get_document_detail(doc_id: str, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_document(doc_id), uid, "Document")
     doc = db_client.get_document(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -269,12 +274,13 @@ def get_document_detail(doc_id: str):
 
 
 @app.post("/api/documents/{doc_id}/reanalyze")
-def reanalyze_document(doc_id: str):
+def reanalyze_document(doc_id: str, uid: str = Depends(require_uid)):
     """Re-run the AI analysis on a document using its already-extracted text.
 
     Lets the user retry when the first analysis failed or came back empty
     (without having to re-upload the file).
     """
+    assert_owner(db_client.get_document(doc_id), uid, "Document")
     doc = db_client.get_document(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -327,7 +333,8 @@ def reanalyze_document(doc_id: str):
 
 
 @app.delete("/api/documents/{doc_id}")
-def delete_document_endpoint(doc_id: str):
+def delete_document_endpoint(doc_id: str, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_document(doc_id), uid, "Document")
     doc = db_client.get_document(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -343,7 +350,8 @@ def delete_document_endpoint(doc_id: str):
 
 
 @app.delete("/api/audio/{rec_id}")
-def delete_audio_endpoint(rec_id: str):
+def delete_audio_endpoint(rec_id: str, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_audio_recording(rec_id), uid, "Recording")
     rec = db_client._flat_get("audio_recordings", rec_id)
     if not rec:
         raise HTTPException(status_code=404, detail="Recording not found")
@@ -359,7 +367,8 @@ def delete_audio_endpoint(rec_id: str):
 
 
 @app.delete("/api/historical-exams/{exam_id}")
-def delete_historical_exam_endpoint(exam_id: str):
+def delete_historical_exam_endpoint(exam_id: str, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_historical_exam(exam_id), uid, "Exam")
     exam = db_client._flat_get("historical_exams", exam_id)
     if not exam:
         raise HTTPException(status_code=404, detail="Historical exam not found")
@@ -375,7 +384,8 @@ def delete_historical_exam_endpoint(exam_id: str):
 
 
 @app.delete("/api/exams/{doc_id}")
-def delete_generated_exam_endpoint(doc_id: str):
+def delete_generated_exam_endpoint(doc_id: str, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_exam(doc_id), uid, "Exam")
     exam = db_client.get_exam(doc_id)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
@@ -387,7 +397,7 @@ def delete_generated_exam_endpoint(doc_id: str):
 UPLOADS_ROOT = Path(__file__).resolve().parent.parent / "uploads"
 
 @app.get("/api/files/serve")
-def serve_uploaded_file(path: str):
+def serve_uploaded_file(path: str, uid: str = Depends(require_uid)):
     # `path` comes from the caller, so it has to be contained inside
     # UPLOADS_ROOT before anything is read: pathlib lets an absolute value
     # replace the root outright ("/proc/self/environ" -> the process env, which
@@ -397,6 +407,12 @@ def serve_uploaded_file(path: str):
     file_path = (root / path).resolve()
     if not file_path.is_relative_to(root):
         raise HTTPException(status_code=403, detail="Forbidden")
+    # Upload paths are built as "{kind}/{user_id}/{course_id}/{file}" by the
+    # upload endpoints, so the second segment names the owner. Containment
+    # alone would still hand one student another student's lecture PDF.
+    parts = Path(path).parts
+    if len(parts) < 2 or parts[1] != uid:
+        raise HTTPException(status_code=404, detail="File not found")
     # is_file() rather than exists(), so directories aren't handed to
     # FileResponse. The detail deliberately omits the resolved path, which
     # would leak the server's filesystem layout.
@@ -430,8 +446,8 @@ async def upload_historical_exam(
     file: UploadFile = File(...),
     user_id: str = Form(...),
     course_id: str = Form(...),
-    title: str = Form(""),
-):
+    title: str = Form(""), uid: str = Depends(require_uid),):
+    user_id = uid  # the token decides the owner, not the form field
     import time as _time
 
     content_type = file.content_type or ""
@@ -488,7 +504,7 @@ async def upload_historical_exam(
 
         # Pass the course's CURRENT lecture-document analyses so the analyzer can
         # tag each past-exam topic as in/out of the course as it is taught now.
-        course_intel = db_client.get_course_intelligence(course_id)
+        course_intel = db_client.get_course_intelligence(course_id, user_id=user_id)
         document_insights = course_intel.get("document_analyses", [])
 
         analysis = hist_analyzer.analyze_exam(
@@ -521,8 +537,8 @@ async def upload_historical_exam(
 
 
 @app.get("/api/historical-exams/{course_id}")
-def get_course_historical_exams(course_id: str):
-    exams = db_client.get_course_historical_exams(course_id)
+def get_course_historical_exams(course_id: str, uid: str = Depends(require_uid)):
+    exams = owned_only(db_client.get_course_historical_exams(course_id), uid)
     return {"status": "success", "historical_exams": exams}
 
 
@@ -535,11 +551,11 @@ async def upload_tutorial(
     file: UploadFile = File(...),
     user_id: str = Form(...),
     course_id: str = Form(...),
-    title: str = Form(""),
-):
+    title: str = Form(""), uid: str = Depends(require_uid),):
     """Upload a tutorial / practice sheet (PDF, PPTX, DOCX). We analyze it for
     TOPICS and worked-problem IDEAS only — it never contributes grading weight
     or exam format (those come from past exams). Reuses the document analyzer."""
+    user_id = uid  # the token decides the owner, not the form field
     import time as _time
 
     content_type = file.content_type or ""
@@ -619,13 +635,14 @@ async def upload_tutorial(
 
 
 @app.get("/api/tutorials/{course_id}")
-def get_course_tutorials(course_id: str):
-    tutorials = db_client.get_course_tutorials(course_id)
+def get_course_tutorials(course_id: str, uid: str = Depends(require_uid)):
+    tutorials = owned_only(db_client.get_course_tutorials(course_id), uid)
     return {"status": "success", "tutorials": tutorials}
 
 
 @app.delete("/api/tutorials/{tut_id}")
-def delete_tutorial_endpoint(tut_id: str):
+def delete_tutorial_endpoint(tut_id: str, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_tutorial(tut_id), uid, "Tutorial")
     tut = db_client.get_tutorial(tut_id)
     if not tut:
         raise HTTPException(status_code=404, detail="Tutorial not found")
@@ -789,8 +806,8 @@ async def upload_audio(
     # "1" = process in a background thread and return immediately.
     # "0" = process synchronously and return when done (used by the multi-file
     #       uploader so it can analyze one recording at a time, like documents).
-    background: str = Form("1"),
-):
+    background: str = Form("1"), uid: str = Depends(require_uid),):
+    user_id = uid  # the token decides the owner, not the form field
     import time as _time
 
     content_type = file.content_type or ""
@@ -849,10 +866,11 @@ class AudioUrlRequest(BaseModel):
 
 
 @app.post("/api/audio/upload-url")
-def upload_audio_from_url(payload: AudioUrlRequest):
+def upload_audio_from_url(payload: AudioUrlRequest, uid: str = Depends(require_uid)):
     """Take a video/audio URL; download + extract audio to MP3 + transcribe +
     analyze. Runs in the background by default, or synchronously when the caller
     wants to process several URLs one at a time."""
+    payload.user_id = uid  # ignore any client-supplied owner
     import time as _time
 
     url = (payload.video_url or "").strip()
@@ -905,12 +923,13 @@ class LectureNotesRequest(BaseModel):
 
 
 @app.post("/api/audio/upload-notes")
-def upload_lecture_notes(payload: LectureNotesRequest):
+def upload_lecture_notes(payload: LectureNotesRequest, uid: str = Depends(require_uid)):
     """Typed lecture notes: the student writes what happened in the lecture and
     what the professor emphasized (e.g. "the prof said section 3 will come in
     the midterm"). The same AI that analyzes recordings runs on the text — no
     transcription step — and the insights are saved exactly like a recording's,
     so exam generation, the intelligence view, and the tutor all use them."""
+    payload.user_id = uid  # ignore any client-supplied owner
     import time as _time
 
     notes = (payload.notes or "").strip()
@@ -973,11 +992,12 @@ def _frame_notes(notes: str) -> str:
 
 
 @app.post("/api/audio/{rec_id}/reanalyze")
-def reanalyze_audio_recording(rec_id: str):
+def reanalyze_audio_recording(rec_id: str, uid: str = Depends(require_uid)):
     """Re-run the AI analysis on a recording or typed note using its stored
     transcript — so a failure caused by a transient problem (no OpenRouter
     credit, model overloaded) can be retried without re-uploading or retyping.
     """
+    assert_owner(db_client.get_audio_recording(rec_id), uid, "Recording")
     import time as _time
 
     rec = db_client.get_audio_recording(rec_id)
@@ -1018,8 +1038,8 @@ def reanalyze_audio_recording(rec_id: str):
 
 
 @app.get("/api/audio/{course_id}")
-def get_course_audio_recordings(course_id: str):
-    recordings = db_client.get_course_audio_recordings(course_id)
+def get_course_audio_recordings(course_id: str, uid: str = Depends(require_uid)):
+    recordings = owned_only(db_client.get_course_audio_recordings(course_id), uid)
     return {"status": "success", "audio_recordings": recordings}
 
 
@@ -1183,7 +1203,8 @@ def _make_compilable_answer_key(exam: dict) -> str:
 
 
 @app.post("/api/exams/generate-enhanced")
-def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest):
+def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: str = Depends(require_uid)):
+    payload.user_id = uid  # ignore any client-supplied owner
     import uuid
     import base64
     import tempfile
@@ -1199,6 +1220,7 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest):
         historical_exam_ids=payload.historical_exam_ids if payload.historical_exam_ids else None,
         tutorial_ids=payload.tutorial_ids if payload.tutorial_ids else None,
         audio_ids=payload.audio_ids if payload.audio_ids else None,
+        user_id=payload.user_id,
     )
 
     # Brand the exam header as "Mudaris University of {the student's major}".
@@ -1323,8 +1345,8 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest):
 # ──────────────────────────────────────────────────
 
 @app.get("/api/exams/list/{course_id}")
-def list_course_exams(course_id: str):
-    exams = db_client.get_course_exams(course_id)
+def list_course_exams(course_id: str, uid: str = Depends(require_uid)):
+    exams = owned_only(db_client.get_course_exams(course_id), uid)
     safe = []
     for e in exams:
         safe.append({
@@ -1339,7 +1361,8 @@ def list_course_exams(course_id: str):
 
 
 @app.get("/api/exams/detail/{doc_id}")
-def get_exam_detail(doc_id: str):
+def get_exam_detail(doc_id: str, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_exam(doc_id), uid, "Exam")
     exam = db_client.get_exam(doc_id)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
@@ -1368,10 +1391,11 @@ def get_exam_detail(doc_id: str):
 
 
 @app.get("/api/exams/{doc_id}/pdf")
-def get_exam_pdf(doc_id: str):
+def get_exam_pdf(doc_id: str, uid: str = Depends(require_uid)):
     """Recompile a saved exam's LaTeX to PDF on demand and serve it.
     Sanitizes the stored .tex first, which also rescues older exams that were
     saved before the sanitizer fix (conversational preamble / markdown fences)."""
+    assert_owner(db_client.get_exam(doc_id), uid, "Exam")
     import tempfile
     from src.utils.compile_pdf import compile_tex_to_pdf
 
@@ -1421,10 +1445,11 @@ def get_exam_pdf(doc_id: str):
 
 
 @app.get("/api/exams/{doc_id}/answer-key-pdf")
-def get_exam_answer_key_pdf(doc_id: str):
+def get_exam_answer_key_pdf(doc_id: str, uid: str = Depends(require_uid)):
     """Generate (once, then cache) and serve the MODEL-ANSWER key PDF for an
     exam — a full worked-solutions document the student opens after solving the
     exam themselves. Watermarked + served inline."""
+    assert_owner(db_client.get_exam(doc_id), uid, "Exam")
     import tempfile
     from src.utils.compile_pdf import compile_tex_to_pdf
 
@@ -1468,9 +1493,10 @@ def get_exam_answer_key_pdf(doc_id: str):
 
 
 @app.post("/api/exams/{doc_id}/solution")
-async def upload_exam_solution(doc_id: str, file: UploadFile = File(...)):
+async def upload_exam_solution(doc_id: str, file: UploadFile = File(...), uid: str = Depends(require_uid)):
     """Attach the student's OWN solved exam to this exam for side-by-side review
     (NOT graded). Stored as a file; the page shows it next to the model answers."""
+    assert_owner(db_client.get_exam(doc_id), uid, "Exam")
     import time as _time
 
     exam = db_client.get_exam(doc_id)
@@ -1508,8 +1534,8 @@ async def upload_exam_solution(doc_id: str, file: UploadFile = File(...)):
 # ──────────────────────────────────────────────────
 
 @app.get("/api/intelligence/{course_id}")
-def get_course_intelligence_endpoint(course_id: str):
-    intelligence = db_client.get_course_intelligence(course_id)
+def get_course_intelligence_endpoint(course_id: str, uid: str = Depends(require_uid)):
+    intelligence = db_client.get_course_intelligence(course_id, user_id=uid)
     return {"status": "success", **intelligence}
 
 
@@ -1528,7 +1554,8 @@ class FlashcardGenerateRequest(BaseModel):
     count: int = 20
 
 @app.post("/api/flashcards/generate")
-def generate_flashcards_endpoint(payload: FlashcardGenerateRequest):
+def generate_flashcards_endpoint(payload: FlashcardGenerateRequest, uid: str = Depends(require_uid)):
+    payload.user_id = uid  # ignore any client-supplied owner
     import uuid
     import time as _time
 
@@ -1541,6 +1568,7 @@ def generate_flashcards_endpoint(payload: FlashcardGenerateRequest):
         historical_exam_ids=payload.historical_exam_ids if payload.historical_exam_ids else None,
         tutorial_ids=payload.tutorial_ids if payload.tutorial_ids else None,
         audio_ids=payload.audio_ids if payload.audio_ids else None,
+        user_id=payload.user_id,
     )
 
     cards = ai_agent.generate_flashcards(
@@ -1578,8 +1606,8 @@ def generate_flashcards_endpoint(payload: FlashcardGenerateRequest):
 
 
 @app.get("/api/flashcards/list/{course_id}")
-def list_flashcard_sets(course_id: str):
-    sets = db_client.get_course_flashcard_sets(course_id)
+def list_flashcard_sets(course_id: str, uid: str = Depends(require_uid)):
+    sets = owned_only(db_client.get_course_flashcard_sets(course_id), uid)
     safe = [{
         "id": s.get("id"),
         "setId": s.get("setId"),
@@ -1591,7 +1619,8 @@ def list_flashcard_sets(course_id: str):
 
 
 @app.get("/api/flashcards/detail/{doc_id}")
-def get_flashcard_set_detail(doc_id: str):
+def get_flashcard_set_detail(doc_id: str, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_flashcard_set(doc_id), uid, "Flashcard set")
     fc = db_client.get_flashcard_set(doc_id)
     if not fc:
         raise HTTPException(status_code=404, detail="Flashcard set not found")
@@ -1599,7 +1628,8 @@ def get_flashcard_set_detail(doc_id: str):
 
 
 @app.delete("/api/flashcards/{doc_id}")
-def delete_flashcard_set_endpoint(doc_id: str):
+def delete_flashcard_set_endpoint(doc_id: str, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_flashcard_set(doc_id), uid, "Flashcard set")
     fc = db_client.get_flashcard_set(doc_id)
     if not fc:
         raise HTTPException(status_code=404, detail="Flashcard set not found")
@@ -1836,7 +1866,8 @@ def _apply_summary_scope(summary: dict, document_analyses: list) -> dict:
 
 
 @app.post("/api/summaries/generate")
-def generate_summary_endpoint(payload: SummaryGenerateRequest):
+def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depends(require_uid)):
+    payload.user_id = uid  # ignore any client-supplied owner
     import uuid
     import time as _time
 
@@ -1849,6 +1880,7 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest):
         historical_exam_ids=payload.historical_exam_ids if payload.historical_exam_ids else None,
         tutorial_ids=payload.tutorial_ids if payload.tutorial_ids else None,
         audio_ids=payload.audio_ids if payload.audio_ids else None,
+        user_id=payload.user_id,
     )
 
     summary = ai_agent.generate_summary(
@@ -1915,8 +1947,8 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest):
 
 
 @app.get("/api/summaries/list/{course_id}")
-def list_summaries(course_id: str):
-    items = db_client.get_course_summaries(course_id)
+def list_summaries(course_id: str, uid: str = Depends(require_uid)):
+    items = owned_only(db_client.get_course_summaries(course_id), uid)
     safe = [{
         "id": s.get("id"),
         "summaryId": s.get("summaryId"),
@@ -1928,7 +1960,8 @@ def list_summaries(course_id: str):
 
 
 @app.get("/api/summaries/detail/{doc_id}")
-def get_summary_detail(doc_id: str):
+def get_summary_detail(doc_id: str, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_summary(doc_id), uid, "Summary")
     s = db_client.get_summary(doc_id)
     if not s:
         raise HTTPException(status_code=404, detail="Summary not found")
@@ -1936,7 +1969,8 @@ def get_summary_detail(doc_id: str):
 
 
 @app.delete("/api/summaries/{doc_id}")
-def delete_summary_endpoint(doc_id: str):
+def delete_summary_endpoint(doc_id: str, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_summary(doc_id), uid, "Summary")
     s = db_client.get_summary(doc_id)
     if not s:
         raise HTTPException(status_code=404, detail="Summary not found")
@@ -2070,7 +2104,8 @@ def _summary_to_latex(summary: dict) -> str:
 
 
 @app.get("/api/summaries/{doc_id}/pdf")
-def get_summary_pdf(doc_id: str):
+def get_summary_pdf(doc_id: str, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_summary(doc_id), uid, "Summary")
     import tempfile
     from src.utils.compile_pdf import compile_tex_to_pdf
 
@@ -2208,8 +2243,9 @@ def _audio_to_latex(rec: dict) -> str:
 
 
 @app.get("/api/audio/{rec_id}/pdf")
-def get_audio_pdf(rec_id: str):
+def get_audio_pdf(rec_id: str, uid: str = Depends(require_uid)):
     """Compile and serve a PDF of a recording's analysis + transcript."""
+    assert_owner(db_client.get_audio_recording(rec_id), uid, "Recording")
     import tempfile
     from src.utils.compile_pdf import compile_tex_to_pdf
 
@@ -2269,7 +2305,8 @@ class ScheduleEntryRequest(BaseModel):
     title: str = ""
 
 @app.post("/api/schedule")
-def create_schedule_entry(payload: ScheduleEntryRequest):
+def create_schedule_entry(payload: ScheduleEntryRequest, uid: str = Depends(require_uid)):
+    payload.user_id = uid  # ignore any client-supplied owner
     import time as _time
     day = (payload.day or "").strip().lower()
     if day not in _VALID_DAYS:
@@ -2314,7 +2351,9 @@ def _check_schedule_overlap(user_id: str, day: str, start: int, end: int, exclud
 
 
 @app.put("/api/schedule/{entry_id}")
-def update_schedule_entry(entry_id: str, payload: ScheduleEntryRequest):
+def update_schedule_entry(entry_id: str, payload: ScheduleEntryRequest, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_schedule_entry(entry_id), uid, "Schedule entry")
+    payload.user_id = uid  # ignore any client-supplied owner
     day = (payload.day or "").strip().lower()
     if day not in _VALID_DAYS:
         raise HTTPException(status_code=400, detail="Day must be Sunday through Thursday.")
@@ -2340,12 +2379,14 @@ def update_schedule_entry(entry_id: str, payload: ScheduleEntryRequest):
 
 
 @app.get("/api/schedule/{user_id}")
-def list_schedule(user_id: str):
+def list_schedule(user_id: str, uid: str = Depends(require_uid)):
+    user_id = uid  # path value is advisory; the token is authoritative
     return {"status": "success", "entries": db_client.get_user_schedule_entries(user_id)}
 
 
 @app.delete("/api/schedule/{entry_id}")
-def delete_schedule_entry(entry_id: str):
+def delete_schedule_entry(entry_id: str, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_schedule_entry(entry_id), uid, "Schedule entry")
     db_client.delete_schedule_entry(entry_id)
     return {"status": "success", "deleted": entry_id}
 
@@ -2366,7 +2407,8 @@ class TutorChatRequest(BaseModel):
     tutorial_ids: Optional[List[str]] = None
 
 @app.post("/api/tutor/chat")
-def tutor_chat(payload: TutorChatRequest):
+def tutor_chat(payload: TutorChatRequest, uid: str = Depends(require_uid)):
+    payload.user_id = uid  # ignore any client-supplied owner
     import time as _time
     if not payload.messages:
         raise HTTPException(status_code=400, detail="No messages provided.")
@@ -2379,6 +2421,7 @@ def tutor_chat(payload: TutorChatRequest):
         recording_ids=payload.recording_ids,
         historical_exam_ids=payload.historical_exam_ids,
         tutorial_ids=payload.tutorial_ids,
+        user_id=payload.user_id,
     )
 
     try:
@@ -2407,7 +2450,8 @@ def tutor_chat(payload: TutorChatRequest):
 
 
 @app.get("/api/tutor/chats/{user_id}/{course_id}")
-def list_tutor_chats(user_id: str, course_id: str):
+def list_tutor_chats(user_id: str, course_id: str, uid: str = Depends(require_uid)):
+    user_id = uid  # path value is advisory; the token is authoritative
     chats = db_client.get_user_course_tutor_chats(user_id, course_id)
     safe = sorted(
         [{
@@ -2422,7 +2466,8 @@ def list_tutor_chats(user_id: str, course_id: str):
 
 
 @app.get("/api/tutor/chat/{chat_id}")
-def get_tutor_chat_detail(chat_id: str):
+def get_tutor_chat_detail(chat_id: str, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_tutor_chat(chat_id), uid, "Chat")
     chat = db_client.get_tutor_chat(chat_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
@@ -2430,7 +2475,8 @@ def get_tutor_chat_detail(chat_id: str):
 
 
 @app.delete("/api/tutor/chat/{chat_id}")
-def delete_tutor_chat_endpoint(chat_id: str):
+def delete_tutor_chat_endpoint(chat_id: str, uid: str = Depends(require_uid)):
+    assert_owner(db_client.get_tutor_chat(chat_id), uid, "Chat")
     db_client.delete_tutor_chat(chat_id)
     return {"status": "success", "deleted": chat_id}
 
