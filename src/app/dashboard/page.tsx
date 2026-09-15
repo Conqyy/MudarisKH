@@ -10,6 +10,7 @@ import WeeklySchedule from "@/components/WeeklySchedule";
 import DashboardReminders from "@/components/DashboardReminders";
 import { useAuth } from "@/lib/auth-context";
 import { useLang } from "@/lib/i18n";
+import { apiFetch } from "@/lib/api";
 import {
   getUserCourses,
   deleteCourse,
@@ -63,10 +64,10 @@ export default function DashboardPage() {
       const entries = await Promise.all(
         coursesData.map(async (c) => {
           const [intel, exams] = await Promise.all([
-            fetch(`${API_URL}/api/intelligence/${c.id}`)
+            apiFetch(`${API_URL}/api/intelligence/${c.id}`)
               .then((r) => r.json())
               .catch(() => ({ counts: {} })),
-            fetch(`${API_URL}/api/exams/list/${c.id}`)
+            apiFetch(`${API_URL}/api/exams/list/${c.id}`)
               .then((r) => r.json())
               .catch(() => ({ exams: [] })),
           ]);

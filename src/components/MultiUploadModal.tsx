@@ -10,6 +10,7 @@ import {
 import { useAuth } from "@/lib/auth-context";
 import { useLang } from "@/lib/i18n";
 
+import { apiFetch } from "@/lib/api";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
@@ -159,7 +160,7 @@ export default function MultiUploadModal({
     formData.append("course_id", courseId);
     formData.append("title", file.name.replace(/\.[^/.]+$/, ""));
 
-    const res = await fetch(`${API_URL}${endpoint}`, {
+    const res = await apiFetch(`${API_URL}${endpoint}`, {
       method: "POST",
       body: formData,
     });

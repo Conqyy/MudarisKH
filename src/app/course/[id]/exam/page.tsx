@@ -13,6 +13,7 @@ import {
 } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 
+import { apiFetch } from "@/lib/api";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
@@ -145,7 +146,7 @@ export default function ExamPage() {
     });
     (async () => {
       try {
-        const res = await fetch(`${API_URL}/api/exams/${examDocId}/pdf`);
+        const res = await apiFetch(`${API_URL}/api/exams/${examDocId}/pdf`);
         const ct = res.headers.get("content-type") || "";
         if (res.ok && ct.includes("pdf")) {
           const blob = await res.blob();
@@ -189,12 +190,12 @@ export default function ExamPage() {
       setAllCourses(allCoursesData);
 
       const [docsRes, histRes, examsRes, intRes, tutRes, audioRes] = await Promise.all([
-        fetch(`${API_URL}/api/documents/${courseId}`).then((r) => r.json()).catch(() => ({ documents: [] })),
-        fetch(`${API_URL}/api/historical-exams/${courseId}`).then((r) => r.json()).catch(() => ({ historical_exams: [] })),
-        fetch(`${API_URL}/api/exams/list/${courseId}`).then((r) => r.json()).catch(() => ({ exams: [] })),
-        fetch(`${API_URL}/api/intelligence/${courseId}`).then((r) => r.json()).catch(() => ({})),
-        fetch(`${API_URL}/api/tutorials/${courseId}`).then((r) => r.json()).catch(() => ({ tutorials: [] })),
-        fetch(`${API_URL}/api/audio/${courseId}`).then((r) => r.json()).catch(() => ({ audio_recordings: [] })),
+        apiFetch(`${API_URL}/api/documents/${courseId}`).then((r) => r.json()).catch(() => ({ documents: [] })),
+        apiFetch(`${API_URL}/api/historical-exams/${courseId}`).then((r) => r.json()).catch(() => ({ historical_exams: [] })),
+        apiFetch(`${API_URL}/api/exams/list/${courseId}`).then((r) => r.json()).catch(() => ({ exams: [] })),
+        apiFetch(`${API_URL}/api/intelligence/${courseId}`).then((r) => r.json()).catch(() => ({})),
+        apiFetch(`${API_URL}/api/tutorials/${courseId}`).then((r) => r.json()).catch(() => ({ tutorials: [] })),
+        apiFetch(`${API_URL}/api/audio/${courseId}`).then((r) => r.json()).catch(() => ({ audio_recordings: [] })),
       ]);
 
       const completedDocs = ordered<DocItem>(
@@ -291,7 +292,7 @@ export default function ExamPage() {
     e.stopPropagation();
     if (!confirm(`Delete exam "${examId}"? This cannot be undone.`)) return;
     try {
-      const res = await fetch(`${API_URL}/api/exams/${id}`, {
+      const res = await apiFetch(`${API_URL}/api/exams/${id}`, {
         method: "DELETE",
       });
       if (!res.ok) throw new Error(`Delete failed (${res.status})`);
@@ -333,7 +334,7 @@ export default function ExamPage() {
       .filter(Boolean);
 
     try {
-      const res = await fetch(`${API_URL}/api/exams/generate-enhanced`, {
+      const res = await apiFetch(`${API_URL}/api/exams/generate-enhanced`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

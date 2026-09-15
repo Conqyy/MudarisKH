@@ -35,6 +35,7 @@ import { CourseReminder } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 import { useLang } from "@/lib/i18n";
 
+import { apiFetch } from "@/lib/api";
 // Reorder an array of items to match a list of ids.
 function applyOrder<T extends { id: string }>(
   items: T[],
@@ -86,7 +87,7 @@ export default function CoursePage() {
     );
     if (!anyProcessing) return;
     const t = setInterval(() => {
-      fetch(`${API_URL}/api/audio/${courseId}`)
+      apiFetch(`${API_URL}/api/audio/${courseId}`)
         .then((r) => r.json())
         .then((d) => d.audio_recordings || [])
         .then((data) =>
@@ -150,11 +151,11 @@ export default function CoursePage() {
 
       // Fetch from backend API (bypasses Firestore security rules)
       Promise.all([
-        fetch(`${API_URL}/api/documents/${courseId}`).then(r => r.json()).then(d => d.documents || []).catch(() => []),
-        fetch(`${API_URL}/api/audio/${courseId}`).then(r => r.json()).then(d => d.audio_recordings || []).catch(() => []),
-        fetch(`${API_URL}/api/historical-exams/${courseId}`).then(r => r.json()).then(d => d.historical_exams || []).catch(() => []),
-        fetch(`${API_URL}/api/exams/list/${courseId}`).then(r => r.json()).then(d => d.exams || []).catch(() => []),
-        fetch(`${API_URL}/api/tutorials/${courseId}`).then(r => r.json()).then(d => d.tutorials || []).catch(() => []),
+        apiFetch(`${API_URL}/api/documents/${courseId}`).then(r => r.json()).then(d => d.documents || []).catch(() => []),
+        apiFetch(`${API_URL}/api/audio/${courseId}`).then(r => r.json()).then(d => d.audio_recordings || []).catch(() => []),
+        apiFetch(`${API_URL}/api/historical-exams/${courseId}`).then(r => r.json()).then(d => d.historical_exams || []).catch(() => []),
+        apiFetch(`${API_URL}/api/exams/list/${courseId}`).then(r => r.json()).then(d => d.exams || []).catch(() => []),
+        apiFetch(`${API_URL}/api/tutorials/${courseId}`).then(r => r.json()).then(d => d.tutorials || []).catch(() => []),
       ]).then(([docsData, audioData, histData, examData, tutData]) => {
         setDocuments(
           ordered(docsData, courseData?.documentOrder, courseData?.titleOverrides)
@@ -200,7 +201,7 @@ export default function CoursePage() {
   ) => {
     if (!confirm(`Delete "${title}"? This cannot be undone.`)) return;
     try {
-      const res = await fetch(`${API_URL}/api/${kind}/${id}`, {
+      const res = await apiFetch(`${API_URL}/api/${kind}/${id}`, {
         method: "DELETE",
       });
       if (!res.ok) throw new Error(`Delete failed (${res.status})`);
@@ -322,7 +323,7 @@ export default function CoursePage() {
     );
 
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_URL}/api/documents/${doc.id}/reanalyze`,
         { method: "POST" }
       );
@@ -367,7 +368,7 @@ export default function CoursePage() {
     );
 
     try {
-      const res = await fetch(`${API_URL}/api/audio/${rec.id}/reanalyze`, {
+      const res = await apiFetch(`${API_URL}/api/audio/${rec.id}/reanalyze`, {
         method: "POST",
       });
       const data = await res.json().catch(() => null);

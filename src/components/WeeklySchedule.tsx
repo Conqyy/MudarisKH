@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Course } from "@/lib/firestore-helpers";
 import { useLang } from "@/lib/i18n";
 
+import { apiFetch } from "@/lib/api";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
@@ -77,7 +78,7 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
 
   const load = async () => {
     try {
-      const res = await fetch(`${API_URL}/api/schedule/${userId}`);
+      const res = await apiFetch(`${API_URL}/api/schedule/${userId}`);
       const data = await res.json();
       setEntries(data.entries || []);
     } catch {
@@ -135,7 +136,7 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
     try {
       for (const d of chosen) {
         try {
-          const res = await fetch(`${API_URL}/api/schedule`, {
+          const res = await apiFetch(`${API_URL}/api/schedule`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -177,7 +178,7 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
 
   const handleDelete = async (id: string) => {
     try {
-      const res = await fetch(`${API_URL}/api/schedule/${id}`, { method: "DELETE" });
+      const res = await apiFetch(`${API_URL}/api/schedule/${id}`, { method: "DELETE" });
       if (!res.ok) throw new Error();
       setEntries((prev) => prev.filter((e) => e.id !== id));
     } catch {
@@ -206,7 +207,7 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
     if ((toMin(ef.end) ?? 0) <= (toMin(ef.start) ?? 0)) { setEditError("End time must be after start time."); return; }
     setEditSaving(true);
     try {
-      const res = await fetch(`${API_URL}/api/schedule/${editing.id}`, {
+      const res = await apiFetch(`${API_URL}/api/schedule/${editing.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

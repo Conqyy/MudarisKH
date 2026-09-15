@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, ChangeEvent, DragEvent } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { useLang } from "@/lib/i18n";
 
+import { apiFetch } from "@/lib/api";
 interface Props {
   courseId: string;
   onClose: () => void;
@@ -153,7 +154,7 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
       formData.append("course_id", courseId);
       formData.append("title", item.file!.name.replace(/\.[^/.]+$/, ""));
       formData.append("background", "0");
-      const res = await fetch(`${API_URL}/api/audio/upload`, {
+      const res = await apiFetch(`${API_URL}/api/audio/upload`, {
         method: "POST",
         body: formData,
       });
@@ -164,7 +165,7 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
       return;
     }
     if (item.kind === "notes") {
-      const res = await fetch(`${API_URL}/api/audio/upload-notes`, {
+      const res = await apiFetch(`${API_URL}/api/audio/upload-notes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -181,7 +182,7 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
       return;
     }
     // URL
-    const res = await fetch(`${API_URL}/api/audio/upload-url`, {
+    const res = await apiFetch(`${API_URL}/api/audio/upload-url`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

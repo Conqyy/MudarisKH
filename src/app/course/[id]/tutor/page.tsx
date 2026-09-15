@@ -11,6 +11,7 @@ import { useAuth } from "@/lib/auth-context";
 import { getCourse, getUserCourses, Course } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 
+import { apiFetch } from "@/lib/api";
 // Tailwind-styled renderers for the tutor's Markdown replies.
 // dir="auto" + logical paddings (ps-*) let Arabic render RTL and English LTR
 // automatically within the same reply.
@@ -131,7 +132,7 @@ export default function TutorPage() {
   const loadChats = async () => {
     if (!user) return;
     try {
-      const res = await fetch(`${API_URL}/api/tutor/chats/${user.uid}/${courseId}`);
+      const res = await apiFetch(`${API_URL}/api/tutor/chats/${user.uid}/${courseId}`);
       const data = await res.json();
       setChats(data.chats || []);
     } catch {
@@ -157,10 +158,10 @@ export default function TutorPage() {
 
       // Load selectable sources (completed lectures/recordings + past exams + tutorials)
       const [docsRes, audioRes, histRes, tutRes] = await Promise.all([
-        fetch(`${API_URL}/api/documents/${courseId}`).then((r) => r.json()).catch(() => ({ documents: [] })),
-        fetch(`${API_URL}/api/audio/${courseId}`).then((r) => r.json()).catch(() => ({ audio_recordings: [] })),
-        fetch(`${API_URL}/api/historical-exams/${courseId}`).then((r) => r.json()).catch(() => ({ historical_exams: [] })),
-        fetch(`${API_URL}/api/tutorials/${courseId}`).then((r) => r.json()).catch(() => ({ tutorials: [] })),
+        apiFetch(`${API_URL}/api/documents/${courseId}`).then((r) => r.json()).catch(() => ({ documents: [] })),
+        apiFetch(`${API_URL}/api/audio/${courseId}`).then((r) => r.json()).catch(() => ({ audio_recordings: [] })),
+        apiFetch(`${API_URL}/api/historical-exams/${courseId}`).then((r) => r.json()).catch(() => ({ historical_exams: [] })),
+        apiFetch(`${API_URL}/api/tutorials/${courseId}`).then((r) => r.json()).catch(() => ({ tutorials: [] })),
       ]);
       const docsList = ordered(
         (docsRes.documents || []).filter((d: any) => d.status === "completed"),
@@ -228,7 +229,7 @@ export default function TutorPage() {
   const openChat = async (id: string) => {
     setHistoryOpen(false);
     try {
-      const res = await fetch(`${API_URL}/api/tutor/chat/${id}`);
+      const res = await apiFetch(`${API_URL}/api/tutor/chat/${id}`);
       if (!res.ok) throw new Error();
       const data = await res.json();
       setMessages(data.chat?.messages || []);
@@ -242,7 +243,7 @@ export default function TutorPage() {
     e.stopPropagation();
     if (!confirm("Delete this conversation?")) return;
     try {
-      await fetch(`${API_URL}/api/tutor/chat/${id}`, { method: "DELETE" });
+      await apiFetch(`${API_URL}/api/tutor/chat/${id}`, { method: "DELETE" });
       setChats((prev) => prev.filter((c) => c.id !== id));
       if (id === chatId) newChat();
     } catch {
@@ -258,7 +259,7 @@ export default function TutorPage() {
     setInput("");
     setThinking(true);
     try {
-      const res = await fetch(`${API_URL}/api/tutor/chat`, {
+      const res = await apiFetch(`${API_URL}/api/tutor/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

@@ -11,6 +11,7 @@ import { useAuth } from "@/lib/auth-context";
 import { getCourse, getUserCourses, Course } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 
+import { apiFetch } from "@/lib/api";
 // Inline-markdown renderer: the AI writes **bold** / *italic* / `code` inside
 // summary text — render it instead of showing raw asterisks. Paragraphs unwrap
 // to fragments so it also works inside list items and styled containers.
@@ -166,11 +167,11 @@ export default function SummaryPage() {
       setAllCourses(allCoursesData);
 
       const [docsRes, histRes, sumRes, tutRes, audioRes] = await Promise.all([
-        fetch(`${API_URL}/api/documents/${courseId}`).then((r) => r.json()).catch(() => ({ documents: [] })),
-        fetch(`${API_URL}/api/historical-exams/${courseId}`).then((r) => r.json()).catch(() => ({ historical_exams: [] })),
-        fetch(`${API_URL}/api/summaries/list/${courseId}`).then((r) => r.json()).catch(() => ({ summaries: [] })),
-        fetch(`${API_URL}/api/tutorials/${courseId}`).then((r) => r.json()).catch(() => ({ tutorials: [] })),
-        fetch(`${API_URL}/api/audio/${courseId}`).then((r) => r.json()).catch(() => ({ audio_recordings: [] })),
+        apiFetch(`${API_URL}/api/documents/${courseId}`).then((r) => r.json()).catch(() => ({ documents: [] })),
+        apiFetch(`${API_URL}/api/historical-exams/${courseId}`).then((r) => r.json()).catch(() => ({ historical_exams: [] })),
+        apiFetch(`${API_URL}/api/summaries/list/${courseId}`).then((r) => r.json()).catch(() => ({ summaries: [] })),
+        apiFetch(`${API_URL}/api/tutorials/${courseId}`).then((r) => r.json()).catch(() => ({ tutorials: [] })),
+        apiFetch(`${API_URL}/api/audio/${courseId}`).then((r) => r.json()).catch(() => ({ audio_recordings: [] })),
       ]);
 
       const completedDocs = ordered<DocItem>(
@@ -246,7 +247,7 @@ export default function SummaryPage() {
     })();
 
     try {
-      const res = await fetch(`${API_URL}/api/summaries/generate`, {
+      const res = await apiFetch(`${API_URL}/api/summaries/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -286,7 +287,7 @@ export default function SummaryPage() {
   const openSummary = async (id: string) => {
     setPageState("generating");
     try {
-      const res = await fetch(`${API_URL}/api/summaries/detail/${id}`);
+      const res = await apiFetch(`${API_URL}/api/summaries/detail/${id}`);
       if (!res.ok) throw new Error("Summary not found");
       const data = await res.json();
       const s = data.summary;
@@ -309,7 +310,7 @@ export default function SummaryPage() {
     e.stopPropagation();
     if (!confirm(`Delete summary "${title}"?`)) return;
     try {
-      const res = await fetch(`${API_URL}/api/summaries/${id}`, { method: "DELETE" });
+      const res = await apiFetch(`${API_URL}/api/summaries/${id}`, { method: "DELETE" });
       if (!res.ok) throw new Error();
       setSavedSummaries((prev) => prev.filter((s) => s.id !== id));
     } catch {
@@ -426,7 +427,7 @@ export default function SummaryPage() {
     try {
       // Try the backend-generated PDF first
       if (viewingId) {
-        const res = await fetch(`${API_URL}/api/summaries/${viewingId}/pdf`);
+        const res = await apiFetch(`${API_URL}/api/summaries/${viewingId}/pdf`);
         const contentType = res.headers.get("content-type") || "";
         if (res.ok && contentType.includes("pdf")) {
           const blob = await res.blob();

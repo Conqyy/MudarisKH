@@ -5,6 +5,7 @@ import { CourseDocument } from "@/lib/firestore-helpers";
 import BookmarkButton from "@/components/BookmarkButton";
 import { useTrackRecent } from "@/lib/activity";
 
+import { apiFetch, fetchFileObjectUrl } from "@/lib/api";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
@@ -44,7 +45,7 @@ export default function DocumentViewer({
   useEffect(() => {
     if (activeTab === "content" && !extractedText && !loadingText && doc.fileType !== "pdf") {
       setLoadingText(true);
-      fetch(`${API_URL}/api/documents/detail/${doc.id}`)
+      apiFetch(`${API_URL}/api/documents/detail/${doc.id}`)
         .then((r) => r.json())
         .then((data) => {
           if (data.document?.extractedText) {
@@ -71,6 +72,29 @@ export default function DocumentViewer({
 
   const pdfStoragePath = doc.storagePath;
   const isPdf = doc.fileType === "pdf";
+
+  // The PDF endpoint needs an Authorization header, which <iframe src> and
+  // <a href> cannot send, so fetch the bytes and hand the browser a blob URL.
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isPdf || !pdfStoragePath) return;
+    let cancelled = false;
+    let created: string | null = null;
+    fetchFileObjectUrl(pdfStoragePath)
+      .then((url) => {
+        if (cancelled) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        created = url;
+        setPdfUrl(url);
+      })
+      .catch(() => setPdfUrl(null));
+    return () => {
+      cancelled = true;
+      if (created) URL.revokeObjectURL(created);
+    };
+  }, [isPdf, pdfStoragePath]);
 
   return (
     <div className="fixed inset-0 z-50 flex">
@@ -110,9 +134,9 @@ export default function DocumentViewer({
             </div>
           </div>
           <BookmarkButton item={bookmarkItem} size="sm" />
-          {isPdf && pdfStoragePath && (
+          {isPdf && pdfStoragePath && pdfUrl && (
             <a
-              href={`${API_URL}/api/files/serve?path=${encodeURIComponent(pdfStoragePath)}`}
+              href={pdfUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="border border-line px-4 py-2 rounded-full text-xs font-medium hover:bg-bg-alt transition flex-shrink-0"
@@ -274,11 +298,17 @@ export default function DocumentViewer({
             /* Content Tab — shows extracted text or PDF */
             <div className="flex-1 overflow-y-auto">
               {isPdf && pdfStoragePath ? (
-                <iframe
-                  src={`${API_URL}/api/files/serve?path=${encodeURIComponent(pdfStoragePath)}`}
-                  className="w-full h-full border-0"
-                  title={doc.title}
-                />
+                pdfUrl ? (
+                  <iframe
+                    src={pdfUrl}
+                    className="w-full h-full border-0"
+                    title={doc.title}
+                  />
+                ) : (
+                  <div className="flex items-center justify-center h-full text-ink-mute text-sm">
+                    Loading PDF...
+                  </div>
+                )
               ) : loadingText ? (
                 <div className="flex items-center justify-center h-full text-ink-mute text-sm">
                   Loading content...

@@ -9,6 +9,7 @@ import { useAuth } from "@/lib/auth-context";
 import { getCourse, getUserCourses, Course } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 
+import { apiFetch } from "@/lib/api";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
@@ -132,11 +133,11 @@ export default function FlashcardsPage() {
       setAllCourses(allCoursesData);
 
       const [docsRes, histRes, setsRes, tutRes, audioRes] = await Promise.all([
-        fetch(`${API_URL}/api/documents/${courseId}`).then((r) => r.json()).catch(() => ({ documents: [] })),
-        fetch(`${API_URL}/api/historical-exams/${courseId}`).then((r) => r.json()).catch(() => ({ historical_exams: [] })),
-        fetch(`${API_URL}/api/flashcards/list/${courseId}`).then((r) => r.json()).catch(() => ({ sets: [] })),
-        fetch(`${API_URL}/api/tutorials/${courseId}`).then((r) => r.json()).catch(() => ({ tutorials: [] })),
-        fetch(`${API_URL}/api/audio/${courseId}`).then((r) => r.json()).catch(() => ({ audio_recordings: [] })),
+        apiFetch(`${API_URL}/api/documents/${courseId}`).then((r) => r.json()).catch(() => ({ documents: [] })),
+        apiFetch(`${API_URL}/api/historical-exams/${courseId}`).then((r) => r.json()).catch(() => ({ historical_exams: [] })),
+        apiFetch(`${API_URL}/api/flashcards/list/${courseId}`).then((r) => r.json()).catch(() => ({ sets: [] })),
+        apiFetch(`${API_URL}/api/tutorials/${courseId}`).then((r) => r.json()).catch(() => ({ tutorials: [] })),
+        apiFetch(`${API_URL}/api/audio/${courseId}`).then((r) => r.json()).catch(() => ({ audio_recordings: [] })),
       ]);
       const completed = ordered<DocItem>(
         (docsRes.documents || []).filter((d: DocItem) => d.status === "completed"),
@@ -247,7 +248,7 @@ export default function FlashcardsPage() {
     })();
 
     try {
-      const res = await fetch(`${API_URL}/api/flashcards/generate`, {
+      const res = await apiFetch(`${API_URL}/api/flashcards/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -279,7 +280,7 @@ export default function FlashcardsPage() {
   const openSet = async (id: string) => {
     setPageState("generating");
     try {
-      const res = await fetch(`${API_URL}/api/flashcards/detail/${id}`);
+      const res = await apiFetch(`${API_URL}/api/flashcards/detail/${id}`);
       if (!res.ok) throw new Error("Set not found");
       const data = await res.json();
       startStudy(data.set?.cards || []);
@@ -293,7 +294,7 @@ export default function FlashcardsPage() {
     e.stopPropagation();
     if (!confirm(`Delete flashcard set "${title}"?`)) return;
     try {
-      const res = await fetch(`${API_URL}/api/flashcards/${id}`, { method: "DELETE" });
+      const res = await apiFetch(`${API_URL}/api/flashcards/${id}`, { method: "DELETE" });
       if (!res.ok) throw new Error();
       setSavedSets((prev) => prev.filter((s) => s.id !== id));
     } catch {

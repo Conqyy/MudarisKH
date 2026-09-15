@@ -10,6 +10,7 @@ import { useAuth } from "@/lib/auth-context";
 import { getCourse, getUserCourses, Course } from "@/lib/firestore-helpers";
 import { useTrackRecent } from "@/lib/activity";
 
+import { apiFetch, fetchFileObjectUrl } from "@/lib/api";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
@@ -53,6 +54,33 @@ export default function ExamAnswerPage() {
   const [dragActive, setDragActive] = useState(false);
   const solutionInputRef = useRef<HTMLInputElement>(null);
 
+  // The file endpoint needs an Authorization header, which <img src> and
+  // <a href> cannot send, so fetch the bytes and use a blob URL instead.
+  const [solutionUrl, setSolutionUrl] = useState("");
+  const solutionPath = exam?.solutionPath;
+  useEffect(() => {
+    if (!solutionPath) {
+      setSolutionUrl("");
+      return;
+    }
+    let cancelled = false;
+    let created = "";
+    fetchFileObjectUrl(solutionPath)
+      .then((url) => {
+        if (cancelled) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        created = url;
+        setSolutionUrl(url);
+      })
+      .catch(() => setSolutionUrl(""));
+    return () => {
+      cancelled = true;
+      if (created) URL.revokeObjectURL(created);
+    };
+  }, [solutionPath]);
+
   useEffect(() => {
     if (!loading && !user) router.push("/signin");
   }, [user, loading, router]);
@@ -85,7 +113,7 @@ export default function ExamAnswerPage() {
       setCourse(courseData);
       setAllCourses(allCoursesData);
 
-      const examRes = await fetch(`${API_URL}/api/exams/detail/${examDbId}`);
+      const examRes = await apiFetch(`${API_URL}/api/exams/detail/${examDbId}`);
       if (!examRes.ok) throw new Error("Exam not found");
       const examData = await examRes.json();
       setExam(examData.exam as ExamData);
@@ -122,7 +150,7 @@ export default function ExamAnswerPage() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const res = await fetch(`${API_URL}/api/exams/${examDbId}/solution`, {
+      const res = await apiFetch(`${API_URL}/api/exams/${examDbId}/solution`, {
         method: "POST",
         body: formData,
       });
@@ -210,9 +238,6 @@ export default function ExamAnswerPage() {
 
           {(() => {
             const hasSolution = !!exam.solutionPath;
-            const solutionUrl = exam.solutionPath
-              ? `${API_URL}/api/files/serve?path=${encodeURIComponent(exam.solutionPath)}`
-              : "";
             const solIsImage = ["png", "jpg", "jpeg", "webp"].includes(
               exam.solutionType || ""
             );
