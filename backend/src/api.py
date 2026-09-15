@@ -47,14 +47,26 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS: allow the frontend (local dev + the deployed Vercel domain) to call the API.
-# Default "*" keeps local/dev open; in production set CORS_ALLOW_ORIGINS to a
-# comma-separated list of allowed origins (e.g. https://mudaris.vercel.app).
-_cors_origins = [o.strip() for o in os.getenv("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()]
+# CORS: allow the frontend (local dev on any port + the deployed Vercel domains)
+# to call the API. Override with CORS_ALLOW_ORIGINS, a comma-separated list.
+# The old "*" default is gone: with the API unauthenticated, a wildcard let any
+# page on the internet call it from a signed-in visitor's browser.
+_DEFAULT_CORS_ORIGINS = "https://mudaris-kh.vercel.app,https://mudaris-kh-xi.vercel.app"
+_cors_origins = [
+    o.strip()
+    for o in os.getenv("CORS_ALLOW_ORIGINS", _DEFAULT_CORS_ORIGINS).split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
-    allow_credentials=True,
+    # Dev servers take whatever port is free (.claude/launch.json autoPort),
+    # so match localhost on any port instead of pinning 3000.
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
+    # No cross-origin cookies are used (auth rides in headers), so credentials
+    # stay off. That also avoids "*" + credentials, which makes the preflight
+    # echo back whatever origin asked.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -376,9 +388,20 @@ UPLOADS_ROOT = Path(__file__).resolve().parent.parent / "uploads"
 
 @app.get("/api/files/serve")
 def serve_uploaded_file(path: str):
-    file_path = UPLOADS_ROOT / path
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+    # `path` comes from the caller, so it has to be contained inside
+    # UPLOADS_ROOT before anything is read: pathlib lets an absolute value
+    # replace the root outright ("/proc/self/environ" -> the process env, which
+    # holds the API keys and the service-account JSON), and ".." segments walk
+    # out of it. Resolve the join, then re-check where it landed.
+    root = UPLOADS_ROOT.resolve()
+    file_path = (root / path).resolve()
+    if not file_path.is_relative_to(root):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    # is_file() rather than exists(), so directories aren't handed to
+    # FileResponse. The detail deliberately omits the resolved path, which
+    # would leak the server's filesystem layout.
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
     content_types = {
         ".pdf": "application/pdf",
         ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
