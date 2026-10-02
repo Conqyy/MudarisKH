@@ -1,8 +1,10 @@
 "use client";
 
+import { useState } from "react";
 import { AudioRecording } from "@/lib/firestore-helpers";
 import BookmarkButton from "@/components/BookmarkButton";
 import { useTrackRecent } from "@/lib/activity";
+import { fetchObjectUrl } from "@/lib/api";
 
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
@@ -21,6 +23,25 @@ export default function AudioViewer({
   courseColor,
 }: AudioViewerProps) {
   const insights = recording.insights;
+
+  // The analysis endpoint needs an Authorization header, which <a href> cannot
+  // send, so fetch the bytes on click and hand the browser a blob instead.
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const downloadPdf = async () => {
+    setPdfBusy(true);
+    try {
+      const url = await fetchObjectUrl(`${API_URL}/api/audio/${recording.id}/pdf`);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${recording.title || "recording"}.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      alert("Could not download the analysis PDF.");
+    } finally {
+      setPdfBusy(false);
+    }
+  };
 
   const courseId = (recording as any).courseId as string | undefined;
   const bookmarkItem = {
@@ -72,15 +93,14 @@ export default function AudioViewer({
             </div>
           </div>
           {insights && (
-            <a
-              href={`${API_URL}/api/audio/${recording.id}/pdf`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex-shrink-0 bg-accent text-paper px-4 py-2 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2"
+            <button
+              onClick={downloadPdf}
+              disabled={pdfBusy}
+              className="flex-shrink-0 bg-accent text-paper px-4 py-2 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2 disabled:opacity-60"
               title="Download analysis & transcript as PDF"
             >
-              <span>↓</span> PDF
-            </a>
+              <span>↓</span> {pdfBusy ? "Preparing…" : "PDF"}
+            </button>
           )}
           <BookmarkButton item={bookmarkItem} size="sm" />
         </div>

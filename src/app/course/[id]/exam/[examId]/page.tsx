@@ -10,7 +10,7 @@ import { useAuth } from "@/lib/auth-context";
 import { getCourse, getUserCourses, Course } from "@/lib/firestore-helpers";
 import { useTrackRecent } from "@/lib/activity";
 
-import { apiFetch, fetchFileObjectUrl } from "@/lib/api";
+import { apiFetch, fetchFileObjectUrl, fetchObjectUrl } from "@/lib/api";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
@@ -80,6 +80,64 @@ export default function ExamAnswerPage() {
       if (created) URL.revokeObjectURL(created);
     };
   }, [solutionPath]);
+
+  // The exam and answer-key PDFs come from authenticated endpoints, which an
+  // <iframe src> / <a href> cannot reach — fetch the bytes and use blob URLs.
+  const [examPdfUrl, setExamPdfUrl] = useState("");
+  const [examPdfFailed, setExamPdfFailed] = useState(false);
+  useEffect(() => {
+    if (!user || !examDbId) return;
+    let cancelled = false;
+    let created = "";
+    setExamPdfFailed(false);
+    fetchObjectUrl(`${API_URL}/api/exams/${examDbId}/pdf`)
+      .then((url) => {
+        if (cancelled) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        created = url;
+        setExamPdfUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setExamPdfFailed(true);
+      });
+    return () => {
+      cancelled = true;
+      if (created) URL.revokeObjectURL(created);
+    };
+  }, [user, examDbId]);
+
+  // Only fetched once the student reveals them: the key is built on demand and
+  // the first build can take a couple of minutes.
+  const [answersPdfUrl, setAnswersPdfUrl] = useState("");
+  const [answersFailed, setAnswersFailed] = useState(false);
+  useEffect(() => {
+    if (!user || !examDbId || !showAnswers) return;
+    let cancelled = false;
+    let created = "";
+    setAnswersFailed(false);
+    setAnswersLoading(true);
+    fetchObjectUrl(`${API_URL}/api/exams/${examDbId}/answer-key-pdf`)
+      .then((url) => {
+        if (cancelled) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        created = url;
+        setAnswersPdfUrl(url);
+        setAnswersLoading(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setAnswersFailed(true);
+        setAnswersLoading(false);
+      });
+    return () => {
+      cancelled = true;
+      if (created) URL.revokeObjectURL(created);
+    };
+  }, [user, examDbId, showAnswers]);
 
   useEffect(() => {
     if (!loading && !user) router.push("/signin");
@@ -314,20 +372,40 @@ export default function ExamAnswerPage() {
                     <div className="w-2.5 h-2.5 bg-sage rounded-full" />
                     <span className="font-mono text-xs text-ink-mute">{exam.examId}.pdf</span>
                   </div>
-                  <a
-                    href={`${API_URL}/api/exams/${examDbId}/pdf`}
-                    download={`${exam.examId}.pdf`}
-                    className="border border-line text-ink-soft px-3 py-1.5 rounded-full text-xs font-medium hover:bg-paper transition"
-                  >
-                    ↓ Download exam
-                  </a>
+                  {examPdfUrl && (
+                    <a
+                      href={examPdfUrl}
+                      download={`${exam.examId}.pdf`}
+                      className="border border-line text-ink-soft px-3 py-1.5 rounded-full text-xs font-medium hover:bg-paper transition"
+                    >
+                      ↓ Download exam
+                    </a>
+                  )}
                 </div>
-                <iframe
-                  src={`${API_URL}/api/exams/${examDbId}/pdf`}
-                  className="w-full border-0"
-                  style={{ height: "85vh" }}
-                  title="Exam PDF"
-                />
+                {examPdfUrl ? (
+                  <iframe
+                    src={examPdfUrl}
+                    className="w-full border-0"
+                    style={{ height: "85vh" }}
+                    title="Exam PDF"
+                  />
+                ) : (
+                  <div
+                    className="flex flex-col items-center justify-center text-center p-8"
+                    style={{ height: "85vh" }}
+                  >
+                    {examPdfFailed ? (
+                      <>
+                        <div className="text-4xl mb-3 opacity-60">📄</div>
+                        <p className="text-sm text-ink-soft">
+                          The exam PDF couldn&apos;t be loaded. Try reloading the page.
+                        </p>
+                      </>
+                    ) : (
+                      <div className="w-12 h-12 border-[3px] border-bg-alt border-t-accent rounded-full animate-spin-slow" />
+                    )}
+                  </div>
+                )}
               </div>
             );
 
@@ -390,30 +468,43 @@ export default function ExamAnswerPage() {
                     </span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <a
-                      href={`${API_URL}/api/exams/${examDbId}/answer-key-pdf`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="border border-line text-ink-soft px-3 py-1.5 rounded-full text-xs font-medium hover:bg-paper transition"
-                    >
-                      ↗ Open
-                    </a>
-                    <a
-                      href={`${API_URL}/api/exams/${examDbId}/answer-key-pdf`}
-                      download={`${exam.examId}-answers.pdf`}
-                      className="border border-line text-ink-soft px-3 py-1.5 rounded-full text-xs font-medium hover:bg-paper transition"
-                    >
-                      ↓ Download
-                    </a>
+                    {answersPdfUrl && (
+                      <>
+                        <a
+                          href={answersPdfUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="border border-line text-ink-soft px-3 py-1.5 rounded-full text-xs font-medium hover:bg-paper transition"
+                        >
+                          ↗ Open
+                        </a>
+                        <a
+                          href={answersPdfUrl}
+                          download={`${exam.examId}-answers.pdf`}
+                          className="border border-line text-ink-soft px-3 py-1.5 rounded-full text-xs font-medium hover:bg-paper transition"
+                        >
+                          ↓ Download
+                        </a>
+                      </>
+                    )}
                   </div>
                 </div>
                 <div className="relative" style={{ height: "85vh" }}>
-                  <iframe
-                    src={`${API_URL}/api/exams/${examDbId}/answer-key-pdf`}
-                    className="w-full h-full border-0"
-                    title="Model Answers PDF"
-                    onLoad={() => setAnswersLoading(false)}
-                  />
+                  {answersPdfUrl && (
+                    <iframe
+                      src={answersPdfUrl}
+                      className="w-full h-full border-0"
+                      title="Model Answers PDF"
+                    />
+                  )}
+                  {answersFailed && (
+                    <div className="absolute inset-0 bg-paper flex flex-col items-center justify-center text-center px-8">
+                      <div className="text-4xl mb-3 opacity-60">📝</div>
+                      <p className="text-sm text-ink-soft">
+                        The answer key couldn&apos;t be built. Try revealing it again.
+                      </p>
+                    </div>
+                  )}
                   {answersLoading && (
                     <div className="absolute inset-0 bg-paper flex flex-col items-center justify-center text-center px-8">
                       {/* Spinning ring */}

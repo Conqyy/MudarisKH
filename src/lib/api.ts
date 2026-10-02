@@ -46,16 +46,21 @@ export async function apiFetch(
 }
 
 /**
- * Fetch a file from /api/files/serve and return an object URL for it.
+ * Fetch any authenticated backend URL and return an object URL for the body.
  *
  * <iframe src>, <img src> and <a href> cannot carry an Authorization header,
  * so the bytes are fetched here and handed to the browser as a blob instead.
  * The caller owns the returned URL and must URL.revokeObjectURL it.
  */
-export async function fetchFileObjectUrl(storagePath: string): Promise<string> {
-  const res = await apiFetch(
-    `${API_URL}/api/files/serve?path=${encodeURIComponent(storagePath)}`
-  );
+export async function fetchObjectUrl(url: string): Promise<string> {
+  const res = await apiFetch(url);
   if (!res.ok) throw new Error(`Could not load file (${res.status})`);
   return URL.createObjectURL(await res.blob());
+}
+
+/** fetchObjectUrl for a stored upload served by /api/files/serve. */
+export async function fetchFileObjectUrl(storagePath: string): Promise<string> {
+  return fetchObjectUrl(
+    `${API_URL}/api/files/serve?path=${encodeURIComponent(storagePath)}`
+  );
 }
