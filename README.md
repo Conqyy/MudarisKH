@@ -197,9 +197,12 @@ mudaris-dev/
 
 ## Notes
 
+- **Mudaris runs locally only.** It was hosted on Vercel + Render from 2026-07-15 until
+  2026-10-02, when both projects were deleted along with their Docker/blueprint config.
+  Firebase (`mudariskh-e74a3`) was kept, so all existing courses, exams and accounts are
+  intact.
 - AI features need OpenRouter credit. The model is one line in `backend/.env`
-  (`OPENROUTER_MODEL`) — and the matching value in `render.yaml` for the deployed
-  backend. It currently uses `anthropic/claude-opus-5` for best quality
+  (`OPENROUTER_MODEL`). It currently uses `anthropic/claude-opus-5` for best quality
   ($5 / $25 per M input / output tokens). To cut costs, `anthropic/claude-sonnet-5`
   is ~2.5× cheaper and `anthropic/claude-haiku-4.5` ~5× cheaper. Opus is a reasoning
   model, so exam generation can take ~2–3 minutes and costs more per call.

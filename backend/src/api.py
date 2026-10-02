@@ -48,19 +48,11 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS: allow the frontend (local dev on any port + the deployed Vercel domains)
-# to call the API. Override with CORS_ALLOW_ORIGINS, a comma-separated list.
-# The old "*" default is gone: with the API unauthenticated, a wildcard let any
-# page on the internet call it from a signed-in visitor's browser.
-_DEFAULT_CORS_ORIGINS = "https://mudaris-kh.vercel.app,https://mudaris-kh-xi.vercel.app"
-_cors_origins = [
-    o.strip()
-    for o in os.getenv("CORS_ALLOW_ORIGINS", _DEFAULT_CORS_ORIGINS).split(",")
-    if o.strip()
-]
+# CORS: the frontend only ever runs on localhost now, so that is the single
+# allowed origin. No "*" default: a wildcard would let any page on the internet
+# call this API from a signed-in visitor's browser.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
     # Dev servers take whatever port is free (.claude/launch.json autoPort),
     # so match localhost on any port instead of pinning 3000.
     allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
@@ -2178,9 +2170,9 @@ def _audio_to_latex(rec: dict) -> str:
         r"\setotherlanguage{arabic}",
         # No \setmainfont: keep XeLaTeX's default Latin Modern (the original
         # serif look). Only Arabic runs use an Arabic-capable font, shaped.
-        # Font family is platform-configurable: Windows dev defaults to "Arial";
-        # the Linux/Docker deploy sets AUDIO_ARABIC_FONT=Amiri (bundled TTF).
-        r"\newfontfamily\arabicfont[Script=Arabic]{" + os.getenv("AUDIO_ARABIC_FONT", "Arial") + r"}",
+        # Arial ships with Windows and covers Arabic. Change it here if you ever
+        # compile this on a machine without it.
+        r"\newfontfamily\arabicfont[Script=Arabic]{Arial}",
         r"\usepackage{enumitem}",
         r"\usepackage{parskip}",
         r"\usepackage{eso-pic}",
@@ -2488,8 +2480,4 @@ if __name__ == "__main__":
     # must not be interrupted, so reload is off. Set MUDARIS_RELOAD=1 to enable
     # it during active development.
     _reload = os.getenv("MUDARIS_RELOAD", "0") == "1"
-    # Cloud hosts (Render) inject $PORT and require binding to 0.0.0.0.
-    # Local dev keeps the original 127.0.0.1:8000 defaults.
-    _host = os.getenv("HOST", "127.0.0.1")
-    _port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("src.api:app", host=_host, port=_port, reload=_reload)
+    uvicorn.run("src.api:app", host="127.0.0.1", port=8000, reload=_reload)
