@@ -76,9 +76,9 @@ Install these before running:
 
 ## How to run
 
-> This repo is private and already includes `backend/.env` and `.env.local`. You still
-> need the Firebase **service-account** key file (not committed). If you're setting up
-> fresh, fill in the env values shown below.
+> A fresh clone gives you `.env.local` (tracked), but **not** `backend/.env` or the
+> Firebase **service-account** key — both are gitignored. Create them from the values
+> shown below; `backend/.env.example` is the template for the first.
 
 ### 1. Backend (FastAPI) — terminal 1
 
@@ -209,5 +209,9 @@ mudaris-dev/
 - The **model-answer key** is built from the exam's own answer rubric (no extra AI call in
   the common case) and compiled locally, so revealing answers is usually fast and free.
 - Generated PDFs require MiKTeX; audio transcription requires ffmpeg.
-- Keep this repository **private** — `backend/.env` (API key) is tracked here by choice.
-  Rotate the key if the repo's access ever changes.
+- **Secrets are not in git.** `backend/.env` (OpenRouter + Groq keys) and the Firebase
+  service-account key are gitignored and have never been committed — copy
+  `backend/.env.example` and fill in your own. The one env file that *is* tracked,
+  `.env.local`, holds only `NEXT_PUBLIC_*` values — the Firebase web config and the
+  backend URL — which are public client identifiers rather than secrets; per-user access
+  is enforced by `firestore.rules` and by the ID-token check on every backend endpoint.
