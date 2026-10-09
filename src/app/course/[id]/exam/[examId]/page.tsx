@@ -10,7 +10,8 @@ import { useAuth } from "@/lib/auth-context";
 import { getCourse, getUserCourses, Course } from "@/lib/firestore-helpers";
 import { useTrackRecent } from "@/lib/activity";
 
-import { apiFetch, fetchFileObjectUrl, fetchObjectUrl } from "@/lib/api";
+import { apiFetch, apiJson } from "@/lib/api";
+import { useObjectUrl } from "@/lib/use-object-url";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
@@ -42,11 +43,15 @@ export default function ExamAnswerPage() {
   const [allCourses, setAllCourses] = useState<Course[]>([]);
   const [exam, setExam] = useState<ExamData | null>(null);
   const [pageLoading, setPageLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const loadRequest = useRef<AbortController | null>(null);
+  const loadDataRef = useRef<(() => Promise<void>) | null>(null);
+  useEffect(() => () => { loadRequest.current?.abort(); }, [courseId, user?.uid]);
 
   // The model answers are hidden until the student chooses to reveal them
   // (so they solve the exam themselves first).
   const [showAnswers, setShowAnswers] = useState(false);
-  const [answersLoading, setAnswersLoading] = useState(false);
+
 
   // Optional: the student's OWN uploaded solution (shown left, for comparison).
   const [uploadingSolution, setUploadingSolution] = useState(false);
@@ -56,95 +61,23 @@ export default function ExamAnswerPage() {
 
   // The file endpoint needs an Authorization header, which <img src> and
   // <a href> cannot send, so fetch the bytes and use a blob URL instead.
-  const [solutionUrl, setSolutionUrl] = useState("");
-  const solutionPath = exam?.solutionPath;
-  useEffect(() => {
-    if (!solutionPath) {
-      setSolutionUrl("");
-      return;
-    }
-    let cancelled = false;
-    let created = "";
-    fetchFileObjectUrl(solutionPath)
-      .then((url) => {
-        if (cancelled) {
-          URL.revokeObjectURL(url);
-          return;
-        }
-        created = url;
-        setSolutionUrl(url);
-      })
-      .catch(() => setSolutionUrl(""));
-    return () => {
-      cancelled = true;
-      if (created) URL.revokeObjectURL(created);
-    };
-  }, [solutionPath]);
-
-  // The exam and answer-key PDFs come from authenticated endpoints, which an
-  // <iframe src> / <a href> cannot reach — fetch the bytes and use blob URLs.
-  const [examPdfUrl, setExamPdfUrl] = useState("");
-  const [examPdfFailed, setExamPdfFailed] = useState(false);
-  useEffect(() => {
-    if (!user || !examDbId) return;
-    let cancelled = false;
-    let created = "";
-    setExamPdfFailed(false);
-    fetchObjectUrl(`${API_URL}/api/exams/${examDbId}/pdf`)
-      .then((url) => {
-        if (cancelled) {
-          URL.revokeObjectURL(url);
-          return;
-        }
-        created = url;
-        setExamPdfUrl(url);
-      })
-      .catch(() => {
-        if (!cancelled) setExamPdfFailed(true);
-      });
-    return () => {
-      cancelled = true;
-      if (created) URL.revokeObjectURL(created);
-    };
-  }, [user, examDbId]);
-
-  // Only fetched once the student reveals them: the key is built on demand and
-  // the first build can take a couple of minutes.
-  const [answersPdfUrl, setAnswersPdfUrl] = useState("");
-  const [answersFailed, setAnswersFailed] = useState(false);
-  useEffect(() => {
-    if (!user || !examDbId || !showAnswers) return;
-    let cancelled = false;
-    let created = "";
-    setAnswersFailed(false);
-    setAnswersLoading(true);
-    fetchObjectUrl(`${API_URL}/api/exams/${examDbId}/answer-key-pdf`)
-      .then((url) => {
-        if (cancelled) {
-          URL.revokeObjectURL(url);
-          return;
-        }
-        created = url;
-        setAnswersPdfUrl(url);
-        setAnswersLoading(false);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setAnswersFailed(true);
-        setAnswersLoading(false);
-      });
-    return () => {
-      cancelled = true;
-      if (created) URL.revokeObjectURL(created);
-    };
-  }, [user, examDbId, showAnswers]);
+  const solution = useObjectUrl(exam?.solutionPath, true);
+  const solutionUrl = solution.url;
+  const examPdf = useObjectUrl(user && examDbId ? API_URL + "/api/exams/" + examDbId + "/pdf" : null);
+  const examPdfUrl = examPdf.url;
+  const examPdfFailed = !!examPdf.error;
+  const answers = useObjectUrl(user && examDbId && showAnswers ? API_URL + "/api/exams/" + examDbId + "/answer-key-pdf" : null);
+  const answersPdfUrl = answers.url;
+  const answersFailed = !!answers.error;
+  const answersLoading = answers.loading;
+  useEffect(() => { setShowAnswers(false); }, [examDbId]);
 
   useEffect(() => {
     if (!loading && !user) router.push("/signin");
   }, [user, loading, router]);
 
   useEffect(() => {
-    if (user && courseId && examDbId) loadData();
+    if (user && courseId && examDbId) loadDataRef.current?.();
   }, [user, courseId, examDbId]);
 
   useTrackRecent(
@@ -162,28 +95,36 @@ export default function ExamAnswerPage() {
 
   const loadData = async () => {
     if (!user) return;
+    loadRequest.current?.abort();
+    const controller = new AbortController();
+    loadRequest.current = controller;
+    setLoadError("");
     setPageLoading(true);
     try {
       const [courseData, allCoursesData] = await Promise.all([
         getCourse(courseId),
         getUserCourses(user.uid),
       ]);
+      if (controller.signal.aborted) return;
+      if (courseData && courseData.userId !== user.uid) throw new Error("Course not found");
       setCourse(courseData);
       setAllCourses(allCoursesData);
 
-      const examRes = await apiFetch(`${API_URL}/api/exams/detail/${examDbId}`);
+      const examRes = await apiFetch(`${API_URL}/api/exams/detail/${examDbId}`, { signal: controller.signal });
       if (!examRes.ok) throw new Error("Exam not found");
       const examData = await examRes.json();
+      if (controller.signal.aborted) return;
+      if (examData.exam?.courseId && examData.exam.courseId !== courseId) throw new Error("Exam does not belong to this course");
       setExam(examData.exam as ExamData);
-    } catch (error) {
-      console.error(error);
+    } catch (error: any) {
+      if (!controller.signal.aborted) setLoadError(error.message || "Could not load course data.");
     } finally {
-      setPageLoading(false);
+      if (!controller.signal.aborted) setPageLoading(false);
     }
   };
 
+  loadDataRef.current = loadData;
   const revealAnswers = () => {
-    setAnswersLoading(true);
     setShowAnswers(true);
   };
 
@@ -223,6 +164,8 @@ export default function ExamAnswerPage() {
       setUploadingSolution(false);
     }
   };
+
+  if (loadError && !pageLoading) return <><Navbar /><div className="pt-28 px-6 text-center" role="alert"><p>{loadError}</p><button onClick={() => loadData()} className="mt-4 underline">Retry loading</button></div></>;
 
   if (loading || pageLoading) {
     return (
@@ -398,8 +341,9 @@ export default function ExamAnswerPage() {
                       <>
                         <div className="text-4xl mb-3 opacity-60">📄</div>
                         <p className="text-sm text-ink-soft">
-                          The exam PDF couldn&apos;t be loaded. Try reloading the page.
+                          The exam PDF couldn&apos;t be loaded.
                         </p>
+                        <button onClick={examPdf.retry} className="mt-4 underline">Retry exam PDF</button>
                       </>
                     ) : (
                       <div className="w-12 h-12 border-[3px] border-bg-alt border-t-accent rounded-full animate-spin-slow" />
@@ -425,7 +369,7 @@ export default function ExamAnswerPage() {
                     Replace
                   </button>
                 </div>
-                {solIsPdf ? (
+                {solution.error ? (<div role="alert" className="p-8 text-center"><p>{solution.error}</p><button onClick={solution.retry} className="mt-4 underline">Retry solution preview</button></div>) : !solutionUrl ? (<div className="p-8 text-center">Loading solution...</div>) : solIsPdf ? (
                   <iframe
                     src={solutionUrl}
                     className="w-full border-0"
@@ -501,8 +445,9 @@ export default function ExamAnswerPage() {
                     <div className="absolute inset-0 bg-paper flex flex-col items-center justify-center text-center px-8">
                       <div className="text-4xl mb-3 opacity-60">📝</div>
                       <p className="text-sm text-ink-soft">
-                        The answer key couldn&apos;t be built. Try revealing it again.
+                        The answer key couldn&apos;t be built. Please retry.
                       </p>
+                      <button onClick={answers.retry} className="mt-4 underline">Retry answer key</button>
                     </div>
                   )}
                   {answersLoading && (

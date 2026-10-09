@@ -100,10 +100,10 @@ export default function Home() {
         {/* ============ STATS STRIP ============ */}
         <section className="bg-ink text-paper px-6 md:px-12 py-16 grid grid-cols-2 md:grid-cols-4 gap-8 md:gap-12">
           {[
-            { num: "40+", label: t("Hours saved per term"), em: true },
-            { num: "2 min", label: t("Avg processing time"), em: false },
+            { num: "4", label: t("Study tools"), em: true },
+            { num: "AI", label: t("Course-grounded help"), em: false },
             { num: "AR + EN", label: t("Bilingual support"), em: true },
-            { num: "94%", label: t("Exam confidence ↑"), em: false },
+            { num: "PDF", label: t("Download study materials"), em: false },
           ].map((s, i) => (
             <div key={i} className="border-s border-paper/15 ps-6">
               <div className="font-serif text-4xl md:text-5xl font-normal leading-none mb-2">

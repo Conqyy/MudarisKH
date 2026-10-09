@@ -15,7 +15,7 @@ const FEEDBACK_URL = "";
 export default function Navbar() {
   const router = useRouter();
   const { user, profile, signOut, loading } = useAuth();
-  const { t } = useLang();
+  const { t, lang, toggle: toggleLanguage } = useLang();
   const { theme, toggle: toggleTheme } = useTheme();
 
   const [menuOpen, setMenuOpen] = useState(false);
@@ -128,9 +128,11 @@ export default function Navbar() {
 
       {/* CTA Section */}
       <div className="flex items-center gap-3">
+        <button onClick={toggleLanguage} aria-label={lang === "en" ? "Switch to Arabic" : "Switch to English"} className="px-2 h-8 rounded-full border border-line text-xs hover:bg-bg-alt">{lang === "en" ? "العربية" : "English"}</button>
         {/* Theme toggle (light ⇄ dark) */}
         <button
           onClick={toggleTheme}
+          aria-label={theme === "dark" ? t("Switch to light mode") : t("Switch to dark mode")}
           className="w-8 h-8 rounded-full border border-line hover:bg-bg-alt text-sm text-ink-soft transition flex items-center justify-center"
           title={theme === "dark" ? t("Switch to light mode") : t("Switch to dark mode")}
         >
@@ -148,7 +150,7 @@ export default function Navbar() {
                   ? "border-accent bg-bg-alt"
                   : "border-line hover:bg-bg-alt"
               }`}
-              title={t("Account")}
+              title={t("Account")} aria-label={t("Account")} aria-expanded={menuOpen} aria-controls="account-links"
             >
               {profile?.photoURL ? (
                 // eslint-disable-next-line @next/next/no-img-element
@@ -182,7 +184,7 @@ export default function Navbar() {
 
             {/* Dropdown */}
             {menuOpen && (
-              <div className="absolute end-0 mt-2 w-64 bg-paper border border-line rounded-2xl shadow-lift overflow-hidden animate-fade-in z-50">
+              <div id="account-links" className="absolute end-0 mt-2 w-64 bg-paper border border-line rounded-2xl shadow-lift overflow-hidden animate-fade-in z-50">
                 {/* Header */}
                 <div className="px-4 py-4 border-b border-line flex items-center gap-3">
                   {profile?.photoURL ? (
@@ -207,6 +209,10 @@ export default function Navbar() {
                   </div>
                 </div>
 
+                <div className="p-1.5 border-b border-line">
+                  <Link href="/dashboard/recent" onClick={() => setMenuOpen(false)} className="block px-3 py-2.5 rounded-xl text-sm hover:bg-bg-alt">{t("Recent")}</Link>
+                  <Link href="/dashboard/bookmarked" onClick={() => setMenuOpen(false)} className="block px-3 py-2.5 rounded-xl text-sm hover:bg-bg-alt">{t("Bookmarked")}</Link>
+                </div>
                 {/* Links */}
                 <div className="p-1.5">
                   <Link

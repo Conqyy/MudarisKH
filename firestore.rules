@@ -1,26 +1,74 @@
 rules_version = '2';
 
-// Mudaris Firestore security rules.
-// The BACKEND uses the Firebase Admin SDK, which bypasses these rules entirely.
-// These rules only govern the FRONTEND client SDK, which a signed-in student
-// uses to manage their own profile and their own course documents.
+// Admin SDK routes enforce their own ownership. Client writes are limited to
+// profiles and course presentation metadata; lifecycle deletion uses the API.
 service cloud.firestore {
   match /databases/{database}/documents {
-
-    // A user can read/write only their own profile document.
+    function signedIn() { return request.auth != null; }
+    function accountWritable() {
+      return signedIn() && !exists(/databases/$(database)/documents/_account_deletions/$(request.auth.uid));
+    }
+    function owner() { return signedIn() && resource.data.userId == request.auth.uid; }
+    function validProfile(userId) {
+      let d = request.resource.data;
+      return accountWritable() && request.auth.uid == userId
+        && d.keys().hasOnly(['uid', 'email', 'fullName', 'university', 'major',
+                             'academicYear', 'createdAt', 'photoURL'])
+        && d.keys().hasAll(['uid', 'email', 'fullName', 'createdAt'])
+        && d.uid == userId && d.email is string && d.email.size() <= 320
+        && d.fullName is string && d.fullName.size() <= 200
+        && d.createdAt is number && d.createdAt >= 0
+        && (!('university' in d) || (d.university is string && d.university.size() <= 300))
+        && (!('major' in d) || (d.major is string && d.major.size() <= 300))
+        && (!('academicYear' in d) || (d.academicYear is string && d.academicYear.size() <= 100))
+        && (!('photoURL' in d) || (d.photoURL is string && d.photoURL.size() <= 2000));
+    }
+    function validCourse(courseId) {
+      let d = request.resource.data;
+      return accountWritable() && !exists(/databases/$(database)/documents/_course_deletions/$(courseId))
+        && d.keys().hasOnly(['userId', 'code', 'title', 'instructor', 'color',
+                             'documentOrder', 'audioOrder', 'examOrder', 'tutorialOrder',
+                             'titleOverrides', 'reminders', 'archived', 'createdAt'])
+        && d.keys().hasAll(['userId', 'code', 'title', 'instructor', 'color', 'createdAt'])
+        && d.userId == request.auth.uid
+        && d.code is string && d.code.size() <= 100
+        && d.title is string && d.title.size() > 0 && d.title.size() <= 300
+        && d.instructor is string && d.instructor.size() <= 200
+        && d.color is string && d.color.size() <= 100
+        && d.createdAt is number && d.createdAt >= 0
+        && (!('archived' in d) || d.archived is bool)
+        && (!('documentOrder' in d) || (d.documentOrder is list && d.documentOrder.size() <= 2000))
+        && (!('audioOrder' in d) || (d.audioOrder is list && d.audioOrder.size() <= 2000))
+        && (!('examOrder' in d) || (d.examOrder is list && d.examOrder.size() <= 2000))
+        && (!('tutorialOrder' in d) || (d.tutorialOrder is list && d.tutorialOrder.size() <= 2000))
+        && (!('titleOverrides' in d) || (d.titleOverrides is map && d.titleOverrides.size() <= 2000))
+        && (!('reminders' in d) || (d.reminders is list && d.reminders.size() <= 2000));
+    }
     match /users/{userId} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+      allow read: if signedIn() && request.auth.uid == userId;
+      allow create: if validProfile(userId);
+      allow update: if validProfile(userId)
+        && request.resource.data.uid == resource.data.uid
+        && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if false;
     }
-
-    // Every other app collection stores a `userId` field naming the owner.
-    // A signed-in user may only touch documents they own.
+    match /courses/{courseId} {
+      allow read: if owner();
+      allow create: if validCourse(courseId);
+      allow update: if owner() && validCourse(courseId)
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if false;
+    }
+    // Flat exams contain secret rubrics. Use the sanitized API view.
+    // Nested legacy rubric paths receive default deny as well.
+    match /exams/{examId} { allow read, write: if false; }
     match /{collection}/{docId} {
-      allow read:          if request.auth != null
-                           && resource.data.userId == request.auth.uid;
-      allow create:        if request.auth != null
-                           && request.resource.data.userId == request.auth.uid;
-      allow update, delete: if request.auth != null
-                           && resource.data.userId == request.auth.uid;
+      allow read: if collection in ['documents', 'audio_recordings', 'historical_exams',
+                                    'tutorials', 'flashcard_sets', 'summaries',
+                                    'tutor_chats', 'schedule_entries', 'lectures'] && owner();
+      allow write: if false;
     }
+    match /{document=**} { allow read, write: if false; }
   }
 }

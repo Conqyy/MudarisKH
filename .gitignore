@@ -11,6 +11,9 @@
 
 # next.js
 /.next/
+/.next-*/
+/.cache/
+/.tmp/
 /out/
 
 # production
@@ -65,6 +68,10 @@ backend/data/
 !backend/data/**/.gitkeep
 backend/uploads/
 mudaris_local_db.json
+mudaris_local_db.json.lock
+/.pytest-pdf-temp/
+.pytest_cache/
+backend/.pytest-pdf*/
 *.tex
 *.aux
 *.log

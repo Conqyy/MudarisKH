@@ -11,10 +11,12 @@ firestore.rules entirely, so these checks are the only thing standing between a
 request and another student's documents.
 """
 
+import time
+import math
 from fastapi import Header, HTTPException
 
 
-def require_uid(authorization: str = Header(None)) -> str:
+def _verify_token(authorization: str) -> dict:
     """FastAPI dependency: verify ``Authorization: Bearer <id-token>``.
 
     Raises 401 if the header is missing, malformed, or the token does not
@@ -32,7 +34,7 @@ def require_uid(authorization: str = Header(None)) -> str:
     try:
         from firebase_admin import auth as firebase_auth
 
-        decoded = firebase_auth.verify_id_token(token)
+        decoded = firebase_auth.verify_id_token(token, check_revoked=True)
     except Exception:
         # Covers expired/forged tokens and an uninitialised Admin SDK alike.
         raise HTTPException(status_code=401, detail="Invalid or expired token")
@@ -40,7 +42,23 @@ def require_uid(authorization: str = Header(None)) -> str:
     uid = decoded.get("uid")
     if not uid:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    return uid
+    return decoded
+
+
+def require_uid(authorization: str = Header(None)) -> str:
+    return _verify_token(authorization)["uid"]
+
+
+def require_recent_uid(authorization: str = Header(None)) -> str:
+    """Destructive account cleanup requires a sign-in within five minutes."""
+    decoded = _verify_token(authorization)
+    stamp = decoded.get("auth_time")
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)) or not math.isfinite(stamp):
+        raise HTTPException(status_code=401, detail="Please sign in again before deleting your account.")
+    age = time.time() - stamp
+    if age > 300 or age < -60:
+        raise HTTPException(status_code=401, detail="Please sign in again before deleting your account.")
+    return decoded["uid"]
 
 
 def assert_owner(doc: dict, uid: str, what: str = "Resource") -> dict:

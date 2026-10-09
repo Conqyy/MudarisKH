@@ -5,6 +5,8 @@ import logging
 from src.config import settings
 from src.config import prompts
 from src.utils.ai_retry import chat_with_retry
+from src.utils.ai_contracts import validate_analysis, response_text
+from src.utils.text_normalization import excerpt, as_text
 
 logger = logging.getLogger("MudarisHistAnalyzer")
 
@@ -17,22 +19,22 @@ class HistoricalExamAnalyzer:
             default_headers={
                 "HTTP-Referer": "https://mudaris-app.com",
                 "X-Title": "Mudaris AI Engine"
-            }
+            }, timeout=90.0, max_retries=0,
         )
         self.model_id = settings.OPENROUTER_MODEL
 
     def extract_exam_text(self, file_bytes: bytes) -> str:
-        # Robust extraction: PyMuPDF first (handles font encodings PyPDF2 fails
-        # on), with PyPDF2 as a fallback.
+        # Robust extraction: PyMuPDF first (handles font encodings pypdf fails
+        # on), with pypdf as a fallback.
         from src.utils.pdf_extract import extract_pdf_text
         return extract_pdf_text(file_bytes)
 
     def analyze_exam(self, text: str, course_title: str, image_uris: list = None,
                      document_insights: list = None) -> dict:
-        logger.info(f"Analyzing historical exam for course: {course_title}"
+        logger.info("Analyzing historical exam"
                     + (f" (+{len(image_uris)} page images)" if image_uris else ""))
 
-        truncated = text[:15000]
+        truncated = excerpt(text, 30000)
 
         from src.utils.json_parse import parse_with_retry
 
@@ -67,7 +69,7 @@ class HistoricalExamAnalyzer:
                 temperature=0.1,
                 max_tokens=settings.OPENROUTER_MAX_TOKENS,
             )
-            return (response.choices[0].message.content or "").strip()
+            return response_text(response)
 
         result = parse_with_retry(
             _call,
@@ -80,6 +82,7 @@ class HistoricalExamAnalyzer:
                 "totalQuestions",
             ),
             label="historical exam analysis",
+            validator=lambda data: validate_analysis('historical', data),
         )
         # gradingBlueprint is a string, not a list — fix default if missing
         if not isinstance(result.get("gradingBlueprint"), str):
@@ -100,6 +103,8 @@ class HistoricalExamAnalyzer:
         # reads the flag — it never re-decides scope itself.
         self.tag_topic_scope(result, document_insights)
 
+        result['_contextCoverage'] = {'characters': len(text), 'includedCharacters': len(truncated), 'excerpted': len(text) > 30000,
+                                      'imagesIncluded': min(len(image_uris or []), 8), 'imagesAvailable': len(image_uris or [])}
         return result
 
     @staticmethod
@@ -113,7 +118,7 @@ class HistoricalExamAnalyzer:
         _, words = course_scope_from_docs(document_insights)
         out_of_course = []
         for w in topics:
-            name = w.get("topic", "")
+            name = as_text(w.get("topic", ""))
             if not words:                 # no documents → can't judge scope
                 w["inScope"] = None
                 continue
@@ -123,6 +128,7 @@ class HistoricalExamAnalyzer:
                 out_of_course.append(name)
         result["outOfCourseTopics"] = out_of_course
         result["scopeChecked"] = bool(words)
+        result['scopeStatus'] = 'document_scope' if words else 'no_doc_scope'
         if out_of_course:
-            logger.info(f"Past exam: {len(out_of_course)} topic(s) no longer in the course: {', '.join(out_of_course)}")
+            logger.info('Past exam: %d out-of-scope topics excluded', len(out_of_course))
         return result

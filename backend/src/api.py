@@ -2,6 +2,10 @@ import os
 import sys
 import re
 import logging
+import time as _time
+import math
+import threading
+from contextlib import asynccontextmanager
 from typing import Dict, Any, List, Optional
 from pathlib import Path
 
@@ -14,7 +18,7 @@ if project_root not in sys.path:
 try:
     from fastapi import FastAPI, HTTPException, Depends
     from fastapi.middleware.cors import CORSMiddleware
-    from pydantic import BaseModel
+    from pydantic import BaseModel, Field, field_validator
     import uvicorn
 except ImportError as e:
     print("❌ Critical Server Libraries Missing!")
@@ -26,8 +30,8 @@ except ImportError as e:
 # 2. التحقق من وجود مكتبات المشروع والربط مع قاعدة البيانات والذكاء الاصطناعي
 try:
     from src.config.settings import settings
-    from src.auth import require_uid, assert_owner, owned_only
-    from src.database.firebase_client import FirebaseClient
+    from src.auth import require_uid, require_recent_uid, assert_owner, owned_only
+    from src.database.firebase_client import FirebaseClient, DataConflict, DataSizeConflict
     from src.agents.exam_generator import ExamGeneratorAgent
 except ImportError as e:
     print("❌ Critical Project Dependencies or Internal Modules Missing!")
@@ -41,11 +45,119 @@ except ImportError as e:
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("MudarisAPI")
 
+from src.utils.storage_paths import UPLOADS_ROOT, build_storage_path, resolve_storage_path
+from src.utils.ai_contracts import align_printed_marks, validate_exam_contract
+from src.utils.text_normalization import context_coverage
+from src.utils.media_safety import FFMPEG_INPUT_OPTIONS
+from starlette.concurrency import run_in_threadpool
+
+
+def _require_course(course_id: str, uid: str, allow_deleting: bool = False) -> dict:
+    try:
+        course = db_client.get_owned_course(uid, course_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Course not found")
+    course = assert_owner(course, uid, "Course")
+    if not allow_deleting:
+        db_client._assert_write_allowed(uid, course_id)
+    return course
+
+
+def _require_lecture(lecture_id: str, course_id: str, uid: str) -> None:
+    if not lecture_id:
+        return
+    from src.utils.storage_paths import validate_component
+    try:
+        validate_component(lecture_id, "lecture ID")
+        lecture = assert_owner(db_client._flat_get("lectures", lecture_id), uid, "Lecture")
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Lecture not found")
+    if lecture.get("courseId") != course_id:
+        raise HTTPException(status_code=404, detail="Lecture not found")
+
+
+def _save_uploaded_record(save, user_id, course_id, data):
+    """Compensate file creation when metadata cannot be committed."""
+    try:
+        return save(user_id, course_id, data)
+    except Exception:
+        path = data.get("storagePath")
+        if path:
+            try:
+                db_client.delete_file_from_storage(path, user_id=user_id)
+            except Exception:
+                logger.exception("Upload rollback failed; lifecycle cleanup will retry this file")
+        raise
+
+
+def _require_record_storage(row: dict, uid: str, category: str) -> None:
+    path = row.get("storagePath")
+    if not path:
+        return
+    try:
+        resolve_storage_path(path, uid, root=UPLOADS_ROOT)
+        parts = path.split("/")
+        if parts[0] != category or parts[2] != row.get("courseId"):
+            raise ValueError("Storage association changed")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail="This file's course association is invalid. Cleanup was stopped.") from exc
+
+
+def _source_summary(intelligence: dict) -> dict:
+    ids = intelligence.get("source_ids", {})
+    return {
+        "documentIds": ids.get("document_ids", []),
+        "audioIds": ids.get("audio_ids", []),
+        "historicalExamIds": ids.get("historical_exam_ids", []),
+        "tutorialIds": ids.get("tutorial_ids", []),
+    }
+
+
+def _require_sources(intelligence: dict, supplemental_text: str = "") -> None:
+    groups = ("document_analyses", "audio_insights", "historical_analyses", "tutorial_analyses",
+              "document_texts", "historical_texts", "tutorial_texts")
+    if not supplemental_text.strip() and not any(intelligence.get(key) for key in groups):
+        raise HTTPException(status_code=422, detail="Select at least one successfully analyzed source before generating.")
+
+
+async def _read_upload(file, limit: int = 100 * 1024 * 1024) -> bytes:
+    """Bound file buffering even when a request omits Content-Length."""
+    chunks, size = [], 0
+    while chunk := await file.read(1024 * 1024):
+        size += len(chunk)
+        if size > limit:
+            raise HTTPException(status_code=413, detail="This file exceeds the upload size limit.")
+        chunks.append(chunk)
+    if not size:
+        raise HTTPException(status_code=422, detail="The uploaded file is empty.")
+    return b"".join(chunks)
+
+
+def _upload_path(uid: str, course_id: str, category: str, filename: str) -> str:
+    import uuid
+    try:
+        # Validate the original name before adding the collision-free prefix.
+        from src.utils.storage_paths import validate_component
+        name = validate_component(filename or "upload", "filename")
+        return build_storage_path(uid, course_id, category, f"{uuid.uuid4().hex}_{name}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid filename or course ID.")
+
 # تهيئة تطبيق FastAPI
+@asynccontextmanager
+async def _lifespan(application):
+    await run_in_threadpool(_recover_audio_jobs)
+    try:
+        yield
+    finally:
+        await run_in_threadpool(_close_audio_jobs)
+
+
 app = FastAPI(
     title="Mudaris AI Examination Core API",
     description="Backend Grading & Exam Generation Engine for Imam University",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=_lifespan,
 )
 
 # CORS: the frontend only ever runs on localhost now, so that is the single
@@ -65,8 +177,19 @@ app.add_middleware(
 )
 
 
-# Catch-all: log the FULL traceback for any unhandled error and return the real
-# reason to the client, instead of a bare "Internal Server Error" with no detail.
+@app.exception_handler(DataConflict)
+async def _data_conflict_handler(request, exc):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=409, content={"detail": "The account, course, or conversation changed. Reload before retrying."})
+
+
+@app.exception_handler(DataSizeConflict)
+async def _data_size_handler(request, exc):
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=413, content={"detail": "This material is too large to save safely. Split it into smaller parts."})
+
+
+# Keep exception details in backend logs and return a generic retry message.
 @app.exception_handler(Exception)
 async def _unhandled_exception_handler(request, exc):
     import traceback
@@ -77,7 +200,7 @@ async def _unhandled_exception_handler(request, exc):
     )
     return JSONResponse(
         status_code=500,
-        content={"detail": f"{type(exc).__name__}: {exc}"},
+        content={"detail": "The operation could not be completed. Please retry."},
     )
 
 # تهيئة عملاء الاتصال بقاعدة البيانات والذكاء الاصطناعي - نقوم هنا بتمرير كائن الإعدادات المورد من الـ Canvas
@@ -93,6 +216,39 @@ def read_root():
         "university": "Imam Mohammad Ibn Saud Islamic University",
         "api_docs": "/docs"
     }
+
+
+@app.delete("/api/courses/{course_id}")
+def delete_course_endpoint(course_id: str, uid: str = Depends(require_uid)):
+    try:
+        _require_course(course_id, uid, allow_deleting=True)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        try:
+            marker = db_client.get_course_deletion_marker(course_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Course not found")
+        assert_owner(marker, uid, "Course")
+    try:
+        counts = db_client.delete_course_data(uid, course_id)
+    except Exception:
+        logger.exception("Course cleanup failed")
+        raise HTTPException(status_code=503, detail="Course cleanup is incomplete. Please retry before leaving this page.")
+    return {"status": "success", "deleted": course_id, "counts": counts}
+
+
+@app.delete("/api/account")
+def delete_account_endpoint(uid: str = Depends(require_recent_uid)):
+    try:
+        db_client.begin_account_deletion(uid)
+        counts = db_client.delete_user_data(uid)
+        from firebase_admin import auth as firebase_auth
+        firebase_auth.delete_user(uid)
+    except Exception:
+        logger.exception("Account cleanup failed")
+        raise HTTPException(status_code=503, detail="Account cleanup is incomplete. Please retry while signed in.")
+    return {"status": "success", "counts": counts}
 
 # ──────────────────────────────────────────────────
 # Model 1: Document Processor
@@ -122,9 +278,7 @@ def _recheck_past_exam_scope(course_id: str, user_id: str = None):
     try:
         intel = db_client.get_course_intelligence(course_id, user_id=user_id)
         doc_insights = intel.get("document_analyses", [])
-        if not doc_insights:
-            return
-        past_exams = db_client.get_course_historical_exams(course_id)
+        past_exams = db_client.get_course_historical_exams(course_id, user_id=user_id)
         if user_id:
             past_exams = owned_only(past_exams, user_id)
         for h in past_exams:
@@ -145,6 +299,8 @@ async def upload_document(
     title: str = Form(""),
     lecture_id: str = Form(""), uid: str = Depends(require_uid),):
     user_id = uid  # the token decides the owner, not the form field
+    course = _require_course(course_id, uid)
+    _require_lecture(lecture_id, course_id, uid)
     import time as _time
 
     content_type = file.content_type or ""
@@ -155,11 +311,11 @@ async def upload_document(
     if not file_type:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {content_type}")
 
-    file_bytes = await file.read()
+    file_bytes = await _read_upload(file)
     file_size = len(file_bytes)
     doc_title = title or (file.filename or "Untitled Document")
 
-    existing_docs = db_client.get_course_documents(course_id)
+    existing_docs = owned_only(db_client.get_course_documents(course_id, user_id=uid), uid)
     for ed in existing_docs:
         if ed.get("title") == doc_title or (file.filename and file.filename in ed.get("storagePath", "")):
             raise HTTPException(
@@ -167,8 +323,8 @@ async def upload_document(
                 detail=f"A document named '{doc_title}' has already been uploaded to this course."
             )
 
-    storage_path = f"documents/{user_id}/{course_id}/{int(_time.time())}_{file.filename}"
-    file_url = db_client.upload_file_to_storage(file_bytes, storage_path)
+    storage_path = _upload_path(uid, course_id, "documents", file.filename)
+    file_url = db_client.upload_file_to_storage(file_bytes, storage_path, user_id=uid)
 
     doc_data = {
         "title": doc_title,
@@ -182,19 +338,25 @@ async def upload_document(
     if lecture_id:
         doc_data["lectureId"] = lecture_id
 
-    doc_id = db_client.save_document(user_id, course_id, doc_data)
+    doc_id = _save_uploaded_record(db_client.save_document, user_id, course_id, doc_data)
     logger.info(f"Document {doc_id} saved, starting processing...")
 
     try:
-        extracted_text = doc_processor.extract_text(file_bytes, file_type)
+        extracted_text = await run_in_threadpool(doc_processor.extract_text, file_bytes, file_type)
+
+        db_client.update_document(doc_id, {"extractedText": extracted_text})
+        page_images = []
+        if file_type == "pdf":
+            from src.utils.pdf_extract import pdf_to_image_uris
+            page_images = await run_in_threadpool(pdf_to_image_uris, file_bytes)
 
         # If we couldn't read any text, fail clearly instead of saving an empty
         # "completed" doc with 0 topics / 0 chapters.
         from src.utils.pdf_extract import is_meaningful_text
-        if not is_meaningful_text(extracted_text):
+        if not is_meaningful_text(extracted_text) and not page_images:
             msg = (
                 "Couldn't read text from this file. If it's a scanned or "
-                "image-only PDF, it needs OCR (not enabled)."
+                "image-only PDF, its pages could not be read."
             )
             db_client.update_document(doc_id, {
                 "status": "failed",
@@ -202,24 +364,16 @@ async def upload_document(
             })
             raise HTTPException(status_code=422, detail=msg)
 
-        course_doc = None
-        try:
-            from firebase_admin import firestore as _fs
-            course_doc = db_client.db.collection("courses").document(course_id).get()
-        except Exception:
-            pass
-        course_title = course_doc.to_dict().get("title", course_id) if course_doc and course_doc.exists else course_id
+        course_title = course.get("title", course_id)
 
         # For PDFs, also give the analyzer the page images so it can read
         # equations, diagrams, figures, and code (not just extracted text).
-        page_images = []
-        if file_type == "pdf":
-            from src.utils.pdf_extract import pdf_to_image_uris
-            page_images = pdf_to_image_uris(file_bytes)
-        analysis = doc_processor.analyze_document(extracted_text, course_title, image_uris=page_images)
+        analysis = await run_in_threadpool(doc_processor.analyze_document, extracted_text, course_title, image_uris=page_images)
+
+        _require_course(course_id, uid)
 
         db_client.update_document(doc_id, {
-            "extractedText": extracted_text[:50000],
+            "extractedText": extracted_text,
             "analysis": analysis,
             "status": "completed",
             "processedAt": int(_time.time() * 1000),
@@ -241,18 +395,24 @@ async def upload_document(
     except HTTPException:
         # Already handled (e.g. unreadable file) — keep the clean status/message.
         raise
+    except DataSizeConflict as exc:
+        db_client.update_document(doc_id, {"status": "failed", "errorMessage": "This file is too large to save safely. Split it into smaller parts."})
+        raise HTTPException(status_code=413, detail="This file is too large to save safely. Split it into smaller parts.") from exc
+    except DataConflict:
+        raise
     except Exception as e:
         logger.error(f"Document processing failed: {e}")
         db_client.update_document(doc_id, {
             "status": "failed",
-            "errorMessage": str(e),
+            "errorMessage": "Processing failed. Your saved material is available to retry.",
         })
-        raise HTTPException(status_code=500, detail=f"Document processing failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Processing could not finish. Please retry or check backend configuration.")
 
 
 @app.get("/api/documents/{course_id}")
 def get_course_documents(course_id: str, uid: str = Depends(require_uid)):
-    docs = owned_only(db_client.get_course_documents(course_id), uid)
+    _require_course(course_id, uid)
+    docs = owned_only(db_client.get_course_documents(course_id, user_id=uid), uid)
     return {"status": "success", "documents": docs}
 
 
@@ -278,7 +438,15 @@ def reanalyze_document(doc_id: str, uid: str = Depends(require_uid)):
         raise HTTPException(status_code=404, detail="Document not found")
 
     text = doc.get("extractedText", "")
-    if not text or len(text.strip()) < 20:
+    images = []
+    if doc.get("fileType") == "pdf" and doc.get("storagePath"):
+        try:
+            from src.utils.pdf_extract import pdf_to_image_uris
+            path = db_client.download_file_from_storage(doc["storagePath"], uid)
+            images = pdf_to_image_uris(path.read_bytes())
+        except FileNotFoundError:
+            pass
+    if (not text or len(text.strip()) < 20) and not images:
         raise HTTPException(
             status_code=422,
             detail="No extracted text is available for this document — please re-upload it.",
@@ -288,18 +456,9 @@ def reanalyze_document(doc_id: str, uid: str = Depends(require_uid)):
 
     try:
         course_id = doc.get("courseId", "")
-        course_title = course_id
-        if course_id:
-            try:
-                course_doc = (
-                    db_client.db.collection("courses").document(course_id).get()
-                )
-                if course_doc and course_doc.exists:
-                    course_title = course_doc.to_dict().get("title", course_id)
-            except Exception:
-                pass
+        course_title = _require_course(course_id, uid).get("title", course_id)
 
-        analysis = doc_processor.analyze_document(text, course_title)
+        analysis = doc_processor.analyze_document(text, course_title, image_uris=images)
 
         db_client.update_document(doc_id, {
             "analysis": analysis,
@@ -308,6 +467,7 @@ def reanalyze_document(doc_id: str, uid: str = Depends(require_uid)):
             "processedAt": int(_time.time() * 1000),
         })
         logger.info(f"Document {doc_id} re-analyzed successfully.")
+        _recheck_past_exam_scope(course_id, uid)
         return {"status": "success", "document_id": doc_id, "analysis": analysis}
 
     except HTTPException:
@@ -316,11 +476,11 @@ def reanalyze_document(doc_id: str, uid: str = Depends(require_uid)):
         logger.error(f"Re-analysis failed for {doc_id}: {e}")
         db_client.update_document(doc_id, {
             "status": "failed",
-            "errorMessage": str(e),
+            "errorMessage": "Processing failed. Your saved material is available to retry.",
         })
         raise HTTPException(
             status_code=500,
-            detail=f"Re-analysis failed: {str(e)}",
+            detail="Processing could not finish. Please retry or check backend configuration.",
         )
 
 
@@ -330,13 +490,16 @@ def delete_document_endpoint(doc_id: str, uid: str = Depends(require_uid)):
     doc = db_client.get_document(doc_id)
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
+    _require_record_storage(doc, uid, "documents")
     storage_path = doc.get("storagePath")
     if storage_path:
         try:
-            db_client.delete_file_from_storage(storage_path)
+            db_client.delete_file_from_storage(storage_path, user_id=uid)
         except Exception as e:
             logger.warning(f"Could not delete file from storage: {e}")
+            raise HTTPException(status_code=503, detail="File cleanup failed. Please retry.")
     db_client.delete_document(doc_id)
+    _recheck_past_exam_scope(doc.get("courseId", ""), uid)
     logger.info(f"Document {doc_id} deleted.")
     return {"status": "success", "deleted": doc_id}
 
@@ -347,12 +510,14 @@ def delete_audio_endpoint(rec_id: str, uid: str = Depends(require_uid)):
     rec = db_client._flat_get("audio_recordings", rec_id)
     if not rec:
         raise HTTPException(status_code=404, detail="Recording not found")
+    _require_record_storage(rec, uid, "audio")
     storage_path = rec.get("storagePath")
     if storage_path:
         try:
-            db_client.delete_file_from_storage(storage_path)
+            db_client.delete_file_from_storage(storage_path, user_id=uid)
         except Exception as e:
             logger.warning(f"Could not delete file from storage: {e}")
+            raise HTTPException(status_code=503, detail="File cleanup failed. Please retry.")
     db_client.delete_audio_recording(rec_id)
     logger.info(f"Audio recording {rec_id} deleted.")
     return {"status": "success", "deleted": rec_id}
@@ -364,12 +529,14 @@ def delete_historical_exam_endpoint(exam_id: str, uid: str = Depends(require_uid
     exam = db_client._flat_get("historical_exams", exam_id)
     if not exam:
         raise HTTPException(status_code=404, detail="Historical exam not found")
+    _require_record_storage(exam, uid, "historical_exams")
     storage_path = exam.get("storagePath")
     if storage_path:
         try:
-            db_client.delete_file_from_storage(storage_path)
+            db_client.delete_file_from_storage(storage_path, user_id=uid)
         except Exception as e:
             logger.warning(f"Could not delete file from storage: {e}")
+            raise HTTPException(status_code=503, detail="File cleanup failed. Please retry.")
     db_client.delete_historical_exam(exam_id)
     logger.info(f"Historical exam {exam_id} deleted.")
     return {"status": "success", "deleted": exam_id}
@@ -381,12 +548,14 @@ def delete_generated_exam_endpoint(doc_id: str, uid: str = Depends(require_uid))
     exam = db_client.get_exam(doc_id)
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
-    db_client.delete_exam(doc_id)
+    try:
+        db_client.delete_exam_data(uid, doc_id)
+    except Exception:
+        logger.exception("Exam cleanup failed")
+        raise HTTPException(status_code=503, detail="Exam cleanup failed. Please retry.")
     logger.info(f"Generated exam {doc_id} deleted.")
     return {"status": "success", "deleted": doc_id}
 
-
-UPLOADS_ROOT = Path(__file__).resolve().parent.parent / "uploads"
 
 @app.get("/api/files/serve")
 def serve_uploaded_file(path: str, uid: str = Depends(require_uid)):
@@ -395,21 +564,24 @@ def serve_uploaded_file(path: str, uid: str = Depends(require_uid)):
     # replace the root outright ("/proc/self/environ" -> the process env, which
     # holds the API keys and the service-account JSON), and ".." segments walk
     # out of it. Resolve the join, then re-check where it landed.
-    root = UPLOADS_ROOT.resolve()
-    file_path = (root / path).resolve()
-    if not file_path.is_relative_to(root):
-        raise HTTPException(status_code=403, detail="Forbidden")
+    try:
+        file_path = resolve_storage_path(path, uid, root=UPLOADS_ROOT)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="File not found")
     # Upload paths are built as "{kind}/{user_id}/{course_id}/{file}" by the
     # upload endpoints, so the second segment names the owner. Containment
     # alone would still hand one student another student's lecture PDF.
-    parts = Path(path).parts
-    if len(parts) < 2 or parts[1] != uid:
-        raise HTTPException(status_code=404, detail="File not found")
     # is_file() rather than exists(), so directories aren't handed to
     # FileResponse. The detail deliberately omits the resolved path, which
     # would leak the server's filesystem layout.
     if not file_path.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
+        try:
+            file_path = db_client.download_file_from_storage(path, uid)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="File not found")
+        except Exception:
+            logger.exception("Private file download failed")
+            raise HTTPException(status_code=503, detail="The file could not be loaded. Please retry.")
     content_types = {
         ".pdf": "application/pdf",
         ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -440,6 +612,7 @@ async def upload_historical_exam(
     course_id: str = Form(...),
     title: str = Form(""), uid: str = Depends(require_uid),):
     user_id = uid  # the token decides the owner, not the form field
+    course = _require_course(course_id, uid)
     import time as _time
 
     content_type = file.content_type or ""
@@ -453,12 +626,12 @@ async def upload_historical_exam(
             detail="Past exams must be a PDF or an image (photo).",
         )
 
-    file_bytes = await file.read()
+    file_bytes = await _read_upload(file)
     file_size = len(file_bytes)
     exam_title = title or (file.filename or "Untitled Exam")
 
-    storage_path = f"historical_exams/{user_id}/{course_id}/{int(_time.time())}_{file.filename}"
-    file_url = db_client.upload_file_to_storage(file_bytes, storage_path)
+    storage_path = _upload_path(uid, course_id, "historical_exams", file.filename)
+    file_url = db_client.upload_file_to_storage(file_bytes, storage_path, user_id=uid)
 
     exam_data = {
         "title": exam_title,
@@ -469,24 +642,18 @@ async def upload_historical_exam(
         "uploadedAt": int(_time.time() * 1000),
     }
 
-    exam_id = db_client.save_historical_exam(user_id, course_id, exam_data)
+    exam_id = _save_uploaded_record(db_client.save_historical_exam, user_id, course_id, exam_data)
     logger.info(f"Historical exam {exam_id} saved, starting analysis...")
 
     try:
-        course_doc = None
-        try:
-            from firebase_admin import firestore as _fs
-            course_doc = db_client.db.collection("courses").document(course_id).get()
-        except Exception:
-            pass
-        course_title = course_doc.to_dict().get("title", course_id) if course_doc and course_doc.exists else course_id
+        course_title = course.get("title", course_id)
 
         if is_pdf:
-            extracted_text = hist_analyzer.extract_exam_text(file_bytes)
+            extracted_text = await run_in_threadpool(hist_analyzer.extract_exam_text, file_bytes)
             # Render the exam pages to images so the analyzer (vision model) can
             # read equations, diagrams, figures, and code — not just the text.
             from src.utils.pdf_extract import pdf_to_image_uris
-            page_images = pdf_to_image_uris(file_bytes)
+            page_images = await run_in_threadpool(pdf_to_image_uris, file_bytes)
         else:
             # A photo / image of the exam: there's no embedded text, so the
             # vision model reads the page straight from the (normalized) image.
@@ -499,13 +666,15 @@ async def upload_historical_exam(
         course_intel = db_client.get_course_intelligence(course_id, user_id=user_id)
         document_insights = course_intel.get("document_analyses", [])
 
-        analysis = hist_analyzer.analyze_exam(
+        db_client.update_historical_exam(exam_id, {"extractedText": extracted_text})
+        analysis = await run_in_threadpool(hist_analyzer.analyze_exam,
             extracted_text, course_title, image_uris=page_images,
             document_insights=document_insights,
         )
 
+        _require_course(course_id, uid)
         db_client.update_historical_exam(exam_id, {
-            "extractedText": extracted_text[:50000],
+            "extractedText": extracted_text,
             "analysis": analysis,
             "status": "completed",
             "processedAt": int(_time.time() * 1000),
@@ -519,18 +688,24 @@ async def upload_historical_exam(
             "analysis": analysis,
         }
 
+    except DataSizeConflict as exc:
+        db_client.update_historical_exam(exam_id, {"status": "failed", "errorMessage": "This file is too large to save safely. Split it into smaller parts."})
+        raise HTTPException(status_code=413, detail="This file is too large to save safely. Split it into smaller parts.") from exc
+    except DataConflict:
+        raise
     except Exception as e:
         logger.error(f"Historical exam analysis failed: {e}")
         db_client.update_historical_exam(exam_id, {
             "status": "failed",
-            "errorMessage": str(e),
+            "errorMessage": "Processing failed. Your saved material is available to retry.",
         })
-        raise HTTPException(status_code=500, detail=f"Historical exam analysis failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Processing could not finish. Please retry or check backend configuration.")
 
 
 @app.get("/api/historical-exams/{course_id}")
 def get_course_historical_exams(course_id: str, uid: str = Depends(require_uid)):
-    exams = owned_only(db_client.get_course_historical_exams(course_id), uid)
+    _require_course(course_id, uid)
+    exams = owned_only(db_client.get_course_historical_exams(course_id, user_id=uid), uid)
     return {"status": "success", "historical_exams": exams}
 
 
@@ -548,6 +723,7 @@ async def upload_tutorial(
     TOPICS and worked-problem IDEAS only — it never contributes grading weight
     or exam format (those come from past exams). Reuses the document analyzer."""
     user_id = uid  # the token decides the owner, not the form field
+    course = _require_course(course_id, uid)
     import time as _time
 
     content_type = file.content_type or ""
@@ -558,12 +734,12 @@ async def upload_tutorial(
     if not file_type:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {content_type}")
 
-    file_bytes = await file.read()
+    file_bytes = await _read_upload(file)
     file_size = len(file_bytes)
     tut_title = title or (file.filename or "Untitled Tutorial")
 
-    storage_path = f"tutorials/{user_id}/{course_id}/{int(_time.time())}_{file.filename}"
-    file_url = db_client.upload_file_to_storage(file_bytes, storage_path)
+    storage_path = _upload_path(uid, course_id, "tutorials", file.filename)
+    file_url = db_client.upload_file_to_storage(file_bytes, storage_path, user_id=uid)
 
     tut_data = {
         "title": tut_title,
@@ -575,17 +751,18 @@ async def upload_tutorial(
         "uploadedAt": int(_time.time() * 1000),
     }
 
-    tut_id = db_client.save_tutorial(user_id, course_id, tut_data)
+    tut_id = _save_uploaded_record(db_client.save_tutorial, user_id, course_id, tut_data)
     logger.info(f"Tutorial {tut_id} saved, starting analysis...")
 
     try:
-        extracted_text = doc_processor.extract_text(file_bytes, file_type)
+        extracted_text = await run_in_threadpool(doc_processor.extract_text, file_bytes, file_type)
+        db_client.update_tutorial(tut_id, {"extractedText": extracted_text})
 
         from src.utils.pdf_extract import is_meaningful_text
         page_images = []
         if file_type == "pdf":
             from src.utils.pdf_extract import pdf_to_image_uris
-            page_images = pdf_to_image_uris(file_bytes)
+            page_images = await run_in_threadpool(pdf_to_image_uris, file_bytes)
 
         # Allow image-only PDFs (vision will read them); only fail if neither
         # text nor page images are available.
@@ -594,17 +771,13 @@ async def upload_tutorial(
             db_client.update_tutorial(tut_id, {"status": "failed", "errorMessage": msg})
             raise HTTPException(status_code=422, detail=msg)
 
-        course_doc = None
-        try:
-            course_doc = db_client.db.collection("courses").document(course_id).get()
-        except Exception:
-            pass
-        course_title = course_doc.to_dict().get("title", course_id) if course_doc and course_doc.exists else course_id
+        course_title = course.get("title", course_id)
 
-        analysis = doc_processor.analyze_tutorial(extracted_text, course_title, image_uris=page_images)
+        analysis = await run_in_threadpool(doc_processor.analyze_tutorial, extracted_text, course_title, image_uris=page_images)
+        _require_course(course_id, uid)
 
         db_client.update_tutorial(tut_id, {
-            "extractedText": extracted_text[:50000],
+            "extractedText": extracted_text,
             "analysis": analysis,
             "status": "completed",
             "processedAt": int(_time.time() * 1000),
@@ -620,15 +793,21 @@ async def upload_tutorial(
 
     except HTTPException:
         raise
+    except DataSizeConflict as exc:
+        db_client.update_tutorial(tut_id, {"status": "failed", "errorMessage": "This file is too large to save safely. Split it into smaller parts."})
+        raise HTTPException(status_code=413, detail="This file is too large to save safely. Split it into smaller parts.") from exc
+    except DataConflict:
+        raise
     except Exception as e:
         logger.error(f"Tutorial analysis failed: {e}")
-        db_client.update_tutorial(tut_id, {"status": "failed", "errorMessage": str(e)})
-        raise HTTPException(status_code=500, detail=f"Tutorial analysis failed: {str(e)}")
+        db_client.update_tutorial(tut_id, {"status": "failed", "errorMessage": "Processing failed. Your saved material is available to retry."})
+        raise HTTPException(status_code=500, detail="Processing could not finish. Please retry or check backend configuration.")
 
 
 @app.get("/api/tutorials/{course_id}")
 def get_course_tutorials(course_id: str, uid: str = Depends(require_uid)):
-    tutorials = owned_only(db_client.get_course_tutorials(course_id), uid)
+    _require_course(course_id, uid)
+    tutorials = owned_only(db_client.get_course_tutorials(course_id, user_id=uid), uid)
     return {"status": "success", "tutorials": tutorials}
 
 
@@ -638,12 +817,14 @@ def delete_tutorial_endpoint(tut_id: str, uid: str = Depends(require_uid)):
     tut = db_client.get_tutorial(tut_id)
     if not tut:
         raise HTTPException(status_code=404, detail="Tutorial not found")
+    _require_record_storage(tut, uid, "tutorials")
     storage_path = tut.get("storagePath")
     if storage_path:
         try:
-            db_client.delete_file_from_storage(storage_path)
+            db_client.delete_file_from_storage(storage_path, user_id=uid)
         except Exception as e:
             logger.warning(f"Could not delete file from storage: {e}")
+            raise HTTPException(status_code=503, detail="File cleanup failed. Please retry.")
     db_client.delete_tutorial(tut_id)
     logger.info(f"Tutorial {tut_id} deleted.")
     return {"status": "success", "deleted": tut_id}
@@ -681,10 +862,11 @@ def _extract_audio_to_mp3(src_path: str) -> str:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("ffmpeg is not installed or not on PATH; cannot convert video to MP3.")
-    out_path = src_path.rsplit(".", 1)[0] + ".converted.mp3"
+    out_path = str(Path(src_path).with_suffix(".converted.mp3"))
     proc = subprocess.run(
-        [ffmpeg, "-y", "-i", src_path, "-vn", "-acodec", "libmp3lame", "-q:a", "2", out_path],
+        [ffmpeg, "-y", *FFMPEG_INPUT_OPTIONS, "-i", src_path, "-vn", "-acodec", "libmp3lame", "-q:a", "2", out_path],
         capture_output=True,
+        timeout=600,
     )
     if proc.returncode != 0 or not os.path.exists(out_path):
         err = (proc.stderr or b"").decode("utf-8", "ignore")[-500:]
@@ -696,6 +878,11 @@ def _download_url_audio_to_mp3(url: str, out_dir: str):
     """Fetch a video/audio URL (YouTube, Vimeo, direct link, ...) and extract its
     audio to MP3 using yt-dlp + ffmpeg. Returns (mp3_path, detected_title)."""
     import yt_dlp
+    from src.utils.media_download import validate_media_url, download_direct_media, PLATFORM_HOSTS, MAX_MEDIA_BYTES
+    parsed, _ = validate_media_url(url)
+    if parsed.hostname.lower() not in PLATFORM_HOSTS:
+        downloaded = download_direct_media(url, os.path.join(out_dir, "direct_media"))
+        return _extract_audio_to_mp3(str(downloaded)), "Online Recording"
 
     out_tmpl = os.path.join(out_dir, "online_audio.%(ext)s")
     ydl_opts = {
@@ -704,6 +891,11 @@ def _download_url_audio_to_mp3(url: str, out_dir: str):
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
+        "socket_timeout": 60,
+        "retries": 2,
+        "max_filesize": MAX_MEDIA_BYTES,
+        "allowed_extractors": ["youtube.*", "vimeo.*"],
+        "match_filter": lambda info, **kwargs: "Recordings must be at most four hours." if (info.get("duration") or 0) > 14400 else None,
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
@@ -724,68 +916,107 @@ def _download_url_audio_to_mp3(url: str, out_dir: str):
         raise RuntimeError("Could not extract audio from the provided URL.")
     return mp3_path, title
 
-def _resolve_course_title(course_id: str) -> str:
-    try:
-        doc = db_client.db.collection("courses").document(course_id).get()
-        if doc and doc.exists:
-            return doc.to_dict().get("title", course_id)
-    except Exception:
-        pass
-    return course_id
+def _resolve_course_title(course_id: str, user_id: str) -> str:
+    return _require_course(course_id, user_id).get("title", course_id)
+
+
+_AUDIO_WORK_SLOTS = threading.BoundedSemaphore(2)
 
 
 def _run_audio_pipeline(rec_id, course_id, *, file_bytes=None, audio_ext=None,
                         url=None, had_title=True):
-    """Background worker: build an MP3 (from uploaded bytes OR a URL), transcribe
-    it, analyze the transcript, and update the recording's status as it goes.
-    Runs in a daemon thread so long (1-2 hour) recordings never block the HTTP
-    request or trip the browser's timeout."""
-    import time as _time
+    """Checkpoint text before analysis and abandon deleted jobs safely."""
     import tempfile
-    import shutil as _shutil
+    import shutil
 
-    workdir = tempfile.mkdtemp()
+    record = db_client.get_audio_recording(rec_id)
+    owner = record.get("userId") if record else None
+    if not owner or not db_client.audio_job_exists(owner, rec_id):
+        return False
+
+    def checkpoint(data):
+        if not db_client.audio_job_exists(owner, rec_id):
+            raise FileNotFoundError("The recording or course was deleted.")
+        db_client.update_audio_recording(rec_id, data)
+
+    if not _AUDIO_WORK_SLOTS.acquire(timeout=1200):
+        return False
+    workdir = None
     try:
-        if url:
-            db_client.update_audio_recording(rec_id, {"status": "downloading"})
-            mp3_path, vid_title = _download_url_audio_to_mp3(url, workdir)
-            if not had_title:
-                db_client.update_audio_recording(rec_id, {"title": vid_title})
-            transcribe_path = mp3_path
+        workdir = tempfile.mkdtemp(prefix="mudaris-audio-")
+        transcript = record.get("transcript", "")
+        if not transcript:
+            if url:
+                checkpoint({"status": "downloading"})
+                transcribe_path, video_title = _download_url_audio_to_mp3(url, workdir)
+                if not had_title:
+                    checkpoint({"title": video_title})
+            else:
+                if file_bytes is not None:
+                    transcribe_path = os.path.join(workdir, f"input.{audio_ext or 'mp3'}")
+                    with open(transcribe_path, "wb") as output:
+                        output.write(file_bytes)
+                else:
+                    transcribe_path = str(db_client.download_file_from_storage(record["storagePath"], owner))
+                    audio_ext = record.get("audioExt") or Path(transcribe_path).suffix.lstrip(".")
+                if audio_ext in {"mp4", "mov"}:
+                    checkpoint({"status": "converting"})
+                    # Conversion always occurs in a disposable job folder.
+                    copied = os.path.join(workdir, f"input.{audio_ext}")
+                    if str(transcribe_path) != copied:
+                        shutil.copyfile(transcribe_path, copied)
+                    transcribe_path = _extract_audio_to_mp3(copied)
+            checkpoint({"status": "transcribing"})
+            transcript = audio_agent.transcribe_audio(transcribe_path)
+            checkpoint({"transcript": transcript, "status": "analyzing"})
         else:
-            src_path = os.path.join(workdir, f"input.{audio_ext}")
-            with open(src_path, "wb") as f:
-                f.write(file_bytes)
-            transcribe_path = src_path
-            if audio_ext in ("mp4", "mov"):
-                db_client.update_audio_recording(rec_id, {"status": "converting"})
-                transcribe_path = _extract_audio_to_mp3(src_path)
-
-        db_client.update_audio_recording(rec_id, {"status": "transcribing"})
-        transcript = audio_agent.transcribe_audio(transcribe_path)
-
-        db_client.update_audio_recording(rec_id, {"status": "analyzing"})
-        insights = audio_agent.analyze_transcript(transcript, _resolve_course_title(course_id))
-
-        db_client.update_audio_recording(rec_id, {
-            "transcript": transcript[:50000],
-            "insights": insights,
-            "status": "completed",
-            "processedAt": int(_time.time() * 1000),
-        })
-        logger.info(f"Audio recording {rec_id} analyzed successfully.")
+            checkpoint({"status": "analyzing"})
+        text = _frame_notes(transcript) if record.get("sourceType") == "notes" else transcript
+        insights = audio_agent.analyze_transcript(text, _resolve_course_title(course_id, owner))
+        checkpoint({"transcript": transcript, "insights": insights, "status": "completed",
+                    "errorMessage": "", "processedAt": int(_time.time() * 1000)})
         return True
-    except Exception as e:
-        logger.error(f"Audio processing failed for {rec_id}: {e}")
-        db_client.update_audio_recording(rec_id, {"status": "failed", "errorMessage": str(e)})
+    except FileNotFoundError:
+        # A purge wins over an in-flight model request. Never recreate its row.
+        return False
+    except Exception:
+        logger.exception("Audio processing failed")
+        if db_client.audio_job_exists(owner, rec_id):
+            checkpoint({"status": "failed", "errorMessage": "Processing failed. Your saved text can be retried."})
         return False
     finally:
-        _shutil.rmtree(workdir, ignore_errors=True)
+        if workdir:
+            shutil.rmtree(workdir, ignore_errors=True)
+        _AUDIO_WORK_SLOTS.release()
+
+
+def _run_saved_audio_job(rec_id):
+    record = db_client.get_audio_recording(rec_id)
+    if record:
+        _run_audio_pipeline(rec_id, record.get("courseId", ""),
+                            url=record.get("sourceUrl"), had_title=record.get("hadTitle", True))
+
+
+from src.utils.job_runner import AudioJobRunner
+_audio_runner = AudioJobRunner(lambda: db_client, _run_saved_audio_job)
 
 
 def _spawn_audio_job(**kwargs):
-    import threading
-    threading.Thread(target=_run_audio_pipeline, kwargs=kwargs, daemon=True).start()
+    # All inputs needed for restart recovery live on the recording document.
+    # A full in-memory worker pool leaves the job queued in the database.
+    _audio_runner.submit(kwargs["rec_id"])
+
+
+def _recover_audio_jobs():
+    global _audio_runner
+    if _audio_runner._closed:
+        _audio_runner = AudioJobRunner(lambda: db_client, _run_saved_audio_job)
+    _audio_runner.recover()
+
+
+def _close_audio_jobs():
+    _audio_runner.close()
+
 
 
 @app.post("/api/audio/upload")
@@ -800,6 +1031,8 @@ async def upload_audio(
     #       uploader so it can analyze one recording at a time, like documents).
     background: str = Form("1"), uid: str = Depends(require_uid),):
     user_id = uid  # the token decides the owner, not the form field
+    _require_course(course_id, uid)
+    _require_lecture(lecture_id, course_id, uid)
     import time as _time
 
     content_type = file.content_type or ""
@@ -808,25 +1041,28 @@ async def upload_audio(
     if not audio_ext:
         raise HTTPException(status_code=400, detail=f"Unsupported audio/video type: {content_type}")
 
-    file_bytes = await file.read()
+    file_bytes = await _read_upload(file, limit=512 * 1024 * 1024)
     file_size = len(file_bytes)
     audio_title = title or (file.filename or "Untitled Recording")
 
-    storage_path = f"audio/{user_id}/{course_id}/{int(_time.time())}_{file.filename}"
-    file_url = db_client.upload_file_to_storage(file_bytes, storage_path)
+    storage_path = _upload_path(uid, course_id, "audio", file.filename)
+    file_url = db_client.upload_file_to_storage(file_bytes, storage_path, user_id=uid)
 
     rec_data = {
         "title": audio_title,
         "fileUrl": file_url,
         "storagePath": storage_path,
         "fileSize": file_size,
+        "sourceType": "upload",
+        "audioExt": audio_ext,
+        "hadTitle": bool(title.strip()),
         "status": "queued",
         "uploadedAt": int(_time.time() * 1000),
     }
     if lecture_id:
         rec_data["lectureId"] = lecture_id
 
-    rec_id = db_client.save_audio_recording(user_id, course_id, rec_data)
+    rec_id = _save_uploaded_record(db_client.save_audio_recording, user_id, course_id, rec_data)
 
     if background == "1":
         logger.info(f"Audio recording {rec_id} saved; processing in background.")
@@ -840,7 +1076,8 @@ async def upload_audio(
 
     # Synchronous: transcribe + analyze now, return when finished (one at a time).
     logger.info(f"Audio recording {rec_id} saved; processing synchronously.")
-    ok = _run_audio_pipeline(rec_id, course_id, file_bytes=file_bytes, audio_ext=audio_ext)
+    from starlette.concurrency import run_in_threadpool
+    ok = await run_in_threadpool(_run_audio_pipeline, rec_id, course_id, file_bytes=file_bytes, audio_ext=audio_ext)
     if not ok:
         raise HTTPException(status_code=500, detail=f"Could not transcribe \"{audio_title}\".")
     return {"status": "success", "recording_id": rec_id, "title": audio_title}
@@ -863,17 +1100,24 @@ def upload_audio_from_url(payload: AudioUrlRequest, uid: str = Depends(require_u
     analyze. Runs in the background by default, or synchronously when the caller
     wants to process several URLs one at a time."""
     payload.user_id = uid  # ignore any client-supplied owner
+    _require_course(payload.course_id, uid)
+    _require_lecture(payload.lecture_id, payload.course_id, uid)
     import time as _time
 
     url = (payload.video_url or "").strip()
-    if not (url.startswith("http://") or url.startswith("https://")):
-        raise HTTPException(status_code=400, detail="Please provide a valid http(s) video URL.")
+    try:
+        from src.utils.media_download import validate_media_url
+        validate_media_url(url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     rec_data = {
         "title": payload.title or "Online Recording",
         "fileUrl": url,
         "storagePath": "",
         "sourceUrl": url,
+        "sourceType": "url",
+        "hadTitle": bool(payload.title.strip()),
         "fileSize": 0,
         "status": "queued",
         "uploadedAt": int(_time.time() * 1000),
@@ -909,7 +1153,7 @@ def upload_audio_from_url(payload: AudioUrlRequest, uid: str = Depends(require_u
 class LectureNotesRequest(BaseModel):
     user_id: str
     course_id: str
-    notes: str
+    notes: str = Field(max_length=250000)
     title: str = ""
     lecture_id: str = ""
 
@@ -922,6 +1166,8 @@ def upload_lecture_notes(payload: LectureNotesRequest, uid: str = Depends(requir
     transcription step — and the insights are saved exactly like a recording's,
     so exam generation, the intelligence view, and the tutor all use them."""
     payload.user_id = uid  # ignore any client-supplied owner
+    _require_course(payload.course_id, uid)
+    _require_lecture(payload.lecture_id, payload.course_id, uid)
     import time as _time
 
     notes = (payload.notes or "").strip()
@@ -943,7 +1189,7 @@ def upload_lecture_notes(payload: LectureNotesRequest, uid: str = Depends(requir
         # (whose audio file is still on disk if analysis fails), these notes exist
         # nowhere else — if we only saved them on success, a failed AI call would
         # throw away everything the student wrote and force them to retype it.
-        "transcript": notes[:50000],
+        "transcript": notes,
         "uploadedAt": int(_time.time() * 1000),
     }
     if payload.lecture_id:
@@ -956,7 +1202,8 @@ def upload_lecture_notes(payload: LectureNotesRequest, uid: str = Depends(requir
     # the midterm" should be treated as high-confidence exam signals.
     framed = _frame_notes(notes)
     try:
-        insights = audio_agent.analyze_transcript(framed, _resolve_course_title(payload.course_id))
+        insights = audio_agent.analyze_transcript(framed, _resolve_course_title(payload.course_id, uid))
+        _require_course(payload.course_id, uid)
         db_client.update_audio_recording(rec_id, {
             "insights": insights,
             "status": "completed",
@@ -966,8 +1213,8 @@ def upload_lecture_notes(payload: LectureNotesRequest, uid: str = Depends(requir
         # The typed notes stay on the record (saved above), so nothing the
         # student wrote is lost — the entry can be re-analyzed instead.
         logger.error(f"Notes analysis failed for {rec_id}: {e}")
-        db_client.update_audio_recording(rec_id, {"status": "failed", "errorMessage": str(e)})
-        raise HTTPException(status_code=500, detail=f"Could not analyze the notes: {e}")
+        db_client.update_audio_recording(rec_id, {"status": "failed", "errorMessage": "Processing failed. Your saved material is available to retry."})
+        raise HTTPException(status_code=500, detail="Processing could not finish. Please retry or check backend configuration.")
 
     return {"status": "success", "recording_id": rec_id, "title": title}
 
@@ -998,6 +1245,11 @@ def reanalyze_audio_recording(rec_id: str, uid: str = Depends(require_uid)):
 
     transcript = (rec.get("transcript") or "").strip()
     if len(transcript) < 20:
+        if rec.get("storagePath") or rec.get("sourceUrl"):
+            ok = _run_audio_pipeline(rec_id, rec.get("courseId", ""), url=rec.get("sourceUrl"), had_title=rec.get("hadTitle", True))
+            if ok:
+                return {"status": "success", "recording_id": rec_id}
+            raise HTTPException(status_code=503, detail="Processing could not finish. Please retry.")
         raise HTTPException(
             status_code=422,
             detail=(
@@ -1013,8 +1265,10 @@ def reanalyze_audio_recording(rec_id: str, uid: str = Depends(require_uid)):
 
     try:
         insights = audio_agent.analyze_transcript(
-            text, _resolve_course_title(rec.get("courseId", ""))
+            text, _resolve_course_title(rec.get("courseId", ""), uid)
         )
+        assert_owner(db_client.get_audio_recording(rec_id), uid, "Recording")
+        _require_course(rec.get("courseId", ""), uid)
         db_client.update_audio_recording(rec_id, {
             "insights": insights,
             "status": "completed",
@@ -1025,13 +1279,14 @@ def reanalyze_audio_recording(rec_id: str, uid: str = Depends(require_uid)):
         return {"status": "success", "recording_id": rec_id, "insights": insights}
     except Exception as e:
         logger.error(f"Re-analysis failed for {rec_id}: {e}")
-        db_client.update_audio_recording(rec_id, {"status": "failed", "errorMessage": str(e)})
-        raise HTTPException(status_code=500, detail=f"Re-analysis failed: {e}")
+        db_client.update_audio_recording(rec_id, {"status": "failed", "errorMessage": "Processing failed. Your saved material is available to retry."})
+        raise HTTPException(status_code=500, detail="Processing could not finish. Please retry or check backend configuration.")
 
 
 @app.get("/api/audio/{course_id}")
 def get_course_audio_recordings(course_id: str, uid: str = Depends(require_uid)):
-    recordings = owned_only(db_client.get_course_audio_recordings(course_id), uid)
+    _require_course(course_id, uid)
+    recordings = owned_only(db_client.get_course_audio_recordings(course_id, user_id=uid), uid)
     return {"status": "success", "audio_recordings": recordings}
 
 
@@ -1039,16 +1294,29 @@ def get_course_audio_recordings(course_id: str, uid: str = Depends(require_uid))
 # Model 4 Enhanced: Generate with full intelligence
 # ──────────────────────────────────────────────────
 
-class EnhancedExamGenerateRequest(BaseModel):
+class SourceSelectionRequest(BaseModel):
+    document_ids: Optional[List[str]] = None
+    historical_exam_ids: Optional[List[str]] = None
+    tutorial_ids: Optional[List[str]] = None
+    audio_ids: Optional[List[str]] = None
+
+    @field_validator("document_ids", "historical_exam_ids", "tutorial_ids", "audio_ids")
+    @classmethod
+    def validate_selection(cls, ids):
+        if ids is None:
+            return ids
+        if len(ids) > 200:
+            raise ValueError("Select at most 200 sources per type.")
+        from src.utils.storage_paths import validate_component
+        return list(dict.fromkeys(validate_component(item, "source ID") for item in ids))
+
+
+class EnhancedExamGenerateRequest(SourceSelectionRequest):
     user_id: str
     course_id: str
     topics: List[str] = []
     preference: str = "Generate a comprehensive mock exam."
-    document_ids: List[str] = []
-    historical_exam_ids: List[str] = []
-    tutorial_ids: List[str] = []
-    audio_ids: List[str] = []
-    total_marks: int = 40
+    total_marks: int = Field(default=40, ge=1, le=500)
     exam_type: str = "Final"
     transcripts: str = ""
     cues: str = "Standard academic prep."
@@ -1057,11 +1325,13 @@ class EnhancedExamGenerateRequest(BaseModel):
 
 def _normalize_marks(rubrics: dict, total_marks: int):
     """Scale each question's max_score so they sum to exactly total_marks.
-    Mutates the rubric in place; integer marks, remainder added to the last."""
+    Mutates the rubric in place using positive integer largest-remainder scaling."""
     qs = rubrics.get("questions", {})
-    if not qs or not total_marks:
+    if not qs:
         return
-    ids = sorted(qs.keys())
+    if not isinstance(total_marks, int) or total_marks < len(qs):
+        raise ValueError("Total marks must allow at least one mark per question.")
+    ids = sorted(qs.keys(), key=lambda key: (int(key[1:]) if re.fullmatch(r"q\d+", key) else 1000000, key))
     defaults = {"mcq": 2.0, "true_false": 2.0}
     raw = []
     for qid in ids:
@@ -1070,31 +1340,23 @@ def _normalize_marks(rubrics: dict, total_marks: int):
             v = float(q.get("max_score") or 0)
         except (TypeError, ValueError):
             v = 0
-        if v <= 0:
+        if not math.isfinite(v) or v <= 0:
             v = defaults.get(q.get("question_type", "written"), 10.0)
         raw.append(v)
-    s = sum(raw) or 1
-    scaled = [max(1, round(v / s * total_marks)) for v in raw]
-    # fix rounding drift so it sums to exactly total_marks
+    remaining = total_marks - len(ids)
+    shares = [v / sum(raw) * remaining for v in raw]
+    scaled = [1 + math.floor(value) for value in shares]
     drift = total_marks - sum(scaled)
-    scaled[-1] = max(1, scaled[-1] + drift)
+    order = sorted(range(len(ids)), key=lambda i: (-(shares[i] % 1), i))
+    for index in order[:drift]:
+        scaled[index] += 1
     for qid, m in zip(ids, scaled):
         qs[qid]["max_score"] = m
 
 
 def _compile_answer_tex(tex: str, name: str):
-    """Compile answer-key LaTeX to a PDF; return the pdf path or None."""
-    import tempfile
-    from src.utils.compile_pdf import compile_tex_to_pdf
-    tmpdir = tempfile.mkdtemp()
-    tex_path = os.path.join(tmpdir, f"{name}-answers.tex")
-    with open(tex_path, "w", encoding="utf-8") as f:
-        f.write(tex.strip())
-    try:
-        return compile_tex_to_pdf(tex_path)
-    except Exception as e:
-        logger.warning(f"Answer-key compile error: {e}")
-        return None
+    from src.utils.pdf_response import compile_temp_pdf
+    return compile_temp_pdf(tex.strip(), name + "-answers")
 
 
 def _rubric_answer_key_tex(exam: dict) -> str:
@@ -1147,73 +1409,56 @@ def _rubric_answer_key_tex(exam: dict) -> str:
 
 
 def _make_compilable_answer_key(exam: dict) -> str:
-    """Return a COMPLETE, compilable, INTERLEAVED model-answer key — each question
-    immediately followed by its answer in red (NOT a separate answers section).
-
-    Primary: the rich LLM key (typeset math, worked solutions). Backup: a safe
-    template built from structured plain-text Q&A (also interleaved, always
-    compiles). Both keep the question-then-red-answer layout. The append-at-end
-    rubric key is only a last resort if both LLM paths fail entirely."""
+    """Choose only a complete answer document whose temporary compile is cleaned."""
+    from src.utils.pdf_response import check_tex_compiles
     exam_tex = exam.get("texContent", "") or ""
     exam_id = exam.get("examId", "exam")
-    num_q = len(exam.get("questionStructure", []) or []) or len((exam.get("rubrics", {}) or {}).get("questions", {}) or {})
-    need = max(3, num_q - 1) if num_q else 3  # allow a small off-by-one
-
-    # 1) Rich interleaved worked solutions (typeset). Accept if complete + compiles.
-    rich = ""
+    need = len(exam.get("questionStructure", []) or []) or len((exam.get("rubrics", {}) or {}).get("questions", {}) or {})
+    if not need:
+        raise ValueError("The exam has no complete question structure. Reopen or regenerate it.")
     try:
         rich = ai_agent._sanitize_latex(ai_agent.generate_answer_key(exam_tex, exam_id))
-        if rich.count("Answer") >= need and _compile_answer_tex(rich, exam_id):
+        if rich.count("Answer:") == need and check_tex_compiles(rich, exam_id + "-answers"):
             return rich
-    except Exception as e:
-        logger.warning(f"Rich answer key failed for {exam_id}: {e}")
-
-    # 2) Safe interleaved template from structured Q&A (question + red answer each).
-    logger.info(f"Trying safe interleaved answer key for {exam_id}.")
-    safe = ""
+    except Exception:
+        logger.warning("Rich answer-key generation or compilation failed")
     try:
         items = ai_agent.generate_answer_pairs(exam_tex, exam_id)
-        if items:
+        if len(items) == need:
             safe = ai_agent._sanitize_latex(ai_agent._answers_to_latex(items, exam_id))
-            if len(items) >= need and _compile_answer_tex(safe, exam_id):
+            if check_tex_compiles(safe, exam_id + "-answers"):
                 return safe
-    except Exception as e:
-        logger.warning(f"Safe answer key failed for {exam_id}: {e}")
-
-    # 3) Use whichever interleaved version compiled, even if a bit short.
-    if rich and _compile_answer_tex(rich, exam_id):
-        return rich
-    if safe and _compile_answer_tex(safe, exam_id):
-        return safe
-
-    # 4) Absolute last resort: deterministic rubric key (answers appended at end)
-    #    — only so the student gets *something* complete if the model fully fails.
-    det = _rubric_answer_key_tex(exam)
-    if det and _compile_answer_tex(det, exam_id):
-        return det
-    return rich or safe or det
+    except Exception:
+        logger.warning("Structured answer-key generation or compilation failed")
+    rubrics = (exam.get("rubrics", {}) or {}).get("questions", {}) or {}
+    if len(rubrics) == need and all(q.get("correct_answer") or q.get("criteria") for q in rubrics.values()):
+        deterministic = _rubric_answer_key_tex(exam)
+        if deterministic and check_tex_compiles(deterministic, exam_id + "-answers"):
+            return deterministic
+    raise ValueError("A complete answer-key PDF could not be prepared. Please retry.")
 
 
 @app.post("/api/exams/generate-enhanced")
 def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: str = Depends(require_uid)):
     payload.user_id = uid  # ignore any client-supplied owner
+    _require_course(payload.course_id, uid)
     import uuid
     import base64
-    import tempfile
     import time as _time
-    from src.utils.compile_pdf import compile_tex_to_pdf
 
     exam_id = f"exam_{uuid.uuid4().hex[:8]}"
     logger.info(f"Generating enhanced exam {exam_id} for course {payload.course_id}")
 
     intelligence = db_client.get_course_intelligence(
         payload.course_id,
-        document_ids=payload.document_ids if payload.document_ids else None,
-        historical_exam_ids=payload.historical_exam_ids if payload.historical_exam_ids else None,
-        tutorial_ids=payload.tutorial_ids if payload.tutorial_ids else None,
-        audio_ids=payload.audio_ids if payload.audio_ids else None,
+        document_ids=payload.document_ids,
+        historical_exam_ids=payload.historical_exam_ids,
+        tutorial_ids=payload.tutorial_ids,
+        audio_ids=payload.audio_ids,
         user_id=payload.user_id,
     )
+
+    _require_sources(intelligence, payload.transcripts)
 
     # Brand the exam header as "Mudaris University of {the student's major}".
     try:
@@ -1262,28 +1507,35 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
         rubrics = ai_agent.generate_rubrics_from_tex(cleaned_tex, exam_id)
 
     # Normalize per-question marks so the exam totals EXACTLY the requested marks
-    _normalize_marks(rubrics, payload.total_marks)
+    try:
+        validate_exam_contract(cleaned_tex, rubrics, intelligence.get("historical_analyses", []))
+        _normalize_marks(rubrics, payload.total_marks)
+        cleaned_tex = align_printed_marks(cleaned_tex, rubrics)
+        validate_exam_contract(cleaned_tex, rubrics, intelligence.get("historical_analyses", []), payload.total_marks)
+        from src.utils.compile_pdf import validate_tex_source
+        validate_tex_source(cleaned_tex)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
 
-    db_client.save_secret_rubrics(payload.user_id, payload.course_id, exam_id, rubrics)
+    _require_course(payload.course_id, uid)
 
     questions_rubrics = rubrics.get("questions", {})
     question_structure = []
-    for qid, qdata in sorted(questions_rubrics.items()):
+    for qid, qdata in sorted(questions_rubrics.items(), key=lambda item: int(item[0][1:])):
         question_structure.append({
             "id": qid,
             "type": qdata.get("question_type", "written"),
         })
 
     def _try_compile(tex: str):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tex_path = os.path.join(tmpdir, f"{exam_id}.tex")
-            with open(tex_path, "w", encoding="utf-8") as f:
-                f.write(f"% !TEX root = {exam_id}.tex\n" + tex.strip())
-            pdf_path = compile_tex_to_pdf(tex_path)
-            if pdf_path and os.path.exists(pdf_path):
-                with open(pdf_path, "rb") as pf:
-                    return base64.b64encode(pf.read()).decode()
-        return None
+        from src.utils.pdf_response import compile_temp_pdf, cleanup_temp_pdf
+        path = compile_temp_pdf(tex, exam_id)
+        if not path:
+            return None
+        try:
+            return base64.b64encode(Path(path).read_bytes()).decode()
+        finally:
+            cleanup_temp_pdf(path)
 
     pdf_base64 = None
     try:
@@ -1293,6 +1545,7 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
             logger.warning(f"Exam {exam_id} failed first compile; attempting LaTeX repair.")
             repaired = ai_agent.repair_latex(cleaned_tex)
             if repaired and repaired.strip() != cleaned_tex.strip():
+                validate_exam_contract(repaired, rubrics, intelligence.get("historical_analyses", []), payload.total_marks)
                 pdf_base64 = _try_compile(repaired)
                 if pdf_base64 is not None:
                     cleaned_tex = repaired
@@ -1300,19 +1553,21 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
     except Exception as e:
         logger.warning(f"PDF compilation skipped: {e}")
 
+    _require_course(payload.course_id, uid)
+    db_client.save_secret_rubrics(payload.user_id, payload.course_id, exam_id, rubrics)
     doc_db_id = db_client.save_exam_flat(payload.user_id, payload.course_id, {
         "examId": exam_id,
-        "texContent": cleaned_tex[:50000],
+        "texContent": cleaned_tex,
         "questionStructure": question_structure,
         "rubrics": rubrics,
         "totalMarks": payload.total_marks,
         "examType": payload.exam_type,
         "status": "generated",
-        "sourceSummary": {
-            "documentIds": payload.document_ids or [],
-            "audioIds": [],
-            "historicalExamIds": [],
-        },
+        "pdfStatus": "ready" if pdf_base64 else "retry_required",
+        "sourceSummary": _source_summary(intelligence),
+        "contextCoverage": context_coverage(intelligence),
+        "modelId": settings.OPENROUTER_MODEL,
+        "promptVersion": "2026-10-09",
         "createdAt": int(_time.time() * 1000),
     })
 
@@ -1338,7 +1593,8 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
 
 @app.get("/api/exams/list/{course_id}")
 def list_course_exams(course_id: str, uid: str = Depends(require_uid)):
-    exams = owned_only(db_client.get_course_exams(course_id), uid)
+    _require_course(course_id, uid)
+    exams = owned_only(db_client.get_course_exams(course_id, user_id=uid), uid)
     safe = []
     for e in exams:
         safe.append({
@@ -1388,52 +1644,35 @@ def get_exam_pdf(doc_id: str, uid: str = Depends(require_uid)):
     Sanitizes the stored .tex first, which also rescues older exams that were
     saved before the sanitizer fix (conversational preamble / markdown fences)."""
     assert_owner(db_client.get_exam(doc_id), uid, "Exam")
-    import tempfile
-    from src.utils.compile_pdf import compile_tex_to_pdf
-
-    exam = db_client.get_exam(doc_id)
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
-
-    tex = exam.get("texContent", "")
+    from src.utils.pdf_response import compile_temp_pdf, cleanup_temp_pdf, pdf_file_response
+    from src.utils.ai_contracts import exam_question_numbers
+    exam = assert_owner(db_client.get_exam(doc_id), uid, "Exam")
+    tex = ai_agent._sanitize_latex(exam.get("texContent", ""))
     if not tex:
         raise HTTPException(status_code=404, detail="No LaTeX content for this exam")
-
-    # Re-clean in case the stored tex still has a preamble/fence (legacy exams)
-    tex = ai_agent._sanitize_latex(tex)
-
-    def _compile(t: str):
-        tmpdir = tempfile.mkdtemp()
-        tex_path = os.path.join(tmpdir, f"{exam_name}.tex")
-        with open(tex_path, "w", encoding="utf-8") as f:
-            f.write(t.strip())
-        return compile_tex_to_pdf(tex_path)
-
+    exam_name = exam.get("examId", doc_id)
+    path, handed_to_response = None, False
     try:
-        exam_name = exam.get("examId", doc_id)
-        pdf_path = _compile(tex)
-        if not pdf_path or not os.path.exists(pdf_path):
-            # Self-heal: repair the LaTeX once, cache the fixed version, retry
-            logger.warning(f"Exam {doc_id} failed compile on view; repairing.")
+        path = compile_temp_pdf(tex, exam_name)
+        if not path:
             repaired = ai_agent.repair_latex(tex)
             if repaired and repaired.strip() != tex.strip():
-                pdf_path = _compile(repaired)
-                if pdf_path and os.path.exists(pdf_path):
-                    db_client.update_exam(doc_id, {"texContent": repaired[:50000]})
-        if not pdf_path or not os.path.exists(pdf_path):
-            raise HTTPException(status_code=422, detail="LaTeX compilation failed")
-        # inline so the browser previews it in an iframe instead of downloading
-        return FileResponse(
-            pdf_path,
-            media_type="application/pdf",
-            filename=f"{exam_name}.pdf",
-            content_disposition_type="inline",
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Exam PDF compile failed: {e}")
-        raise HTTPException(status_code=500, detail=f"PDF compilation error: {str(e)}")
+                if exam_question_numbers(tex):
+                    validate_exam_contract(repaired, exam.get("rubrics", {}), total_marks=exam.get("totalMarks"))
+                path = compile_temp_pdf(repaired, exam_name)
+                if path:
+                    assert_owner(db_client.get_exam(doc_id), uid, "Exam")
+                    db_client.update_exam(doc_id, {"texContent": repaired, "pdfStatus": "ready"})
+        if not path:
+            raise HTTPException(status_code=503, detail="PDF compilation failed or the compiler is unavailable. Please retry.")
+        response = pdf_file_response(path, exam_name)
+        handed_to_response = True
+        return response
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="The exam contains unsupported TeX or its repair changed the questions.") from exc
+    finally:
+        if path and not handed_to_response:
+            cleanup_temp_pdf(path)
 
 
 @app.get("/api/exams/{doc_id}/answer-key-pdf")
@@ -1442,46 +1681,38 @@ def get_exam_answer_key_pdf(doc_id: str, uid: str = Depends(require_uid)):
     exam — a full worked-solutions document the student opens after solving the
     exam themselves. Watermarked + served inline."""
     assert_owner(db_client.get_exam(doc_id), uid, "Exam")
-    import tempfile
-    from src.utils.compile_pdf import compile_tex_to_pdf
-
-    exam = db_client.get_exam(doc_id)
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
-
+    from src.utils.pdf_response import cleanup_temp_pdf, pdf_file_response
+    exam = assert_owner(db_client.get_exam(doc_id), uid, "Exam")
     exam_name = exam.get("examId", doc_id)
-    exam_tex = exam.get("texContent", "")
     num_q = len(exam.get("questionStructure", []) or []) or len((exam.get("rubrics", {}) or {}).get("questions", {}) or {})
-
-    # Use the cached answer key only if it's substantial (covers most questions).
-    # Otherwise rebuild — this discards earlier incomplete/empty caches.
-    answer_tex = exam.get("answerKeyTex", "")
-    if answer_tex and answer_tex.count("Answer") < max(2, num_q):
-        answer_tex = ""
-    pdf_path = None
-    if answer_tex:
-        pdf_path = _compile_answer_tex(ai_agent._sanitize_latex(answer_tex), exam_name)
-
-    if not pdf_path or not os.path.exists(pdf_path):
-        if not exam_tex:
-            raise HTTPException(status_code=404, detail="No exam content to build answers from.")
-        try:
+    answer_tex = exam.get("answerKeyTex", "") if exam.get("answerKeyQuestionCount") == num_q and num_q else ""
+    path, handed_to_response = None, False
+    try:
+        if answer_tex:
+            try:
+                path = _compile_answer_tex(ai_agent._sanitize_latex(answer_tex), exam_name)
+            except ValueError:
+                # Legacy or unsupported cached keys must not poison every retry.
+                answer_tex = ""
+                path = None
+        if not path:
+            if not exam.get("texContent"):
+                raise HTTPException(status_code=404, detail="No exam content to build answers from.")
             answer_tex = _make_compilable_answer_key(exam)
-        except Exception as e:
-            logger.error(f"Answer-key generation failed for {doc_id}: {e}")
-            raise HTTPException(status_code=500, detail=f"Could not generate model answers: {str(e)}")
-        db_client.update_exam(doc_id, {"answerKeyTex": answer_tex[:60000]})
-        pdf_path = _compile_answer_tex(answer_tex, exam_name)
-
-    if not pdf_path or not os.path.exists(pdf_path):
-        raise HTTPException(status_code=422, detail="Answer-key compilation failed")
-
-    return FileResponse(
-        pdf_path,
-        media_type="application/pdf",
-        filename=f"{exam_name}-answers.pdf",
-        content_disposition_type="inline",
-    )
+            path = _compile_answer_tex(answer_tex, exam_name)
+            if path:
+                assert_owner(db_client.get_exam(doc_id), uid, "Exam")
+                db_client.update_exam(doc_id, {"answerKeyTex": answer_tex, "answerKeyQuestionCount": num_q})
+        if not path:
+            raise HTTPException(status_code=503, detail="Answer-key compilation failed or the compiler is unavailable. Please retry.")
+        response = pdf_file_response(path, exam_name + "-answers")
+        handed_to_response = True
+        return response
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="A complete answer key could not be prepared. Please retry.") from exc
+    finally:
+        if path and not handed_to_response:
+            cleanup_temp_pdf(path)
 
 
 @app.post("/api/exams/{doc_id}/solution")
@@ -1500,12 +1731,23 @@ async def upload_exam_solution(doc_id: str, file: UploadFile = File(...), uid: s
     if ext not in allowed:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: .{ext}")
 
-    file_bytes = await file.read()
+    file_bytes = await _read_upload(file)
     user_id = exam.get("userId", "anon")
     course_id = exam.get("courseId", "course")
-    storage_path = f"solutions/{user_id}/{course_id}/{doc_id}_{int(_time.time())}_{file.filename}"
-    db_client.upload_file_to_storage(file_bytes, storage_path)
+    _require_course(course_id, uid)
+    storage_path = _upload_path(uid, course_id, "solutions", f"{doc_id}_{file.filename}")
+    db_client.upload_file_to_storage(file_bytes, storage_path, user_id=uid)
+    old_path = exam.get("solutionPath")
+    if old_path:
+        try:
+            db_client.delete_file_from_storage(old_path, user_id=uid)
+        except Exception:
+            paths = list(exam.get("supersededSolutionPaths", []))
+            paths.append(old_path)
+            db_client.update_exam(doc_id, {"supersededSolutionPaths": paths})
 
+    assert_owner(db_client.get_exam(doc_id), uid, "Exam")
+    _require_course(course_id, uid)
     db_client.update_exam(doc_id, {
         "solutionPath": storage_path,
         "solutionName": file.filename or "solution",
@@ -1527,6 +1769,7 @@ async def upload_exam_solution(doc_id: str, file: UploadFile = File(...), uid: s
 
 @app.get("/api/intelligence/{course_id}")
 def get_course_intelligence_endpoint(course_id: str, uid: str = Depends(require_uid)):
+    _require_course(course_id, uid)
     intelligence = db_client.get_course_intelligence(course_id, user_id=uid)
     return {"status": "success", **intelligence}
 
@@ -1535,19 +1778,16 @@ def get_course_intelligence_endpoint(course_id: str, uid: str = Depends(require_
 # Flashcards — generate study cards from course intelligence
 # ──────────────────────────────────────────────────
 
-class FlashcardGenerateRequest(BaseModel):
+class FlashcardGenerateRequest(SourceSelectionRequest):
     user_id: str
     course_id: str
     topics: List[str] = []
-    document_ids: List[str] = []
-    historical_exam_ids: List[str] = []
-    tutorial_ids: List[str] = []
-    audio_ids: List[str] = []
-    count: int = 20
+    count: int = Field(default=20, ge=1, le=20)
 
 @app.post("/api/flashcards/generate")
 def generate_flashcards_endpoint(payload: FlashcardGenerateRequest, uid: str = Depends(require_uid)):
     payload.user_id = uid  # ignore any client-supplied owner
+    _require_course(payload.course_id, uid)
     import uuid
     import time as _time
 
@@ -1556,12 +1796,14 @@ def generate_flashcards_endpoint(payload: FlashcardGenerateRequest, uid: str = D
 
     intelligence = db_client.get_course_intelligence(
         payload.course_id,
-        document_ids=payload.document_ids if payload.document_ids else None,
-        historical_exam_ids=payload.historical_exam_ids if payload.historical_exam_ids else None,
-        tutorial_ids=payload.tutorial_ids if payload.tutorial_ids else None,
-        audio_ids=payload.audio_ids if payload.audio_ids else None,
+        document_ids=payload.document_ids,
+        historical_exam_ids=payload.historical_exam_ids,
+        tutorial_ids=payload.tutorial_ids,
+        audio_ids=payload.audio_ids,
         user_id=payload.user_id,
     )
+
+    _require_sources(intelligence)
 
     cards = ai_agent.generate_flashcards(
         academic_data={},
@@ -1580,11 +1822,15 @@ def generate_flashcards_endpoint(payload: FlashcardGenerateRequest, uid: str = D
         raise HTTPException(status_code=422, detail="Could not generate flashcards. Make sure documents are analyzed.")
 
     title = f"{len(cards)} cards · {_time.strftime('%b %d')}"
+    _require_course(payload.course_id, uid)
     doc_db_id = db_client.save_flashcard_set(payload.user_id, payload.course_id, {
         "setId": set_id,
         "title": title,
         "cards": cards,
-        "sourceSummary": {"documentIds": payload.document_ids or []},
+        "sourceSummary": _source_summary(intelligence),
+        "contextCoverage": context_coverage(intelligence),
+        "modelId": settings.OPENROUTER_MODEL,
+        "promptVersion": "2026-10-09",
         "createdAt": int(_time.time() * 1000),
     })
 
@@ -1599,7 +1845,7 @@ def generate_flashcards_endpoint(payload: FlashcardGenerateRequest, uid: str = D
 
 @app.get("/api/flashcards/list/{course_id}")
 def list_flashcard_sets(course_id: str, uid: str = Depends(require_uid)):
-    sets = owned_only(db_client.get_course_flashcard_sets(course_id), uid)
+    sets = owned_only(db_client.get_course_flashcard_sets(course_id, user_id=uid), uid)
     safe = [{
         "id": s.get("id"),
         "setId": s.get("setId"),
@@ -1634,15 +1880,11 @@ def delete_flashcard_set_endpoint(doc_id: str, uid: str = Depends(require_uid)):
 # Summaries — generate study summaries from course intelligence
 # ──────────────────────────────────────────────────
 
-class SummaryGenerateRequest(BaseModel):
+class SummaryGenerateRequest(SourceSelectionRequest):
     user_id: str
     course_id: str
     topics: List[str] = []
-    document_ids: List[str] = []
-    historical_exam_ids: List[str] = []
-    tutorial_ids: List[str] = []
-    audio_ids: List[str] = []
-    instructions: str = ""
+    instructions: str = Field(default="", max_length=10000)
 
 _SUMMARY_STOPWORDS = {
     "the", "and", "for", "with", "that", "this", "from", "are", "was", "were",
@@ -1653,11 +1895,8 @@ _SUMMARY_STOPWORDS = {
 
 
 def _topic_word_set(text: str) -> set:
-    import re as _re
-    return {
-        w for w in _re.findall(r"[a-z0-9]+", (text or "").lower())
-        if len(w) > 2 and w not in _SUMMARY_STOPWORDS
-    }
+    from src.utils.topic_scope import core_words
+    return core_words(text or "") - _SUMMARY_STOPWORDS
 
 
 def _derive_section_exam_weights(sections: list, historical_analyses: list) -> list:
@@ -1813,9 +2052,8 @@ def _apply_summary_scope(summary: dict, document_analyses: list) -> dict:
     (``topic_in_scope`` can't judge the body on its own: it needs MOST of a
     string's words to match, which a full sentence never manages.)
 
-    Deliberately conservative: with no selected documents there's nothing to
-    scope against, and if the filter would remove more than half the sections we
-    assume the heuristic — not the model — is wrong and keep everything."""
+    Without selected document vocabulary scope is unknown. When vocabulary is
+    available, unrelated content is removed even when it is the majority."""
     from src.utils.topic_scope import (
         course_scope_from_docs, topic_in_scope, core_words, variants,
     )
@@ -1832,34 +2070,26 @@ def _apply_summary_scope(summary: dict, document_analyses: list) -> dict:
             [sec.get("content", "") or ""] + list(sec.get("keyPoints", []) or [])[:8]
         )
         hits = {w for w in core_words(text) if variants(w) & words}
-        return len(hits) >= min_hits
+        return len(hits) >= min(min_hits, len(words))
 
     def section_in_scope(sec: dict) -> bool:
         return topic_in_scope(sec.get("heading", ""), words) or body_touches_scope(sec)
 
     kept = [s for s in sections if section_in_scope(s)]
     dropped = len(sections) - len(kept)
-    if not dropped:
-        return summary
-    if len(kept) < len(sections) / 2:
-        logger.warning(
-            f"Summary: scope filter would drop {dropped}/{len(sections)} sections — "
-            "treating that as a bad match and keeping all of them."
-        )
-        return summary
-
-    logger.info(
-        "Summary: dropped %d section(s) outside the selected documents: %s",
-        dropped,
-        ", ".join(s.get("heading", "?") for s in sections if s not in kept),
-    )
+    if dropped:
+        logger.info("Summary: removed %d sections outside selected documents", dropped)
+        summary["overview"] = ""
     summary["sections"] = kept
+    summary["keyTerms"] = [term for term in summary.get("keyTerms", []) if topic_in_scope(term.get("term", ""), words)]
+    summary["examFocus"] = [focus for focus in summary.get("examFocus", []) if topic_in_scope(focus, words) or len({w for w in core_words(focus) if variants(w) & words}) >= min(2, len(words))]
     return summary
 
 
 @app.post("/api/summaries/generate")
 def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depends(require_uid)):
     payload.user_id = uid  # ignore any client-supplied owner
+    _require_course(payload.course_id, uid)
     import uuid
     import time as _time
 
@@ -1868,12 +2098,14 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depend
 
     intelligence = db_client.get_course_intelligence(
         payload.course_id,
-        document_ids=payload.document_ids if payload.document_ids else None,
-        historical_exam_ids=payload.historical_exam_ids if payload.historical_exam_ids else None,
-        tutorial_ids=payload.tutorial_ids if payload.tutorial_ids else None,
-        audio_ids=payload.audio_ids if payload.audio_ids else None,
+        document_ids=payload.document_ids,
+        historical_exam_ids=payload.historical_exam_ids,
+        tutorial_ids=payload.tutorial_ids,
+        audio_ids=payload.audio_ids,
         user_id=payload.user_id,
     )
+
+    _require_sources(intelligence)
 
     summary = ai_agent.generate_summary(
         academic_data={},
@@ -1898,6 +2130,8 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depend
     # Safety net: strip sections about material outside the SELECTED documents
     # (e.g. chapters the past exams cover but the student didn't pick).
     summary = _apply_summary_scope(summary, intelligence.get("document_analyses", []))
+    if not summary.get("sections"):
+        raise HTTPException(status_code=422, detail="No topics remain after applying your selection and exclusions.")
 
     # Replace the LLM's eyeballed exam weights with values DERIVED from the past
     # exams' topic weights (when past exams are available), so the percentages
@@ -1916,14 +2150,16 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depend
 
     # Name the summary after the documents/chapters it was generated from
     # (in the order they were selected), so it's identifiable in the list.
-    course_docs = db_client.get_course_documents(payload.course_id)
+    course_docs = owned_only(db_client.get_course_documents(payload.course_id, user_id=uid), uid)
     course_docs = [d for d in course_docs if d.get("status") == "completed" and d.get("analysis")]
-    if payload.document_ids:
+    if payload.document_ids is not None:
         by_id = {d.get("id"): d for d in course_docs}
         course_docs = [by_id[i] for i in payload.document_ids if i in by_id]
     doc_titles = [(d.get("title") or "") for d in course_docs]
     title = _compose_summary_title(doc_titles, summary.get("title"))
+    summary["title"] = title
 
+    _require_course(payload.course_id, uid)
     doc_db_id = db_client.save_summary(payload.user_id, payload.course_id, {
         "summaryId": summary_id,
         "title": title,
@@ -1931,7 +2167,10 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depend
         "sections": summary.get("sections", []),
         "keyTerms": summary.get("keyTerms", []),
         "examFocus": summary.get("examFocus", []),
-        "sourceSummary": {"documentIds": payload.document_ids or []},
+        "sourceSummary": _source_summary(intelligence),
+        "contextCoverage": context_coverage(intelligence),
+        "modelId": settings.OPENROUTER_MODEL,
+        "promptVersion": "2026-10-09",
         "createdAt": int(_time.time() * 1000),
     })
 
@@ -1940,7 +2179,7 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depend
 
 @app.get("/api/summaries/list/{course_id}")
 def list_summaries(course_id: str, uid: str = Depends(require_uid)):
-    items = owned_only(db_client.get_course_summaries(course_id), uid)
+    items = owned_only(db_client.get_course_summaries(course_id, user_id=uid), uid)
     safe = [{
         "id": s.get("id"),
         "summaryId": s.get("summaryId"),
@@ -2047,11 +2286,14 @@ def _md_inline_to_latex(s: str) -> str:
 
 
 def _summary_to_latex(summary: dict) -> str:
-    esc = lambda x: _md_inline_to_latex(_latex_escape(x))
+    from src.utils.pdf_response import unicode_font_preamble
+    def esc(value):
+        body = _md_inline_to_latex(_latex_escape(value, keep_unknown_unicode=True))
+        return r"\textarabic{\upshape " + body + "}" if any("\u0600" <= c <= "\u06ff" for c in str(value or "")) else body
     parts = [
         r"\documentclass[11pt,a4paper]{article}",
         r"\usepackage[a4paper,margin=2.2cm]{geometry}",
-        r"\usepackage[T1]{fontenc}",
+        *unicode_font_preamble(),
         r"\usepackage{enumitem}",
         r"\usepackage{parskip}",
         r"\usepackage{eso-pic}",
@@ -2098,32 +2340,9 @@ def _summary_to_latex(summary: dict) -> str:
 @app.get("/api/summaries/{doc_id}/pdf")
 def get_summary_pdf(doc_id: str, uid: str = Depends(require_uid)):
     assert_owner(db_client.get_summary(doc_id), uid, "Summary")
-    import tempfile
-    from src.utils.compile_pdf import compile_tex_to_pdf
-
-    s = db_client.get_summary(doc_id)
-    if not s:
-        raise HTTPException(status_code=404, detail="Summary not found")
-
-    tex = _summary_to_latex(s)
-    name = s.get("summaryId", doc_id)
-    try:
-        tmpdir = tempfile.mkdtemp()
-        tex_path = os.path.join(tmpdir, f"{name}.tex")
-        with open(tex_path, "w", encoding="utf-8") as f:
-            f.write(tex)
-        pdf_path = compile_tex_to_pdf(tex_path)
-        if not pdf_path or not os.path.exists(pdf_path):
-            raise HTTPException(status_code=422, detail="Summary PDF compilation failed")
-        return FileResponse(
-            pdf_path, media_type="application/pdf",
-            filename=f"{name}.pdf", content_disposition_type="inline",
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Summary PDF compile failed: {e}")
-        raise HTTPException(status_code=500, detail=f"PDF error: {str(e)}")
+    from src.utils.pdf_response import compile_pdf_response
+    summary = assert_owner(db_client.get_summary(doc_id), uid, "Summary")
+    return compile_pdf_response(_summary_to_latex(summary), summary.get("summaryId", doc_id), engine="xelatex")
 
 
 def _audio_to_latex(rec: dict) -> str:
@@ -2135,6 +2354,7 @@ def _audio_to_latex(rec: dict) -> str:
     get_audio_pdf) with a Unicode font, so the professor's verbatim quotes — which
     may be Arabic — render correctly inline instead of being stripped, while the
     summary/headings stay English."""
+    from src.utils.pdf_response import unicode_font_preamble
     insights = rec.get("insights") or {}
     title = rec.get("title", "Lecture Recording")
 
@@ -2164,15 +2384,7 @@ def _audio_to_latex(rec: dict) -> str:
     parts = [
         r"\documentclass[12pt,a4paper]{article}",
         r"\usepackage[a4paper,margin=2.2cm]{geometry}",
-        r"\usepackage{fontspec}",
-        r"\usepackage{polyglossia}",
-        r"\setmainlanguage{english}",
-        r"\setotherlanguage{arabic}",
-        # No \setmainfont: keep XeLaTeX's default Latin Modern (the original
-        # serif look). Only Arabic runs use an Arabic-capable font, shaped.
-        # Arial ships with Windows and covers Arabic. Change it here if you ever
-        # compile this on a machine without it.
-        r"\newfontfamily\arabicfont[Script=Arabic]{Arial}",
+        *unicode_font_preamble(),
         r"\usepackage{enumitem}",
         r"\usepackage{parskip}",
         r"\usepackage{eso-pic}",
@@ -2238,40 +2450,11 @@ def _audio_to_latex(rec: dict) -> str:
 def get_audio_pdf(rec_id: str, uid: str = Depends(require_uid)):
     """Compile and serve a PDF of a recording's analysis + transcript."""
     assert_owner(db_client.get_audio_recording(rec_id), uid, "Recording")
-    import tempfile
-    from src.utils.compile_pdf import compile_tex_to_pdf
-
-    rec = db_client.get_audio_recording(rec_id)
-    if not rec:
-        raise HTTPException(status_code=404, detail="Recording not found")
-    if not (rec.get("insights") or rec.get("transcript")):
-        raise HTTPException(
-            status_code=409,
-            detail="This recording hasn't been analyzed yet.",
-        )
-
-    tex = _audio_to_latex(rec)
-    name = (rec.get("title") or rec_id).strip() or rec_id
-    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name)[:60] or rec_id
-    try:
-        tmpdir = tempfile.mkdtemp()
-        tex_path = os.path.join(tmpdir, f"{safe}.tex")
-        with open(tex_path, "w", encoding="utf-8") as f:
-            f.write(tex)
-        # XeLaTeX so the professor's original-language (Arabic / mixed) speech
-        # renders with correct shaping + RTL instead of being stripped.
-        pdf_path = compile_tex_to_pdf(tex_path, engine="xelatex")
-        if not pdf_path or not os.path.exists(pdf_path):
-            raise HTTPException(status_code=422, detail="Audio PDF compilation failed")
-        return FileResponse(
-            pdf_path, media_type="application/pdf",
-            filename=f"{safe}.pdf", content_disposition_type="inline",
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Audio PDF compile failed: {e}")
-        raise HTTPException(status_code=500, detail=f"PDF error: {str(e)}")
+    from src.utils.pdf_response import compile_pdf_response
+    rec = assert_owner(db_client.get_audio_recording(rec_id), uid, "Recording")
+    if not rec.get("insights"):
+        raise HTTPException(status_code=409, detail="This recording has not been analyzed yet. Retry its analysis first.")
+    return compile_pdf_response(_audio_to_latex(rec), rec.get("title") or rec_id, engine="xelatex")
 
 
 # ──────────────────────────────────────────────────
@@ -2282,8 +2465,10 @@ _VALID_DAYS = {"sunday", "monday", "tuesday", "wednesday", "thursday"}
 
 def _to_minutes(hhmm: str):
     try:
-        h, m = hhmm.split(":")
-        return int(h) * 60 + int(m)
+        if not re.fullmatch(r"\d{2}:\d{2}", hhmm or ""):
+            return None
+        h, m = map(int, hhmm.split(":"))
+        return h * 60 + m if 0 <= h <= 23 and 0 <= m <= 59 else None
     except Exception:
         return None
 
@@ -2311,7 +2496,8 @@ def create_schedule_entry(payload: ScheduleEntryRequest, uid: str = Depends(requ
     if end <= start:
         raise HTTPException(status_code=400, detail="End time must be after start time.")
 
-    _check_schedule_overlap(payload.user_id, day, start, end, exclude_id=None)
+    if payload.courseId.strip():
+        _require_course(payload.courseId.strip(), uid)
 
     entry = {
         "day": day,
@@ -2322,7 +2508,11 @@ def create_schedule_entry(payload: ScheduleEntryRequest, uid: str = Depends(requ
         "title": payload.title.strip(),
         "createdAt": int(_time.time() * 1000),
     }
-    entry_id = db_client.save_schedule_entry(payload.user_id, entry)
+    from src.database.firebase_client import DataConflict
+    try:
+        entry_id = db_client.save_schedule_entry_atomic(uid, entry)
+    except DataConflict as exc:
+        raise HTTPException(status_code=409, detail="The schedule changed or this time overlaps another lecture. Reload and retry.") from exc
     return {"status": "success", "id": entry_id, **entry}
 
 
@@ -2356,7 +2546,8 @@ def update_schedule_entry(entry_id: str, payload: ScheduleEntryRequest, uid: str
     if end <= start:
         raise HTTPException(status_code=400, detail="End time must be after start time.")
 
-    _check_schedule_overlap(payload.user_id, day, start, end, exclude_id=entry_id)
+    if payload.courseId.strip():
+        _require_course(payload.courseId.strip(), uid)
 
     data = {
         "day": day,
@@ -2366,7 +2557,11 @@ def update_schedule_entry(entry_id: str, payload: ScheduleEntryRequest, uid: str
         "courseId": payload.courseId.strip(),
         "title": payload.title.strip(),
     }
-    db_client.update_schedule_entry(entry_id, data)
+    from src.database.firebase_client import DataConflict
+    try:
+        db_client.save_schedule_entry_atomic(uid, data, entry_id=entry_id)
+    except DataConflict as exc:
+        raise HTTPException(status_code=409, detail="The schedule changed or this time overlaps another lecture. Reload and retry.") from exc
     return {"status": "success", "id": entry_id, **data}
 
 
@@ -2398,12 +2593,37 @@ class TutorChatRequest(BaseModel):
     historical_exam_ids: Optional[List[str]] = None
     tutorial_ids: Optional[List[str]] = None
 
+    @field_validator("messages")
+    @classmethod
+    def validate_messages(cls, messages):
+        if len(messages) > 200:
+            raise ValueError("This conversation is too long. Please start a new chat.")
+        for message in messages:
+            if message.get("role") not in {"user", "assistant"}:
+                raise ValueError("Messages must use user or assistant roles.")
+            if not message.get("content", "").strip() or len(message["content"]) > 20000:
+                raise ValueError("Messages must contain between 1 and 20000 characters.")
+        return messages
+
 @app.post("/api/tutor/chat")
 def tutor_chat(payload: TutorChatRequest, uid: str = Depends(require_uid)):
     payload.user_id = uid  # ignore any client-supplied owner
+    _require_course(payload.course_id, uid)
     import time as _time
     if not payload.messages:
         raise HTTPException(status_code=400, detail="No messages provided.")
+
+    if payload.chat_id:
+        chat = assert_owner(db_client.get_tutor_chat(payload.chat_id), uid, "Chat")
+        if chat.get("courseId") != payload.course_id:
+            raise HTTPException(status_code=404, detail="Chat not found")
+        saved_messages = chat.get("messages", [])
+        # Accept one new user message after the server-owned history, never a
+        # client replacement of an existing conversation.
+        if payload.messages[:-1] != saved_messages or payload.messages[-1].get("role") != "user":
+            raise HTTPException(status_code=409, detail="This conversation changed. Reopen it before sending again.")
+    elif len(payload.messages) != 1 or payload.messages[-1].get("role") != "user":
+        raise HTTPException(status_code=400, detail="Start a new conversation with one user message.")
 
     # The tutor reads its resources DIRECTLY from the DBs, restricted to the
     # specific lectures and past exams the student selected.
@@ -2420,13 +2640,22 @@ def tutor_chat(payload: TutorChatRequest, uid: str = Depends(require_uid)):
         reply = tutor_agent.reply(resources, payload.messages)
     except Exception as e:
         logger.error(f"Tutor reply failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Tutor error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Processing could not finish. Please retry or check backend configuration.")
+
+    if not isinstance(reply, str) or not reply.strip():
+        raise HTTPException(status_code=502, detail="The tutor returned an empty response. Please retry.")
 
     # Persist the conversation in its own tutor_chats table
     full_messages = list(payload.messages) + [{"role": "assistant", "content": reply}]
+    _require_course(payload.course_id, uid)
     now = int(_time.time() * 1000)
     if payload.chat_id:
-        db_client.update_tutor_chat(payload.chat_id, {"messages": full_messages, "updatedAt": now})
+        from src.database.firebase_client import DataConflict
+        try:
+            db_client.append_tutor_messages(uid, payload.course_id, payload.chat_id, saved_messages,
+                                           [payload.messages[-1], {"role": "assistant", "content": reply}], now)
+        except DataConflict as exc:
+            raise HTTPException(status_code=409, detail="This conversation changed. Reopen it before sending again.") from exc
         chat_id = payload.chat_id
     else:
         first_user = next((m.get("content", "") for m in payload.messages if m.get("role") == "user"), "New chat")

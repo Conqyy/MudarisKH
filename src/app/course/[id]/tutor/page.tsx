@@ -11,7 +11,7 @@ import { useAuth } from "@/lib/auth-context";
 import { getCourse, getUserCourses, Course } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiJson } from "@/lib/api";
 // Tailwind-styled renderers for the tutor's Markdown replies.
 // dir="auto" + logical paddings (ps-*) let Arabic render RTL and English LTR
 // automatically within the same reply.
@@ -78,6 +78,10 @@ export default function TutorPage() {
   const [course, setCourse] = useState<Course | null>(null);
   const [allCourses, setAllCourses] = useState<Course[]>([]);
   const [pageLoading, setPageLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const loadRequest = useRef<AbortController | null>(null);
+  const loadDataRef = useRef<(() => Promise<void>) | null>(null);
+  useEffect(() => () => { loadRequest.current?.abort(); }, [courseId, user?.uid]);
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [chatId, setChatId] = useState("");
@@ -85,6 +89,28 @@ export default function TutorPage() {
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const conversationVersion = useRef(0);
+  const conversationRequest = useRef<AbortController | null>(null);
+  const historyRequest = useRef<AbortController | null>(null);
+  const pendingTurn = useRef<{ messages: ChatMessage[]; content: string } | null>(null);
+  const activeChatId = useRef("");
+  const [chatError, setChatError] = useState("");
+  const [sendError, setSendError] = useState("");
+  const [openingChat, setOpeningChat] = useState(false);
+  const invalidateConversation = (restoreDraft = false) => {
+    conversationVersion.current += 1;
+    conversationRequest.current?.abort();
+    conversationRequest.current = null;
+    if (restoreDraft && pendingTurn.current) {
+      setMessages(pendingTurn.current.messages);
+      setInput(pendingTurn.current.content);
+    }
+    pendingTurn.current = null;
+    setThinking(false);
+    setOpeningChat(false);
+    setSendError("");
+  };
+  useEffect(() => () => { conversationVersion.current += 1; conversationRequest.current?.abort(); historyRequest.current?.abort(); }, [courseId, user?.uid]);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Selectable sources
@@ -122,26 +148,37 @@ export default function TutorPage() {
   }, [user, loading, router]);
 
   useEffect(() => {
-    if (user && courseId) loadData();
+    if (user && courseId) loadDataRef.current?.();
   }, [user, courseId]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, thinking]);
 
-  const loadChats = async () => {
+  const loadChats = async (signal?: AbortSignal) => {
     if (!user) return;
+    historyRequest.current?.abort();
+    const controller = new AbortController();
+    historyRequest.current = controller;
+    const activeSignal = signal || controller.signal;
     try {
-      const res = await apiFetch(`${API_URL}/api/tutor/chats/${user.uid}/${courseId}`);
+      const res = await apiFetch(`${API_URL}/api/tutor/chats/${user.uid}/${courseId}`, { signal: activeSignal });
+      if (!res.ok) throw new Error("Could not load conversations.");
       const data = await res.json();
+      if (activeSignal.aborted || controller.signal.aborted) return;
+      setChatError("");
       setChats(data.chats || []);
     } catch {
-      setChats([]);
+      if (!activeSignal.aborted && !controller.signal.aborted) setChatError("Could not load conversations.");
     }
   };
 
   const loadData = async () => {
     if (!user) return;
+    loadRequest.current?.abort();
+    const controller = new AbortController();
+    loadRequest.current = controller;
+    setLoadError("");
     setPageLoading(true);
     try {
       const [courseData, allCoursesData] = await Promise.all([
@@ -152,17 +189,20 @@ export default function TutorPage() {
         router.push("/dashboard");
         return;
       }
+      if (controller.signal.aborted) return;
       setCourse(courseData);
       setAllCourses(allCoursesData);
-      await loadChats();
+      await loadChats(controller.signal);
+      if (controller.signal.aborted) return;
 
       // Load selectable sources (completed lectures/recordings + past exams + tutorials)
       const [docsRes, audioRes, histRes, tutRes] = await Promise.all([
-        apiFetch(`${API_URL}/api/documents/${courseId}`).then((r) => r.json()).catch(() => ({ documents: [] })),
-        apiFetch(`${API_URL}/api/audio/${courseId}`).then((r) => r.json()).catch(() => ({ audio_recordings: [] })),
-        apiFetch(`${API_URL}/api/historical-exams/${courseId}`).then((r) => r.json()).catch(() => ({ historical_exams: [] })),
-        apiFetch(`${API_URL}/api/tutorials/${courseId}`).then((r) => r.json()).catch(() => ({ tutorials: [] })),
+        apiJson(`${API_URL}/api/documents/${courseId}`, { signal: controller.signal }),
+        apiJson(`${API_URL}/api/audio/${courseId}`, { signal: controller.signal }),
+        apiJson(`${API_URL}/api/historical-exams/${courseId}`, { signal: controller.signal }),
+        apiJson(`${API_URL}/api/tutorials/${courseId}`, { signal: controller.signal }),
       ]);
+      if (controller.signal.aborted) return;
       const docsList = ordered(
         (docsRes.documents || []).filter((d: any) => d.status === "completed"),
         courseData?.documentOrder,
@@ -205,13 +245,14 @@ export default function TutorPage() {
       setSelRecs(new Set(recs.map((x) => x.id)));
       setSelExams(new Set(exams.map((x) => x.id)));
       setSelTuts(new Set(tuts.map((x) => x.id)));
-    } catch (e) {
-      console.error(e);
+    } catch (error: any) {
+      if (!controller.signal.aborted) setLoadError(error.message || "Could not load course data.");
     } finally {
-      setPageLoading(false);
+      if (!controller.signal.aborted) setPageLoading(false);
     }
   };
 
+  loadDataRef.current = loadData;
   const toggleSel = (set: Set<string>, setter: (s: Set<string>) => void, id: string) => {
     const next = new Set(set);
     if (next.has(id)) next.delete(id);
@@ -220,6 +261,8 @@ export default function TutorPage() {
   };
 
   const newChat = () => {
+    invalidateConversation();
+    activeChatId.current = "";
     setMessages([]);
     setChatId("");
     setInput("");
@@ -227,25 +270,34 @@ export default function TutorPage() {
   };
 
   const openChat = async (id: string) => {
+    invalidateConversation();
+    const version = conversationVersion.current;
+    const controller = new AbortController();
+    conversationRequest.current = controller;
+    setOpeningChat(true);
     setHistoryOpen(false);
     try {
-      const res = await apiFetch(`${API_URL}/api/tutor/chat/${id}`);
-      if (!res.ok) throw new Error();
-      const data = await res.json();
+      const data = await apiJson(API_URL + "/api/tutor/chat/" + id, { signal: controller.signal });
+      if (version !== conversationVersion.current) return;
       setMessages(data.chat?.messages || []);
+      activeChatId.current = id;
       setChatId(id);
     } catch {
-      alert("Could not open this conversation.");
+      if (version === conversationVersion.current) alert("Could not open this conversation.");
+    } finally {
+      if (version === conversationVersion.current) { setOpeningChat(false); conversationRequest.current = null; }
     }
   };
 
   const deleteChat = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (!confirm("Delete this conversation?")) return;
+    if (id === activeChatId.current) invalidateConversation(true);
     try {
-      await apiFetch(`${API_URL}/api/tutor/chat/${id}`, { method: "DELETE" });
+      const res = await apiFetch(`${API_URL}/api/tutor/chat/${id}`, { method: "DELETE" });
+      if (!res.ok) throw new Error("Delete failed");
       setChats((prev) => prev.filter((c) => c.id !== id));
-      if (id === chatId) newChat();
+      if (id === activeChatId.current) newChat();
     } catch {
       alert("Failed to delete.");
     }
@@ -253,14 +305,20 @@ export default function TutorPage() {
 
   const send = async (text: string) => {
     const content = text.trim();
-    if (!content || thinking || !user) return;
+    if (!content || thinking || openingChat || conversationRequest.current || !user) return;
+    const version = conversationVersion.current;
+    const controller = new AbortController();
+    conversationRequest.current = controller;
+    pendingTurn.current = { messages, content };
     const next = [...messages, { role: "user" as const, content }];
     setMessages(next);
     setInput("");
     setThinking(true);
+    setSendError("");
     try {
       const res = await apiFetch(`${API_URL}/api/tutor/chat`, {
         method: "POST",
+        signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           user_id: user.uid,
@@ -275,21 +333,24 @@ export default function TutorPage() {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => null);
-        throw new Error(err?.detail || `Tutor error (${res.status})`);
+        throw new Error(res.status === 409 ? "This conversation changed. Reopen it from History, then send your draft again." : err?.detail || `Tutor error (${res.status})`);
       }
       const data = await res.json();
+      if (version !== conversationVersion.current) return;
       setMessages((prev) => [...prev, { role: "assistant", content: data.reply || "" }]);
-      if (data.chat_id && data.chat_id !== chatId) setChatId(data.chat_id);
+      if (data.chat_id) { activeChatId.current = data.chat_id; setChatId(data.chat_id); }
       loadChats();
     } catch (e: any) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: `⚠️ ${e.message || "Something went wrong."}` },
-      ]);
+      if (version !== conversationVersion.current) return;
+      setMessages(messages);
+      setInput(content);
+      setSendError(e.message || "Something went wrong. Please retry.");
     } finally {
-      setThinking(false);
+      if (version === conversationVersion.current) { conversationRequest.current = null; pendingTurn.current = null; setThinking(false); }
     }
   };
+
+  if (loadError && !pageLoading) return <><Navbar /><div className="pt-28 px-6 text-center" role="alert"><p>{loadError}</p><button onClick={() => loadData()} className="mt-4 underline">Retry loading</button></div></>;
 
   if (loading || pageLoading) {
     return (
@@ -330,12 +391,14 @@ export default function TutorPage() {
         <div className="text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-2 px-1">
           History
         </div>
-        {chats.length === 0 ? (
+        {chatError ? <div role="alert" className="text-xs text-accent">{chatError}<button onClick={() => loadChats()} className="block underline mt-2">Retry history</button></div> : chats.length === 0 ? (
           <div className="text-xs text-ink-mute/60 italic px-1 py-2">No conversations yet</div>
         ) : (
           chats.map((c) => (
             <div
               key={c.id}
+              role="button" tabIndex={0}
+              onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openChat(c.id); } }}
               onClick={() => openChat(c.id)}
               className={`group flex items-center justify-between gap-2 px-3 py-2 rounded-xl cursor-pointer transition ${
                 c.id === chatId ? "bg-accent/10 text-accent" : "hover:bg-bg-alt"
@@ -344,8 +407,8 @@ export default function TutorPage() {
               <span className="text-sm truncate flex-1">{c.title}</span>
               <button
                 onClick={(e) => deleteChat(e, c.id)}
-                title="Delete"
-                className="w-5 h-5 rounded-full text-ink-mute opacity-0 group-hover:opacity-100 hover:bg-accent hover:text-paper transition flex items-center justify-center text-[11px] leading-none flex-shrink-0"
+                title="Delete" aria-label={"Delete " + c.title}
+                className="w-5 h-5 rounded-full text-ink-mute opacity-100 md:opacity-0 md:group-hover:opacity-100 focus:opacity-100 hover:bg-accent hover:text-paper transition flex items-center justify-center text-[11px] leading-none flex-shrink-0"
               >
                 ×
               </button>
@@ -568,6 +631,8 @@ export default function TutorPage() {
 
             {/* Chat column */}
             <div className="flex-1 flex flex-col min-w-0">
+              {sendError && <div role="alert" className="p-3 text-sm text-accent border-b border-line">{sendError}</div>}
+              {openingChat && <p role="status" className="p-3 text-sm">Opening conversation...</p>}
               {/* Header */}
               <div className="border-b border-line px-6 py-4 flex items-center gap-3 flex-shrink-0">
                 <button
@@ -719,7 +784,7 @@ export default function TutorPage() {
                   />
                   <button
                     type="submit"
-                    disabled={!input.trim() || thinking}
+                    disabled={!input.trim() || thinking || openingChat}
                     className="bg-ink text-paper px-5 py-2.5 rounded-2xl text-sm font-medium hover:bg-accent transition disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
                   >
                     Send

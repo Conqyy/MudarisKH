@@ -39,14 +39,52 @@ const EVENT = "mudaris:activity";
 const keyRecent = (uid: string) => `mudaris.recent.${uid}`;
 const keyBookmark = (uid: string) => `mudaris.bookmarks.${uid}`;
 
-function readArray<T>(key: string): T[] {
-  if (typeof window === "undefined") return [];
+function validStudyHref(value: unknown): value is string {
+  if (typeof value !== "string" || !value.startsWith("/course/") || /[\\\s\u0000-\u001f\u007f]/.test(value)) return false;
   try {
-    const raw = window.localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T[]) : [];
-  } catch {
-    return [];
+    const url = new URL(value, "https://mudaris.invalid");
+    return url.origin === "https://mudaris.invalid" && url.pathname.startsWith("/course/") && url.pathname.length > "/course/".length;
+  } catch { return false; }
+}
+
+function cleanActivityItem(value: unknown): ActivityItem | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  if (typeof item.kind !== "string" || !["course", "document", "audio", "exam", "summary", "flashcards"].includes(item.kind) ||
+      typeof item.id !== "string" || !item.id.trim() || typeof item.title !== "string" || !item.title.trim() || !validStudyHref(item.href)) return null;
+  return {
+    kind: item.kind as ActivityKind,
+    id: item.id,
+    title: item.title,
+    href: item.href,
+    ...(typeof item.courseCode === "string" ? { courseCode: item.courseCode } : {}),
+    ...(typeof item.courseColor === "string" ? { courseColor: item.courseColor } : {}),
+  };
+}
+
+function readArray<T extends StoredRecent | StoredBookmark>(key: string, timestamp: "lastAt" | "addedAt"): T[] {
+  if (typeof window === "undefined") return [];
+  let raw: string | null;
+  try {
+    raw = window.localStorage.getItem(key);
+  } catch { return []; }
+  if (raw === null) return [];
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); }
+  catch { parsed = []; }
+  const clean = (Array.isArray(parsed) ? parsed : []).flatMap((value: unknown) => {
+    const item = cleanActivityItem(value);
+    const at = value && typeof value === "object" ? (value as Record<string, unknown>)[timestamp] : undefined;
+    return item && typeof at === "number" && Number.isFinite(at) && at >= 0 ? [{ ...item, [timestamp]: at } as unknown as T] : [];
+  });
+  // Repair only the requested UID's key. A blocked store still returns safe
+  // data in memory, and reads do not emit an event that could trigger a loop.
+  const serialized = JSON.stringify(clean);
+  if (serialized !== raw) {
+    try { window.localStorage.setItem(key, serialized); }
+    catch { /* private mode / quota: safe in-memory fallback remains usable */ }
   }
+  return clean;
 }
 
 function writeArray<T>(key: string, value: T[]) {
@@ -68,7 +106,7 @@ const sameItem = (
 
 function getRecents(uid: string | null | undefined): StoredRecent[] {
   if (!uid) return [];
-  return readArray<StoredRecent>(keyRecent(uid)).sort(
+  return readArray<StoredRecent>(keyRecent(uid), "lastAt").sort(
     (a, b) => b.lastAt - a.lastAt
   );
 }
@@ -77,10 +115,11 @@ function trackRecent(
   uid: string | null | undefined,
   item: ActivityItem
 ): void {
-  if (!uid || !item?.id || !item?.title) return;
-  const list = readArray<StoredRecent>(keyRecent(uid));
-  const filtered = list.filter((it) => !sameItem(it, item));
-  filtered.unshift({ ...item, lastAt: Date.now() });
+  const clean = cleanActivityItem(item);
+  if (!uid || !clean) return;
+  const list = readArray<StoredRecent>(keyRecent(uid), "lastAt");
+  const filtered = list.filter((it) => !sameItem(it, clean));
+  filtered.unshift({ ...clean, lastAt: Date.now() });
   writeArray(keyRecent(uid), filtered.slice(0, MAX_RECENT));
 }
 
@@ -89,7 +128,7 @@ export function removeRecent(
   kind: ActivityKind,
   id: string
 ): void {
-  const list = readArray<StoredRecent>(keyRecent(uid));
+  const list = readArray<StoredRecent>(keyRecent(uid), "lastAt");
   writeArray(
     keyRecent(uid),
     list.filter((it) => !sameItem(it, { kind, id }))
@@ -106,7 +145,7 @@ function getBookmarks(
   uid: string | null | undefined
 ): StoredBookmark[] {
   if (!uid) return [];
-  return readArray<StoredBookmark>(keyBookmark(uid)).sort(
+  return readArray<StoredBookmark>(keyBookmark(uid), "addedAt").sort(
     (a, b) => b.addedAt - a.addedAt
   );
 }
@@ -117,7 +156,7 @@ function isBookmarked(
   id: string
 ): boolean {
   if (!uid) return false;
-  return readArray<StoredBookmark>(keyBookmark(uid)).some((it) =>
+  return readArray<StoredBookmark>(keyBookmark(uid), "addedAt").some((it) =>
     sameItem(it, { kind, id })
   );
 }
@@ -127,12 +166,13 @@ export function toggleBookmark(
   uid: string | null | undefined,
   item: ActivityItem
 ): boolean {
-  if (!uid) return false;
-  const list = readArray<StoredBookmark>(keyBookmark(uid));
-  const exists = list.some((it) => sameItem(it, item));
+  const clean = cleanActivityItem(item);
+  if (!uid || !clean) return false;
+  const list = readArray<StoredBookmark>(keyBookmark(uid), "addedAt");
+  const exists = list.some((it) => sameItem(it, clean));
   const next = exists
-    ? list.filter((it) => !sameItem(it, item))
-    : [{ ...item, addedAt: Date.now() }, ...list];
+    ? list.filter((it) => !sameItem(it, clean))
+    : [{ ...clean, addedAt: Date.now() }, ...list];
   writeArray(keyBookmark(uid), next);
   return !exists;
 }

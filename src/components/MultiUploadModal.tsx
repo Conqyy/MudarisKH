@@ -1,5 +1,7 @@
 "use client";
 
+import { useDialog } from "@/lib/use-dialog";
+
 import {
   useState,
   useRef,
@@ -69,6 +71,7 @@ export default function MultiUploadModal({
   steps,
   footerNote,
 }: Props) {
+  const dialogRef = useDialog(() => { if (phase !== "processing") onClose(); });
   const { user } = useAuth();
   const { t } = useLang();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -271,7 +274,7 @@ export default function MultiUploadModal({
 
   return (
     <div
-      className="fixed inset-0 bg-ink/50 backdrop-blur-md z-[100] flex items-center justify-center p-6 animate-fade-in"
+      ref={dialogRef} role="dialog" aria-modal="true" aria-label="Upload materials" tabIndex={-1} className="fixed inset-0 bg-ink/50 backdrop-blur-md z-[100] flex items-center justify-center p-6 animate-fade-in"
       style={{ ["--accent" as any]: accent }}
       onClick={() => {
         if (phase === "select") onClose();
@@ -283,6 +286,7 @@ export default function MultiUploadModal({
       >
         <button
           onClick={onClose}
+          aria-label="Close dialog"
           disabled={isBusy}
           className="absolute top-5 right-5 text-2xl text-ink-soft hover:text-ink leading-none w-8 h-8 flex items-center justify-center rounded-full hover:bg-bg-alt transition disabled:opacity-30 disabled:cursor-not-allowed"
         >

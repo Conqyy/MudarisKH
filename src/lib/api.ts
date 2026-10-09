@@ -33,11 +33,13 @@ export async function apiFetch(
   // fired from an early effect can land before currentUser is populated.
   // Wait for that to settle before concluding nobody is signed in.
   await auth.authStateReady();
+  init.signal?.throwIfAborted();
 
   const user = auth.currentUser;
   if (!user) throw new NotSignedInError();
 
   const token = await user.getIdToken();
+  init.signal?.throwIfAborted();
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${token}`);
 
@@ -45,22 +47,28 @@ export async function apiFetch(
   return globalThis.fetch(input, { ...init, headers });
 }
 
-/**
- * Fetch any authenticated backend URL and return an object URL for the body.
- *
- * <iframe src>, <img src> and <a href> cannot carry an Authorization header,
- * so the bytes are fetched here and handed to the browser as a blob instead.
- * The caller owns the returned URL and must URL.revokeObjectURL it.
- */
-export async function fetchObjectUrl(url: string): Promise<string> {
-  const res = await apiFetch(url);
+/** Parse a backend response only after verifying its HTTP status. */
+export async function apiJson<T = any>(input: string, init: RequestInit = {}): Promise<T> {
+  const res = await apiFetch(input, init);
+  if (!res.ok) {
+    const error = await res.json().catch(() => null);
+    throw new Error(typeof error?.detail === "string" ? error.detail : `Request failed (${res.status})`);
+  }
+  return res.json();
+}
+
+/** Fetch authenticated bytes. The caller owns and must revoke the returned URL. */
+export async function fetchObjectUrl(url: string, init: RequestInit = {}): Promise<string> {
+  const res = await apiFetch(url, init);
   if (!res.ok) throw new Error(`Could not load file (${res.status})`);
-  return URL.createObjectURL(await res.blob());
+  const blob = await res.blob();
+  init.signal?.throwIfAborted();
+  return URL.createObjectURL(blob);
 }
 
 /** fetchObjectUrl for a stored upload served by /api/files/serve. */
-export async function fetchFileObjectUrl(storagePath: string): Promise<string> {
+export async function fetchFileObjectUrl(storagePath: string, init: RequestInit = {}): Promise<string> {
   return fetchObjectUrl(
-    `${API_URL}/api/files/serve?path=${encodeURIComponent(storagePath)}`
+    `${API_URL}/api/files/serve?path=${encodeURIComponent(storagePath)}`, init
   );
 }

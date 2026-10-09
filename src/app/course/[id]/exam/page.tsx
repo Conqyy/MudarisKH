@@ -13,7 +13,7 @@ import {
 } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiJson } from "@/lib/api";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
@@ -82,6 +82,10 @@ export default function ExamPage() {
   const [audioRecs, setAudioRecs] = useState<AudioItem[]>([]);
   const [savedExams, setSavedExams] = useState<SavedExam[]>([]);
   const [pageLoading, setPageLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const loadRequest = useRef<AbortController | null>(null);
+  const loadDataRef = useRef<(() => Promise<void>) | null>(null);
+  useEffect(() => () => { loadRequest.current?.abort(); }, [courseId, user?.uid]);
 
   const [selectedDocs, setSelectedDocs] = useState<Set<string>>(new Set());
   const [selectedHist, setSelectedHist] = useState<Set<string>>(new Set());
@@ -121,8 +125,15 @@ export default function ExamPage() {
   const [genTimings, setGenTimings] = useState<Record<number, number>>({});
   const genCancelled = useRef(false);
   const genFinished = useRef(false);
+  const studyRequest = useRef<AbortController | null>(null);
+  const genTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    genCancelled.current = false;
+    return () => { genCancelled.current = true; studyRequest.current?.abort(); if (genTimer.current) clearTimeout(genTimer.current); };
+  }, [courseId, user?.uid]);
 
   // PDF preview state for the "done" view
+  const [pdfAttempt, setPdfAttempt] = useState(0);
   const [pdfUrl, setPdfUrl] = useState<string | null>(null);
   const [pdfStatus, setPdfStatus] = useState<"loading" | "ready" | "failed">(
     "loading"
@@ -131,6 +142,7 @@ export default function ExamPage() {
   useEffect(() => {
     return () => {
       genCancelled.current = true;
+      studyRequest.current?.abort();
     };
   }, []);
 
@@ -139,6 +151,8 @@ export default function ExamPage() {
   useEffect(() => {
     if (pageState !== "done" || !examDocId) return;
     let revoked = false;
+    let created = "";
+    const controller = new AbortController();
     setPdfStatus("loading");
     setPdfUrl((old) => {
       if (old) URL.revokeObjectURL(old);
@@ -146,12 +160,13 @@ export default function ExamPage() {
     });
     (async () => {
       try {
-        const res = await apiFetch(`${API_URL}/api/exams/${examDocId}/pdf`);
+        const res = await apiFetch(`${API_URL}/api/exams/${examDocId}/pdf`, { signal: controller.signal });
         const ct = res.headers.get("content-type") || "";
         if (res.ok && ct.includes("pdf")) {
           const blob = await res.blob();
           if (!revoked) {
-            setPdfUrl(URL.createObjectURL(blob));
+            created = URL.createObjectURL(blob);
+            setPdfUrl(created);
             setPdfStatus("ready");
           }
         } else if (!revoked) {
@@ -163,19 +178,25 @@ export default function ExamPage() {
     })();
     return () => {
       revoked = true;
+      controller.abort();
+      if (created) URL.revokeObjectURL(created);
     };
-  }, [pageState, examDocId]);
+  }, [pageState, examDocId, pdfAttempt]);
 
   useEffect(() => {
     if (!loading && !user) router.push("/signin");
   }, [user, loading, router]);
 
   useEffect(() => {
-    if (user && courseId) loadData();
+    if (user && courseId) loadDataRef.current?.();
   }, [user, courseId]);
 
   const loadData = async () => {
     if (!user) return;
+    loadRequest.current?.abort();
+    const controller = new AbortController();
+    loadRequest.current = controller;
+    setLoadError("");
     setPageLoading(true);
     try {
       const [courseData, allCoursesData] = await Promise.all([
@@ -186,17 +207,19 @@ export default function ExamPage() {
         router.push("/dashboard");
         return;
       }
+      if (controller.signal.aborted) return;
       setCourse(courseData);
       setAllCourses(allCoursesData);
 
       const [docsRes, histRes, examsRes, intRes, tutRes, audioRes] = await Promise.all([
-        apiFetch(`${API_URL}/api/documents/${courseId}`).then((r) => r.json()).catch(() => ({ documents: [] })),
-        apiFetch(`${API_URL}/api/historical-exams/${courseId}`).then((r) => r.json()).catch(() => ({ historical_exams: [] })),
-        apiFetch(`${API_URL}/api/exams/list/${courseId}`).then((r) => r.json()).catch(() => ({ exams: [] })),
-        apiFetch(`${API_URL}/api/intelligence/${courseId}`).then((r) => r.json()).catch(() => ({})),
-        apiFetch(`${API_URL}/api/tutorials/${courseId}`).then((r) => r.json()).catch(() => ({ tutorials: [] })),
-        apiFetch(`${API_URL}/api/audio/${courseId}`).then((r) => r.json()).catch(() => ({ audio_recordings: [] })),
+        apiJson(`${API_URL}/api/documents/${courseId}`, { signal: controller.signal }),
+        apiJson(`${API_URL}/api/historical-exams/${courseId}`, { signal: controller.signal }),
+        apiJson(`${API_URL}/api/exams/list/${courseId}`, { signal: controller.signal }),
+        apiJson(`${API_URL}/api/intelligence/${courseId}`, { signal: controller.signal }),
+        apiJson(`${API_URL}/api/tutorials/${courseId}`, { signal: controller.signal }),
+        apiJson(`${API_URL}/api/audio/${courseId}`, { signal: controller.signal }),
       ]);
+      if (controller.signal.aborted) return;
 
       const completedDocs = ordered<DocItem>(
         (docsRes.documents || []).filter(
@@ -240,13 +263,14 @@ export default function ExamPage() {
 
       setSavedExams(examsRes.exams || []);
       setIntelligence(intRes.counts || null);
-    } catch (error) {
-      console.error(error);
+    } catch (error: any) {
+      if (!controller.signal.aborted) setLoadError(error.message || "Could not load course data.");
     } finally {
-      setPageLoading(false);
+      if (!controller.signal.aborted) setPageLoading(false);
     }
   };
 
+  loadDataRef.current = loadData;
   const toggleHist = (id: string) => {
     setSelectedHist((prev) => {
       const next = new Set(prev);
@@ -305,6 +329,9 @@ export default function ExamPage() {
 
   const handleGenerate = async () => {
     if (!user || !course) return;
+    studyRequest.current?.abort();
+    const controller = new AbortController();
+    studyRequest.current = controller;
     setPageState("generating");
     setErrorMsg("");
 
@@ -321,7 +348,7 @@ export default function ExamPage() {
         if (genCancelled.current || genFinished.current) return;
         setGenStep(i);
         if (i === GEN_STEPS.length - 1) return; // hold last step until result
-        await new Promise((r) => setTimeout(r, GEN_STEPS[i].duration));
+        await new Promise((r) => { genTimer.current = setTimeout(r, GEN_STEPS[i].duration); });
         if (genCancelled.current || genFinished.current) return;
         setGenCompleted((prev) => new Set(prev).add(i));
         setGenTimings((prev) => ({ ...prev, [i]: Date.now() - startTime }));
@@ -336,6 +363,7 @@ export default function ExamPage() {
     try {
       const res = await apiFetch(`${API_URL}/api/exams/generate-enhanced`, {
         method: "POST",
+        signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           user_id: user.uid,
@@ -357,6 +385,7 @@ export default function ExamPage() {
       }
 
       const data = await res.json();
+      if (controller.signal.aborted) return;
       genFinished.current = true;
 
       // Take the student straight to the exam page (exam on the left, upload
@@ -371,8 +400,10 @@ export default function ExamPage() {
       setExamDocId(data.doc_id || "");
       setTexContent(data.tex_content || "");
       setQuestionStructure(data.question_structure || []);
+      setPdfStatus("failed");
       setPageState("done");
     } catch (e: any) {
+      if (controller.signal.aborted) return;
       console.error("Exam generation failed:", e);
       genFinished.current = true;
       setErrorMsg(
@@ -389,6 +420,8 @@ export default function ExamPage() {
     const secs = sec % 60;
     return `${mins}:${String(secs).padStart(2, "0")}`;
   };
+
+  if (loadError && !pageLoading) return <><Navbar /><div className="pt-28 px-6 text-center" role="alert"><p>{loadError}</p><button onClick={() => loadData()} className="mt-4 underline">Retry loading</button></div></>;
 
   if (loading || pageLoading) {
     return (
@@ -992,7 +1025,7 @@ export default function ExamPage() {
             href={`/course/${courseId}/exam/${examDocId}`}
             className="bg-accent text-paper px-4 py-2 rounded-full text-xs font-medium hover:bg-ink transition flex items-center gap-1.5"
           >
-            Answer & Submit →
+            Open exam & model answers →
           </Link>
         )}
 
@@ -1050,11 +1083,8 @@ export default function ExamPage() {
               <div className="font-medium text-ink mb-1">
                 Your exam is ready, but the PDF preview couldn&apos;t be built.
               </div>
-              The server&apos;s LaTeX engine isn&apos;t available, so we
-              can&apos;t render the printable sheet right now. You can still take
-              the exam — click{" "}
-              <span className="font-medium text-ink">Answer &amp; Submit</span>{" "}
-              above. The source is shown below for reference.
+              The generated source is shown below. Retry generation to create a saved exam with a PDF preview.
+              {examDocId && <button onClick={() => setPdfAttempt(n => n + 1)} className="mt-3 underline">Retry PDF preview</button>}
             </div>
             <pre className="bg-ink text-paper p-5 rounded-2xl overflow-auto text-xs font-mono leading-relaxed max-h-[55vh]">
               {texContent || "No source available."}

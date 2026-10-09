@@ -45,6 +45,17 @@ export default function ReorderableList<T extends ReorderableItem>({
   const [editValue, setEditValue] = useState("");
   const [savingId, setSavingId] = useState<string | null>(null);
   const [rowError, setRowError] = useState<string | null>(null);
+  const [reordering, setReordering] = useState(false);
+  const saveOrder = async (from: number, to: number) => {
+    if (reordering || to < 0 || to >= items.length) return;
+    const reordered = [...items];
+    const [moved] = reordered.splice(from, 1);
+    reordered.splice(to, 0, moved);
+    setReordering(true);
+    try { await onReorder(reordered.map(item => item.id)); }
+    catch { setRowError("Could not save the order. Please retry."); }
+    finally { setReordering(false); }
+  };
 
   // ---- Drag handlers ----
   const handleDrop = (targetIndex: number) => {
@@ -53,10 +64,7 @@ export default function ReorderableList<T extends ReorderableItem>({
       setOverIndex(null);
       return;
     }
-    const reordered = [...items];
-    const [moved] = reordered.splice(dragIndex, 1);
-    reordered.splice(targetIndex, 0, moved);
-    onReorder(reordered.map((it) => it.id));
+    saveOrder(dragIndex, targetIndex);
     setDragIndex(null);
     setOverIndex(null);
   };
@@ -105,6 +113,7 @@ export default function ReorderableList<T extends ReorderableItem>({
 
   return (
     <div className="bg-paper border border-line rounded-3xl overflow-hidden">
+      {rowError && !editingId && <p role="alert" className="p-3 text-sm text-accent">{rowError}</p>}
       {items.map((item, idx) => {
         const isEditing = editingId === item.id;
         const isDragging = dragIndex === idx;
@@ -114,7 +123,7 @@ export default function ReorderableList<T extends ReorderableItem>({
         return (
           <div
             key={item.id}
-            draggable={!isEditing}
+            draggable={!isEditing && !reordering}
             onDragStart={(e) => {
               setDragIndex(idx);
               e.dataTransfer.effectAllowed = "move";
@@ -197,6 +206,9 @@ export default function ReorderableList<T extends ReorderableItem>({
                 </div>
               ) : (
                 <div
+                  role={clickable ? "button" : undefined}
+                  tabIndex={clickable ? 0 : undefined}
+                  onKeyDown={(e) => { if (clickable && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onItemClick!(item); } }}
                   onClick={() => clickable && onItemClick!(item)}
                   className={`${clickable ? "cursor-pointer group" : ""}`}
                 >
@@ -217,6 +229,8 @@ export default function ReorderableList<T extends ReorderableItem>({
             {/* Status + actions */}
             {!isEditing && (
               <div className="flex items-center gap-3 flex-shrink-0">
+                <button aria-label={`Move ${item.title} up`} disabled={reordering || idx === 0} onClick={() => saveOrder(idx, idx - 1)} className="text-sm disabled:opacity-30">↑</button>
+                <button aria-label={`Move ${item.title} down`} disabled={reordering || idx === items.length - 1} onClick={() => saveOrder(idx, idx + 1)} className="text-sm disabled:opacity-30">↓</button>
                 <div className="font-mono text-xs">{renderStatus(item)}</div>
                 <button
                   onClick={() => startEdit(item)}

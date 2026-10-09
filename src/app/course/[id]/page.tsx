@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useRouter, useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import Navbar from "@/components/Navbar";
@@ -35,7 +35,7 @@ import { CourseReminder } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 import { useLang } from "@/lib/i18n";
 
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiJson } from "@/lib/api";
 // Reorder an array of items to match a list of ids.
 function applyOrder<T extends { id: string }>(
   items: T[],
@@ -56,6 +56,10 @@ export default function CoursePage() {
   const [course, setCourse] = useState<Course | null>(null);
   const [allCourses, setAllCourses] = useState<Course[]>([]);
   const [pageLoading, setPageLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const loadRequest = useRef<AbortController | null>(null);
+  const loadDataRef = useRef<(() => Promise<void>) | null>(null);
+  useEffect(() => () => { loadRequest.current?.abort(); }, [courseId, user?.uid]);
   const [documents, setDocuments] = useState<CourseDocument[]>([]);
   const [audioRecordings, setAudioRecordings] = useState<AudioRecording[]>([]);
   const [historicalExams, setHistoricalExams] = useState<HistoricalExam[]>([]);
@@ -74,7 +78,7 @@ export default function CoursePage() {
   }, [user, loading, router]);
 
   useEffect(() => {
-    if (user && courseId) loadData();
+    if (user && courseId) loadDataRef.current?.();
   }, [user, courseId]);
 
   // Poll while any audio recording is still being processed (download →
@@ -134,6 +138,10 @@ export default function CoursePage() {
 
   const loadData = async () => {
     if (!user) return;
+    loadRequest.current?.abort();
+    const controller = new AbortController();
+    loadRequest.current = controller;
+    setLoadError("");
     setPageLoading(true);
     try {
       const [courseData, allCoursesData] = await Promise.all([
@@ -146,17 +154,19 @@ export default function CoursePage() {
         return;
       }
 
+      if (controller.signal.aborted) return;
       setCourse(courseData);
       setAllCourses(allCoursesData);
 
       // Fetch from backend API (bypasses Firestore security rules)
-      Promise.all([
-        apiFetch(`${API_URL}/api/documents/${courseId}`).then(r => r.json()).then(d => d.documents || []).catch(() => []),
-        apiFetch(`${API_URL}/api/audio/${courseId}`).then(r => r.json()).then(d => d.audio_recordings || []).catch(() => []),
-        apiFetch(`${API_URL}/api/historical-exams/${courseId}`).then(r => r.json()).then(d => d.historical_exams || []).catch(() => []),
-        apiFetch(`${API_URL}/api/exams/list/${courseId}`).then(r => r.json()).then(d => d.exams || []).catch(() => []),
-        apiFetch(`${API_URL}/api/tutorials/${courseId}`).then(r => r.json()).then(d => d.tutorials || []).catch(() => []),
+      await Promise.all([
+        apiJson(`${API_URL}/api/documents/${courseId}`, { signal: controller.signal }).then(d => d.documents || []),
+        apiJson(`${API_URL}/api/audio/${courseId}`, { signal: controller.signal }).then(d => d.audio_recordings || []),
+        apiJson(`${API_URL}/api/historical-exams/${courseId}`, { signal: controller.signal }).then(d => d.historical_exams || []),
+        apiJson(`${API_URL}/api/exams/list/${courseId}`, { signal: controller.signal }).then(d => d.exams || []),
+        apiJson(`${API_URL}/api/tutorials/${courseId}`, { signal: controller.signal }).then(d => d.tutorials || []),
       ]).then(([docsData, audioData, histData, examData, tutData]) => {
+        if (controller.signal.aborted) return;
         setDocuments(
           ordered(docsData, courseData?.documentOrder, courseData?.titleOverrides)
         );
@@ -171,17 +181,18 @@ export default function CoursePage() {
           ordered(tutData, courseData?.tutorialOrder, courseData?.titleOverrides)
         );
       });
-    } catch (error) {
-      console.error(error);
+    } catch (error: any) {
+      if (!controller.signal.aborted) setLoadError(error.message || "Could not load course data.");
     } finally {
-      setPageLoading(false);
+      if (!controller.signal.aborted) setPageLoading(false);
     }
   };
 
+  loadDataRef.current = loadData;
   const handleDelete = async () => {
     if (
       !confirm(
-        "Delete this course? Uploaded materials will remain on the server."
+        "Delete this course and all its uploaded materials and generated study items? This cannot be undone."
       )
     )
       return;
@@ -222,50 +233,47 @@ export default function CoursePage() {
   // Order + renames are persisted on the COURSE doc (client-writable), since the
   // materials collections themselves are backend-only.
   const handleReorderDocuments = async (orderedIds: string[]) => {
-    setDocuments((prev) => applyOrder(prev, orderedIds));
-    setCourse((prev) => (prev ? { ...prev, documentOrder: orderedIds } : prev));
     try {
-      await updateCourse(courseId, { documentOrder: orderedIds });
+      await updateCourse(courseId, { documentOrder: orderedIds }, { documentOrder: course?.documentOrder || [] });
+      setDocuments((prev) => applyOrder(prev, orderedIds));
+      setCourse((prev) => (prev ? { ...prev, documentOrder: orderedIds } : prev));
     } catch (error) {
-      console.error("Failed to save document order:", error);
+      alert(error instanceof Error ? error.message : "Could not save the new order. Please retry.");
     }
   };
-
   const handleReorderAudio = async (orderedIds: string[]) => {
-    setAudioRecordings((prev) => applyOrder(prev, orderedIds));
-    setCourse((prev) => (prev ? { ...prev, audioOrder: orderedIds } : prev));
     try {
-      await updateCourse(courseId, { audioOrder: orderedIds });
+      await updateCourse(courseId, { audioOrder: orderedIds }, { audioOrder: course?.audioOrder || [] });
+      setAudioRecordings((prev) => applyOrder(prev, orderedIds));
+      setCourse((prev) => (prev ? { ...prev, audioOrder: orderedIds } : prev));
     } catch (error) {
-      console.error("Failed to save recording order:", error);
+      alert(error instanceof Error ? error.message : "Could not save the new order. Please retry.");
     }
   };
-
   const handleReorderExams = async (orderedIds: string[]) => {
-    setHistoricalExams((prev) => applyOrder(prev, orderedIds));
-    setCourse((prev) => (prev ? { ...prev, examOrder: orderedIds } : prev));
     try {
-      await updateCourse(courseId, { examOrder: orderedIds });
+      await updateCourse(courseId, { examOrder: orderedIds }, { examOrder: course?.examOrder || [] });
+      setHistoricalExams((prev) => applyOrder(prev, orderedIds));
+      setCourse((prev) => (prev ? { ...prev, examOrder: orderedIds } : prev));
     } catch (error) {
-      console.error("Failed to save exam order:", error);
+      alert(error instanceof Error ? error.message : "Could not save the new order. Please retry.");
     }
   };
-
   const handleReorderTutorials = async (orderedIds: string[]) => {
-    setTutorials((prev) => applyOrder(prev, orderedIds));
-    setCourse((prev) => (prev ? { ...prev, tutorialOrder: orderedIds } : prev));
     try {
-      await updateCourse(courseId, { tutorialOrder: orderedIds });
+      await updateCourse(courseId, { tutorialOrder: orderedIds }, { tutorialOrder: course?.tutorialOrder || [] });
+      setTutorials((prev) => applyOrder(prev, orderedIds));
+      setCourse((prev) => (prev ? { ...prev, tutorialOrder: orderedIds } : prev));
     } catch (error) {
-      console.error("Failed to save tutorial order:", error);
+      alert(error instanceof Error ? error.message : "Could not save the new order. Please retry.");
     }
   };
-
   // ---- Rename ----
   const renameItem = async (id: string, title: string) => {
-    const overrides = { ...(course?.titleOverrides || {}), [id]: title };
-    await updateCourse(courseId, { titleOverrides: overrides });
-    setCourse((prev) => (prev ? { ...prev, titleOverrides: overrides } : prev));
+    const saved = await updateCourse(courseId, { titleOverrides: { [id]: title } }, {
+      titleOverrides: { [id]: course?.titleOverrides?.[id] } as Record<string, string>,
+    });
+    setCourse((prev) => (prev ? { ...prev, titleOverrides: saved.titleOverrides } : prev));
   };
 
   const handleRenameDocument = async (id: string, title: string) => {
@@ -291,11 +299,12 @@ export default function CoursePage() {
 
   // ---- Reminders (stored on the course doc) ----
   const handleRemindersChange = async (reminders: CourseReminder[]) => {
-    setCourse((prev) => (prev ? { ...prev, reminders } : prev));
     try {
-      await updateCourse(courseId, { reminders });
+      const saved = await updateCourse(courseId, { reminders }, { reminders: course?.reminders || [] });
+      setCourse((prev) => (prev ? { ...prev, reminders: saved.reminders } : prev));
     } catch (error) {
-      console.error("Failed to save reminders:", error);
+      alert("Could not save reminders. Please retry.");
+      throw error;
     }
   };
 
@@ -405,6 +414,8 @@ export default function CoursePage() {
       (a.chapterMapping?.length || 0) === 0
     );
   };
+
+  if (loadError && !pageLoading) return <><Navbar /><div className="pt-28 px-6 text-center" role="alert"><p>{loadError}</p><button onClick={() => loadData()} className="mt-4 underline">Retry loading</button></div></>;
 
   if (loading || pageLoading) {
     return (
@@ -1055,7 +1066,7 @@ export default function CoursePage() {
                     )}
                     {/* Retry is only possible when the text was saved (typed
                         notes always are; recordings once transcribed). */}
-                    {rec.status === "failed" && !!rec.transcript && (
+                    {rec.status === "failed" && !!(rec.transcript || rec.storagePath || rec.sourceUrl) && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();

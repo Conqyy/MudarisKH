@@ -11,7 +11,7 @@ YOUR MISSION:
 Synthesize the provided study materials into a complete, standalone, compilable LaTeX document (.tex) that produces a beautiful PDF exam paper.
 
 --- 1. LATEX REQUIREMENTS ---
-- Use \documentclass[11pt, a4paper]{article}.
+- Use \\documentclass[11pt, a4paper]{article}.
 - Include \\usepackage[a4paper, top=2.5cm, bottom=2.5cm, left=2cm, right=2cm]{geometry}.
 - Include \\usepackage{amsmath} for any math formulas.
 - The document MUST be fully self-contained. Do not use external images.
@@ -20,27 +20,30 @@ Synthesize the provided study materials into a complete, standalone, compilable 
 - Output ONLY valid LaTeX code. Do NOT use markdown code blocks like ```latex. 
 
 --- 2. ANTI-CHEAT PROTOCOL (RUBRICS) ---
-At the VERY END of your output, strictly AFTER the \end{document} tag, you MUST include the grading rubrics as a raw JSON block wrapped in <secret-rubrics> tags. 
+At the VERY END of your output, strictly AFTER the \\end{document} tag, you MUST include the grading rubrics as a raw JSON block wrapped in <secret-rubrics> tags.
 This will not be compiled into the PDF but will be extracted by our backend.
 Format exactly like this:
 
-\end{document}
+\\end{document}
 <secret-rubrics>
 {
   "exam_id": "{{EXAM_ID}}",
   "questions": {
     "q1": {
       "question_type": "mcq",
+      "max_score": 2,
       "correct_answer": "B",
       "explanation": "Brief mathematical reasoning."
     },
     "q2": {
       "question_type": "written",
+      "max_score": 5,
       "criteria": "Detailed rubric for the AI Grader."
     }
   }
 }
 </secret-rubrics>
+For every rubric entry, max_score MUST be a positive numeric value exactly matching that question's printed [X marks]. Include every printed question once as q1, q2, ... with no gaps. Preserve the structural reference's exact question_type values: mcq, written, true_false, fill_blank, matching, equation, proof, calculation, diagram, code, problem_solving, or essay. For mcq/true_false provide correct_answer; for every other type provide criteria. Do not collapse calculation/proof/code questions into written when the reference distinguishes them.
 """
 
 DOCUMENT_PROCESSOR_SYSTEM_PROMPT = """\
@@ -218,7 +221,7 @@ The LECTURE DOCUMENTS provided are the course AS IT IS TAUGHT NOW. They are the 
 
 PRIORITY: MIRROR THE SELECTED PAST EXAM(S) — THE FORMAT AND QUESTION MIX ARE NOT YOURS TO REDESIGN
 - EXACT QUESTION TYPES & COUNTS (CRITICAL): the "PAST-EXAM PATTERNS" block lists each question type with the EXACT number of questions of that type. You MUST produce the SAME question types and the SAME NUMBER of each type — no more, no less. In particular, generate EXACTLY the stated number of MCQs (do not add extra MCQs and do not drop any). If it says "mcq: EXACTLY 5 question(s)", the exam has exactly 5 MCQs. Match every other type's count the same way, and match the stated total number of questions.
-- FORMAT / LAYOUT (CRITICAL): replicate the past exam's structure and look — the same sections and section headings (e.g. "Section A: Multiple Choice", "Part II: Problems"), the same ordering of question types, the same numbering style, and the same way each question is phrased/posed. Follow the "Format/structure patterns" given. If several past exams are provided they won't be identical, so follow the COMMON/most-likely format shared across them.
+- FORMAT / LAYOUT (CRITICAL): replicate the FIRST selected past exam's structure, section headings, question types and counts. Later selected exams inform content and weighting only; they do not override the first exam's structural reference.
 - QUESTION STYLE: pose each question the SAME WAY the past exam did (the "style" note per type), e.g. "derive then prove", "draw and label a UML diagram", "write MIPS code", "solve for x", "trace the code". Do NOT collapse rich questions into "define X" or plain MCQ.
 - GRADING WEIGHTS: questions are NOT all worth the same marks. Mirror the past exam's mark distribution — give each question type/section the same relative marks it had (e.g. MCQ 2 marks, derivation 10 marks). Show the marks for EVERY question, e.g. "[5 marks]".
 - TOPIC COVERAGE: among the IN-SCOPE topics only, weight by how heavily they appeared in the past exams — in-scope topics that came up often (and earned more marks) get more questions/marks; in-scope topics absent from the past exams get few or none. Out-of-scope (removed) topics get ZERO regardless of how heavily they appeared in old exams.
@@ -277,16 +280,19 @@ Format exactly like this:
   "questions": {
     "q1": {
       "question_type": "mcq",
+      "max_score": 2,
       "correct_answer": "B",
       "explanation": "Brief mathematical reasoning."
     },
     "q2": {
       "question_type": "written",
+      "max_score": 5,
       "criteria": "Detailed rubric for the AI Grader."
     }
   }
 }
 </secret-rubrics>
+Every rubric entry MUST have a positive numeric max_score exactly matching its printed [X marks], and one contiguous q1, q2, ... ID per printed question. Preserve the first reference exam question_type (mcq, written, true_false, fill_blank, matching, equation, proof, calculation, diagram, code, problem_solving, essay). Include correct_answer for mcq/true_false and criteria for other types.
 """
 
 FLASHCARD_GEN_SYSTEM_PROMPT = """\

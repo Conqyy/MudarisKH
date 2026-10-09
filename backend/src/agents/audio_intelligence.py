@@ -5,7 +5,10 @@ import logging
 from collections import namedtuple
 from src.config import settings
 from src.config import prompts
-from src.utils.ai_retry import chat_with_retry
+from src.utils.ai_retry import chat_with_retry, call_with_retry
+from src.utils.ai_contracts import validate_analysis, response_text
+from src.utils.text_normalization import excerpt
+from src.utils.media_safety import FFMPEG_INPUT_OPTIONS
 
 logger = logging.getLogger("MudarisAudioIntel")
 
@@ -22,7 +25,7 @@ class AudioIntelligenceAgent:
             default_headers={
                 "HTTP-Referer": "https://mudaris-app.com",
                 "X-Title": "Mudaris AI Engine"
-            }
+            }, timeout=90.0, max_retries=0,
         )
         self.model_id = settings.OPENROUTER_MODEL
 
@@ -77,6 +80,7 @@ class AudioIntelligenceAgent:
         client = OpenAI(
             api_key=settings.GROQ_API_KEY,
             base_url="https://api.groq.com/openai/v1",
+            timeout=90.0, max_retries=0,
         )
         model = getattr(settings, "GROQ_WHISPER_MODEL", "whisper-large-v3")
         lang = getattr(settings, "WHISPER_LANGUAGE", "") or None
@@ -86,10 +90,11 @@ class AudioIntelligenceAgent:
         try:
             chunk_tmpl = os.path.join(workdir, "chunk_%03d.mp3")
             proc = subprocess.run(
-                [ffmpeg, "-y", "-i", file_path, "-vn", "-ac", "1", "-ar", "16000",
+                [ffmpeg, "-y", *FFMPEG_INPUT_OPTIONS, "-i", file_path, "-vn", "-ac", "1", "-ar", "16000",
                  "-f", "segment", "-segment_time", str(seg_len),
                  "-c:a", "libmp3lame", "-q:a", "4", chunk_tmpl],
                 capture_output=True,
+                timeout=600,
             )
             if proc.returncode != 0:
                 err = (proc.stderr or b"").decode("utf-8", "ignore")[-300:]
@@ -104,7 +109,7 @@ class AudioIntelligenceAgent:
             for i, ch in enumerate(chunks):
                 offset = i * seg_len
                 with open(ch, "rb") as fh:
-                    resp = client.audio.transcriptions.create(
+                    resp = call_with_retry(client.audio.transcriptions.create,
                         model=model, file=fh, language=lang,
                         response_format="verbose_json",
                         # Short, English-only hint to bias language without
@@ -201,11 +206,11 @@ class AudioIntelligenceAgent:
         return allowed / len(letters) >= 0.5
 
     def analyze_transcript(self, transcript: str, course_title: str) -> dict:
-        logger.info(f"Analyzing transcript for course: {course_title}")
+        logger.info("Analyzing transcript")
 
         # Feed (almost) the whole transcript so the summary covers the ENTIRE
         # lecture, not just the first ~15 min. Gemini Pro has a large context.
-        truncated = transcript[:120000]
+        truncated = excerpt(transcript, 120000)
 
         from src.utils.json_parse import parse_with_retry
 
@@ -227,12 +232,13 @@ class AudioIntelligenceAgent:
                 # Room for a thorough whole-lecture summary + chapters/hints.
                 max_tokens=max(settings.OPENROUTER_MAX_TOKENS, 16000),
             )
-            return (response.choices[0].message.content or "").strip()
+            return response_text(response)
 
         result = parse_with_retry(
             _call,
             required_keys=("chapterMapping", "examHints", "keyEmphasis", "summary"),
             label="audio analysis",
+            validator=lambda data: validate_analysis('audio', data),
         )
         if not isinstance(result.get("summary"), str):
             result["summary"] = ""
@@ -246,4 +252,5 @@ class AudioIntelligenceAgent:
                 "the model may have been overloaded or the transcript too short."
             )
 
+        result['_contextCoverage'] = {'characters': len(transcript), 'includedCharacters': len(truncated), 'excerpted': len(transcript) > 120000}
         return result

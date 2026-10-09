@@ -486,7 +486,8 @@ export default function SettingsPage() {
             {showDelete && (
               <div className="mt-5 border-t border-line pt-5">
                 <p className="text-sm text-ink mb-4">
-                  This will permanently delete your account and profile. This
+                  This will permanently delete your account, profile, courses,
+                  uploaded files, generated study materials, chats, and schedule. This
                   action <strong>cannot be undone</strong>.
                 </p>
                 {deleteBanner && <Banner banner={deleteBanner} />}

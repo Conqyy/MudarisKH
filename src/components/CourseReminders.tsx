@@ -3,6 +3,7 @@
 import { useState, FormEvent } from "react";
 import { CourseReminder, ReminderType } from "@/lib/firestore-helpers";
 import { useLang } from "@/lib/i18n";
+import { useDialog } from "@/lib/use-dialog";
 
 interface Props {
   reminders: CourseReminder[];
@@ -77,6 +78,9 @@ export default function CourseReminders({ reminders, onChange }: Props) {
   const [time, setTime] = useState("");
   const [notes, setNotes] = useState("");
   const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [actionError, setActionError] = useState("");
+  const dialogRef = useDialog(() => { if (!saving) { setShowForm(false); setEditing(null); } }, showForm);
 
   const openAdd = () => {
     setEditing(null);
@@ -105,8 +109,9 @@ export default function CourseReminders({ reminders, onChange }: Props) {
     setEditing(null);
   };
 
-  const submit = (e: FormEvent) => {
+  const submit = async (e: FormEvent) => {
     e.preventDefault();
+    if (saving) return;
     if (!title.trim()) {
       setError(t("Give the reminder a title."));
       return;
@@ -129,19 +134,30 @@ export default function CourseReminders({ reminders, onChange }: Props) {
         { id: newId(), done: false, createdAt: Date.now(), ...base },
       ];
     }
-    onChange(next);
-    closeForm();
+    setSaving(true);
+    setError("");
+    try { await onChange(next); closeForm(); }
+    catch (error: any) { setError(error?.message || t("Could not save the reminder. Please retry.")); }
+    finally { setSaving(false); }
+  };
+
+  const saveAction = async (next: CourseReminder[]) => {
+    if (saving) return;
+    setSaving(true); setActionError("");
+    try { await onChange(next); }
+    catch (error: any) { setActionError(error?.message || t("Could not save reminders. Please retry.")); }
+    finally { setSaving(false); }
   };
 
   const toggleDone = (id: string) => {
-    onChange(
+    saveAction(
       reminders.map((r) => (r.id === id ? { ...r, done: !r.done } : r))
     );
   };
 
   const remove = (r: CourseReminder) => {
     if (!confirm(`Delete reminder "${r.title}"?`)) return;
-    onChange(reminders.filter((x) => x.id !== r.id));
+    saveAction(reminders.filter((x) => x.id !== r.id));
   };
 
   // Sort: open first (by date asc, undated last), done at the bottom.
@@ -159,6 +175,7 @@ export default function CourseReminders({ reminders, onChange }: Props) {
 
   return (
     <section className="mb-12">
+      {actionError && <p role="alert" className="text-sm text-accent mb-3">{actionError}</p>}
       <div className="flex items-center justify-between mb-6">
         <h2 className="font-serif text-2xl font-medium tracking-tight flex items-center gap-3">
           {t("Reminders")}
@@ -283,6 +300,7 @@ export default function CourseReminders({ reminders, onChange }: Props) {
       {/* Add / Edit modal */}
       {showForm && (
         <div
+          ref={dialogRef} role="dialog" aria-modal="true" aria-label={editing ? t("Edit reminder") : t("New reminder")} tabIndex={-1}
           className="fixed inset-0 bg-ink/50 backdrop-blur-md z-[100] flex items-center justify-center p-6 animate-fade-in"
           onClick={closeForm}
         >
@@ -292,6 +310,7 @@ export default function CourseReminders({ reminders, onChange }: Props) {
           >
             <button
               onClick={closeForm}
+              disabled={saving} aria-label={t("Close reminder")}
               className="absolute top-5 right-5 text-2xl text-ink-soft hover:text-ink leading-none w-8 h-8 flex items-center justify-center rounded-full hover:bg-bg-alt transition"
             >
               ×
@@ -404,6 +423,7 @@ export default function CourseReminders({ reminders, onChange }: Props) {
                 </button>
                 <button
                   type="submit"
+                  disabled={saving}
                   className="flex-1 bg-ink text-paper py-3 rounded-full text-sm font-medium hover:bg-accent transition"
                 >
                   {editing ? t("Save changes") : t("Add reminder")}

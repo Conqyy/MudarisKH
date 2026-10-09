@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { Course } from "@/lib/firestore-helpers";
 import { useLang } from "@/lib/i18n";
 
+import { useDialog } from "@/lib/use-dialog";
 import { apiFetch } from "@/lib/api";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
@@ -55,6 +56,8 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const loadRequest = useRef<AbortController | null>(null);
 
   // A lecture usually repeats on several days (e.g. Sun/Tue/Thu). The user
   // picks all of them at once; each becomes its own calendar entry so it can
@@ -71,21 +74,23 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
   const [ef, setEf] = useState({ day: "sunday", start: "", end: "", courseId: "", title: "", hall: "" });
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState("");
+  const editDialogRef = useDialog(() => { if (!editSaving) setEditing(null); }, !!editing);
 
-  useEffect(() => {
-    if (userId) load();
-  }, [userId]);
-
-  const load = async () => {
+  const load = useCallback(async () => {
+    loadRequest.current?.abort();
+    const controller = new AbortController();
+    loadRequest.current = controller;
+    setLoadError("");
     try {
-      const res = await apiFetch(`${API_URL}/api/schedule/${userId}`);
+      const res = await apiFetch(API_URL + "/api/schedule/" + userId, { signal: controller.signal });
+      if (!res.ok) throw new Error("Could not load schedule (" + res.status + ").");
       const data = await res.json();
-      setEntries(data.entries || []);
-    } catch {
-      setEntries([]);
+      if (!controller.signal.aborted) setEntries(data.entries || []);
+    } catch (error: any) {
+      if (!controller.signal.aborted) setLoadError(error.message || "Could not load schedule.");
     }
-  };
-
+  }, [userId]);
+  useEffect(() => { if (userId) load(); return () => loadRequest.current?.abort(); }, [userId, load]);
   const courseOf = (e: ScheduleEntry) => courses.find((c) => c.id === e.courseId);
   const labelOf = (e: ScheduleEntry) => courseOf(e)?.code || e.title || "Lecture";
   const colorOf = (e: ScheduleEntry) => courseOf(e)?.color || "#8a847a";
@@ -236,6 +241,7 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
 
   return (
     <section className="mb-12">
+      {loadError && <div role="alert" className="text-sm text-accent mb-4">{loadError}<button onClick={load} className="block mt-2 underline">Retry schedule</button></div>}
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="font-serif text-2xl font-medium tracking-tight">{t("This week")}</h2>
@@ -383,6 +389,8 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
                     return (
                       <div
                         key={e.id}
+                        role="button" tabIndex={0} aria-label={"Edit " + labelOf(e)}
+                        onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openEdit(e); } }}
                         onClick={() => openEdit(e)}
                         title="Click to edit"
                         className="absolute left-1 right-1 rounded-lg p-1.5 overflow-hidden text-paper shadow-sm cursor-pointer hover:brightness-95 transition"
@@ -410,7 +418,7 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
       {/* Edit dialog */}
       {editing && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-6 bg-ink/40 backdrop-blur-sm"
+          ref={editDialogRef} role="dialog" aria-modal="true" aria-label="Edit lecture" tabIndex={-1} className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-ink/40 backdrop-blur-sm"
           onClick={() => setEditing(null)}
         >
           <div

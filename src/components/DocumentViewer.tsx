@@ -5,7 +5,9 @@ import { CourseDocument } from "@/lib/firestore-helpers";
 import BookmarkButton from "@/components/BookmarkButton";
 import { useTrackRecent } from "@/lib/activity";
 
-import { apiFetch, fetchFileObjectUrl } from "@/lib/api";
+import { apiJson } from "@/lib/api";
+import { useObjectUrl } from "@/lib/use-object-url";
+import { useDialog } from "@/lib/use-dialog";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
@@ -40,22 +42,24 @@ export default function DocumentViewer({
   const [activeChapter, setActiveChapter] = useState(0);
   const [extractedText, setExtractedText] = useState(doc.extractedText || "");
   const [loadingText, setLoadingText] = useState(false);
+  const [textError, setTextError] = useState("");
+  const [textAttempt, setTextAttempt] = useState(0);
+  const dialogRef = useDialog(onClose);
   const chapterRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   useEffect(() => {
-    if (activeTab === "content" && !extractedText && !loadingText && doc.fileType !== "pdf") {
-      setLoadingText(true);
-      apiFetch(`${API_URL}/api/documents/detail/${doc.id}`)
-        .then((r) => r.json())
-        .then((data) => {
-          if (data.document?.extractedText) {
-            setExtractedText(data.document.extractedText);
-          }
-        })
-        .catch(() => {})
-        .finally(() => setLoadingText(false));
-    }
-  }, [activeTab, extractedText, loadingText, doc.id, doc.fileType]);
+    if (doc.fileType === "pdf") return;
+    const controller = new AbortController();
+    setExtractedText(doc.extractedText || "");
+    setTextError("");
+    if (doc.extractedText) { setLoadingText(false); return; }
+    setLoadingText(true);
+    apiJson(API_URL + "/api/documents/detail/" + doc.id, { signal: controller.signal })
+      .then(data => { if (!controller.signal.aborted) setExtractedText(data.document?.extractedText || ""); })
+      .catch(error => { if (!controller.signal.aborted) setTextError(error.message || "Could not load content."); })
+      .finally(() => { if (!controller.signal.aborted) setLoadingText(false); });
+    return () => controller.abort();
+  }, [doc.id, doc.fileType, doc.extractedText, textAttempt]);
 
   const scrollToChapter = (idx: number) => {
     setActiveChapter(idx);
@@ -75,29 +79,11 @@ export default function DocumentViewer({
 
   // The PDF endpoint needs an Authorization header, which <iframe src> and
   // <a href> cannot send, so fetch the bytes and hand the browser a blob URL.
-  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
-  useEffect(() => {
-    if (!isPdf || !pdfStoragePath) return;
-    let cancelled = false;
-    let created: string | null = null;
-    fetchFileObjectUrl(pdfStoragePath)
-      .then((url) => {
-        if (cancelled) {
-          URL.revokeObjectURL(url);
-          return;
-        }
-        created = url;
-        setPdfUrl(url);
-      })
-      .catch(() => setPdfUrl(null));
-    return () => {
-      cancelled = true;
-      if (created) URL.revokeObjectURL(created);
-    };
-  }, [isPdf, pdfStoragePath]);
+  const pdf = useObjectUrl(isPdf ? pdfStoragePath : null, true);
+  const pdfUrl = pdf.url;
 
   return (
-    <div className="fixed inset-0 z-50 flex">
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={doc.title} tabIndex={-1} className="fixed inset-0 z-[100] flex">
       {/* Backdrop */}
       <div
         className="absolute inset-0 bg-ink/30 backdrop-blur-sm"
@@ -110,6 +96,7 @@ export default function DocumentViewer({
         <div className="border-b border-line px-6 py-4 flex items-center gap-4 flex-shrink-0">
           <button
             onClick={onClose}
+            aria-label="Close document"
             className="w-8 h-8 rounded-full border border-line flex items-center justify-center text-ink-mute hover:bg-bg-alt transition text-sm"
           >
             &times;
@@ -178,7 +165,7 @@ export default function DocumentViewer({
             <>
               {/* Chapter Navigation Sidebar */}
               {chapters.length > 0 && (
-                <nav className="w-56 border-r border-line overflow-y-auto flex-shrink-0 p-4">
+                <nav className="hidden sm:block w-56 border-r border-line overflow-y-auto flex-shrink-0 p-4">
                   <div className="text-xs font-mono text-ink-mute uppercase tracking-widest mb-3">
                     Chapters
                   </div>
@@ -297,7 +284,7 @@ export default function DocumentViewer({
           ) : (
             /* Content Tab — shows extracted text or PDF */
             <div className="flex-1 overflow-y-auto">
-              {isPdf && pdfStoragePath ? (
+              {isPdf ? (
                 pdfUrl ? (
                   <iframe
                     src={pdfUrl}
@@ -306,7 +293,7 @@ export default function DocumentViewer({
                   />
                 ) : (
                   <div className="flex items-center justify-center h-full text-ink-mute text-sm">
-                    Loading PDF...
+                    {!pdfStoragePath ? "PDF file is unavailable for this document." : pdf.error ? <div role="alert" className="text-center"><p>{pdf.error}</p><button onClick={pdf.retry} className="mt-3 underline">Retry PDF</button></div> : "Loading PDF..."}
                   </div>
                 )
               ) : loadingText ? (
@@ -319,7 +306,8 @@ export default function DocumentViewer({
                 </pre>
               ) : (
                 <div className="flex items-center justify-center h-full text-ink-mute text-sm">
-                  No content available for this document.
+                  {textError ? <p role="alert">{textError}</p> : <p>No content available for this document.</p>}
+                  <button onClick={() => setTextAttempt(n => n + 1)} className="ms-3 underline">Retry content</button>
                 </div>
               )}
             </div>

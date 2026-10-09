@@ -1,17 +1,19 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
-import { useRouter, useParams } from "next/navigation";
+import { useRouter, useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import Navbar from "@/components/Navbar";
 import Sidebar from "@/components/Sidebar";
+import BookmarkButton from "@/components/BookmarkButton";
+import { useTrackRecent } from "@/lib/activity";
 import { useAuth } from "@/lib/auth-context";
 import { getCourse, getUserCourses, Course } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiJson } from "@/lib/api";
 // Inline-markdown renderer: the AI writes **bold** / *italic* / `code` inside
 // summary text — render it instead of showing raw asterisks. Paragraphs unwrap
 // to fragments so it also works inside list items and styled containers.
@@ -106,6 +108,10 @@ export default function SummaryPage() {
   const router = useRouter();
   const params = useParams();
   const courseId = params.id as string;
+  const searchParams = useSearchParams();
+  const requestedId = searchParams.get("summary");
+  const openedRequest = useRef("");
+  const openSavedRef = useRef<((id: string) => Promise<void>) | null>(null);
 
   const [course, setCourse] = useState<Course | null>(null);
   const [allCourses, setAllCourses] = useState<Course[]>([]);
@@ -115,6 +121,10 @@ export default function SummaryPage() {
   const [audioRecs, setAudioRecs] = useState<AudioItem[]>([]);
   const [savedSummaries, setSavedSummaries] = useState<SavedSummary[]>([]);
   const [pageLoading, setPageLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const loadRequest = useRef<AbortController | null>(null);
+  const loadDataRef = useRef<(() => Promise<void>) | null>(null);
+  useEffect(() => () => { loadRequest.current?.abort(); }, [courseId, user?.uid]);
 
   const [selectedDocs, setSelectedDocs] = useState<Set<string>>(new Set());
   const [selectedHist, setSelectedHist] = useState<Set<string>>(new Set());
@@ -135,6 +145,21 @@ export default function SummaryPage() {
   const [genTimings, setGenTimings] = useState<Record<number, number>>({});
   const genCancelled = useRef(false);
   const genFinished = useRef(false);
+  const studyRequest = useRef<AbortController | null>(null);
+  const genTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    genCancelled.current = false;
+    return () => { genCancelled.current = true; studyRequest.current?.abort(); if (genTimer.current) clearTimeout(genTimer.current); };
+  }, [courseId, user?.uid]);
+
+  const activityItem = course && viewingId && summary && pageState === "view" ? { kind: "summary" as const, id: viewingId, title: summary.title, href: "/course/" + courseId + "/summary?summary=" + encodeURIComponent(viewingId), courseCode: course.code, courseColor: course.color } : null;
+  useTrackRecent(activityItem);
+  useEffect(() => {
+    if (user?.uid && !pageLoading && !loadError && requestedId && openedRequest.current !== requestedId) {
+      openedRequest.current = requestedId;
+      openSavedRef.current?.(requestedId);
+    }
+  }, [user?.uid, pageLoading, loadError, requestedId]);
 
   const formatGenTime = (ms: number) => {
     const sec = Math.floor(ms / 1000);
@@ -148,11 +173,15 @@ export default function SummaryPage() {
   }, [user, loading, router]);
 
   useEffect(() => {
-    if (user && courseId) loadData();
+    if (user && courseId) loadDataRef.current?.();
   }, [user, courseId]);
 
   const loadData = async () => {
     if (!user) return;
+    loadRequest.current?.abort();
+    const controller = new AbortController();
+    loadRequest.current = controller;
+    setLoadError("");
     setPageLoading(true);
     try {
       const [courseData, allCoursesData] = await Promise.all([
@@ -163,16 +192,18 @@ export default function SummaryPage() {
         router.push("/dashboard");
         return;
       }
+      if (controller.signal.aborted) return;
       setCourse(courseData);
       setAllCourses(allCoursesData);
 
       const [docsRes, histRes, sumRes, tutRes, audioRes] = await Promise.all([
-        apiFetch(`${API_URL}/api/documents/${courseId}`).then((r) => r.json()).catch(() => ({ documents: [] })),
-        apiFetch(`${API_URL}/api/historical-exams/${courseId}`).then((r) => r.json()).catch(() => ({ historical_exams: [] })),
-        apiFetch(`${API_URL}/api/summaries/list/${courseId}`).then((r) => r.json()).catch(() => ({ summaries: [] })),
-        apiFetch(`${API_URL}/api/tutorials/${courseId}`).then((r) => r.json()).catch(() => ({ tutorials: [] })),
-        apiFetch(`${API_URL}/api/audio/${courseId}`).then((r) => r.json()).catch(() => ({ audio_recordings: [] })),
+        apiJson(`${API_URL}/api/documents/${courseId}`, { signal: controller.signal }),
+        apiJson(`${API_URL}/api/historical-exams/${courseId}`, { signal: controller.signal }),
+        apiJson(`${API_URL}/api/summaries/list/${courseId}`, { signal: controller.signal }),
+        apiJson(`${API_URL}/api/tutorials/${courseId}`, { signal: controller.signal }),
+        apiJson(`${API_URL}/api/audio/${courseId}`, { signal: controller.signal }),
       ]);
+      if (controller.signal.aborted) return;
 
       const completedDocs = ordered<DocItem>(
         (docsRes.documents || []).filter((d: DocItem) => d.status === "completed"),
@@ -207,13 +238,14 @@ export default function SummaryPage() {
       setSelectedAudio(new Set(completedAudio.map((a: AudioItem) => a.id)));
 
       setSavedSummaries(sumRes.summaries || []);
-    } catch (e) {
-      console.error(e);
+    } catch (error: any) {
+      if (!controller.signal.aborted) setLoadError(error.message || "Could not load course data.");
     } finally {
-      setPageLoading(false);
+      if (!controller.signal.aborted) setPageLoading(false);
     }
   };
 
+  loadDataRef.current = loadData;
   const toggle = (set: Set<string>, setter: (s: Set<string>) => void, id: string) => {
     const next = new Set(set);
     if (next.has(id)) next.delete(id);
@@ -223,6 +255,9 @@ export default function SummaryPage() {
 
   const handleGenerate = async () => {
     if (!user || !course) return;
+    studyRequest.current?.abort();
+    const controller = new AbortController();
+    studyRequest.current = controller;
     setPageState("generating");
     setErrorMsg("");
 
@@ -239,7 +274,7 @@ export default function SummaryPage() {
         if (genCancelled.current || genFinished.current) return;
         setGenStep(i);
         if (i === GEN_STEPS.length - 1) return; // hold last step until result
-        await new Promise((r) => setTimeout(r, GEN_STEPS[i].duration));
+        await new Promise((r) => { genTimer.current = setTimeout(r, GEN_STEPS[i].duration); });
         if (genCancelled.current || genFinished.current) return;
         setGenCompleted((prev) => new Set(prev).add(i));
         setGenTimings((prev) => ({ ...prev, [i]: Date.now() - startTime }));
@@ -249,6 +284,7 @@ export default function SummaryPage() {
     try {
       const res = await apiFetch(`${API_URL}/api/summaries/generate`, {
         method: "POST",
+        signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           user_id: user.uid,
@@ -265,6 +301,7 @@ export default function SummaryPage() {
         throw new Error(err?.detail || `Backend returned ${res.status}`);
       }
       const data = await res.json();
+      if (controller.signal.aborted) return;
       genFinished.current = true;
       setGenCompleted(new Set(GEN_STEPS.map((_, i) => i)));
       setViewingId(data.doc_id || "");
@@ -278,6 +315,7 @@ export default function SummaryPage() {
       setPageState("view");
       loadData();
     } catch (e: any) {
+      if (controller.signal.aborted) return;
       genFinished.current = true;
       setErrorMsg(e.message || "Could not generate summary.");
       setPageState("error");
@@ -285,11 +323,17 @@ export default function SummaryPage() {
   };
 
   const openSummary = async (id: string) => {
+    studyRequest.current?.abort();
+    genCancelled.current = true;
+    if (genTimer.current) clearTimeout(genTimer.current);
+    const controller = new AbortController();
+    studyRequest.current = controller;
     setPageState("generating");
     try {
-      const res = await apiFetch(`${API_URL}/api/summaries/detail/${id}`);
+      const res = await apiFetch(`${API_URL}/api/summaries/detail/${id}`, { signal: controller.signal });
       if (!res.ok) throw new Error("Summary not found");
       const data = await res.json();
+      if (controller.signal.aborted) return;
       const s = data.summary;
       setViewingId(id);
       setSummary({
@@ -301,11 +345,13 @@ export default function SummaryPage() {
       });
       setPageState("view");
     } catch (e: any) {
+      if (controller.signal.aborted) return;
       setErrorMsg(e.message || "Could not open summary.");
       setPageState("error");
     }
   };
 
+  openSavedRef.current = openSummary;
   const deleteSummary = async (e: React.MouseEvent, id: string, title: string) => {
     e.stopPropagation();
     if (!confirm(`Delete summary "${title}"?`)) return;
@@ -454,6 +500,8 @@ export default function SummaryPage() {
       setDownloadingPdf(false);
     }
   };
+
+  if (loadError && !pageLoading) return <><Navbar /><div className="pt-28 px-6 text-center" role="alert"><p>{loadError}</p><button onClick={() => loadData()} className="mt-4 underline">Retry loading</button></div></>;
 
   if (loading || pageLoading) {
     return (
@@ -762,6 +810,8 @@ export default function SummaryPage() {
             {savedSummaries.map((s, idx) => (
               <div
                 key={s.id}
+                role="button" tabIndex={0}
+                onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openSummary(s.id); } }}
                 onClick={() => openSummary(s.id)}
                 className={`flex items-center justify-between p-5 hover:bg-bg-alt transition cursor-pointer ${
                   idx !== 0 ? "border-t border-line" : ""
@@ -867,6 +917,7 @@ export default function SummaryPage() {
         <div className="flex items-center justify-between mb-4 gap-3">
           <h2 className="font-serif text-3xl font-medium tracking-tight">{summary.title}</h2>
           <div className="flex items-center gap-3 flex-shrink-0">
+            {activityItem && <BookmarkButton item={activityItem} size="sm" />}
             <button
               onClick={handleDownloadPdf}
               disabled={downloadingPdf}

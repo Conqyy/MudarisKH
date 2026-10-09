@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import Navbar from "@/components/Navbar";
@@ -38,6 +38,15 @@ export default function DashboardPage() {
   const [dataLoading, setDataLoading] = useState(true);
   const [showCreateCourse, setShowCreateCourse] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
+  const [dataError, setDataError] = useState<string | null>(null);
+  const [mutationError, setMutationError] = useState<string | null>(null);
+  const [statsError, setStatsError] = useState(false);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const loadVersion = useRef(0);
+  const pendingCourses = useRef(new Set<string>());
+  const activeUid = useRef(user?.uid);
+  activeUid.current = user?.uid;
+  const invalidateLoads = useCallback(() => { ++loadVersion.current; }, []);
 
   // Archived courses are hidden from the active grid, stats, sidebar, and
   // reminders; they live in their own collapsible section below.
@@ -48,28 +57,33 @@ export default function DashboardPage() {
     if (!loading && !user) router.push("/signin");
   }, [user, loading, router]);
 
-  useEffect(() => {
-    if (!user) return;
-    loadData();
-  }, [user]);
-
-  const loadData = async () => {
-    if (!user) return;
+  const loadData = useCallback(async () => {
+    if (!user || user.uid !== activeUid.current) return;
+    const version = ++loadVersion.current;
     setDataLoading(true);
+    setDataError(null);
+    setStatsError(false);
     try {
       const coursesData = await getUserCourses(user.uid);
+      if (version !== loadVersion.current) return;
       setCourses(coursesData);
+      setDataLoading(false);
+      setStatsLoading(true);
 
-      // Fetch per-course material counts from the backend (non-blocking)
-      const entries = await Promise.all(
-        coursesData.map(async (c) => {
+      // Counts enrich the cards after courses are available for navigation.
+      let countsFailed = false;
+      const readCounts = async (url: string) => {
+        const response = await apiFetch(url);
+        if (!response.ok) throw new Error("Course statistics could not be loaded.");
+        return response.json();
+      };
+      void Promise.all(
+        coursesData.filter((c) => !c.archived).map(async (c) => {
           const [intel, exams] = await Promise.all([
-            apiFetch(`${API_URL}/api/intelligence/${c.id}`)
-              .then((r) => r.json())
-              .catch(() => ({ counts: {} })),
-            apiFetch(`${API_URL}/api/exams/list/${c.id}`)
-              .then((r) => r.json())
-              .catch(() => ({ exams: [] })),
+            readCounts(`${API_URL}/api/intelligence/${c.id}`)
+              .catch(() => { countsFailed = true; return { counts: {} }; }),
+            readCounts(`${API_URL}/api/exams/list/${c.id}`)
+              .catch(() => { countsFailed = true; return { exams: [] }; }),
           ]);
           const counts = intel.counts || {};
           return [
@@ -78,34 +92,59 @@ export default function DashboardPage() {
               documents: counts.documents || 0,
               audio: counts.audio || 0,
               historical: counts.historical_exams || 0,
-              generated: (exams.exams || []).length,
+              generated: Array.isArray(exams.exams) ? exams.exams.length : 0,
             },
           ] as [string, CourseStats];
         })
-      );
-      setStats(Object.fromEntries(entries));
+      ).then((entries) => {
+        if (version !== loadVersion.current) return;
+        setStats(Object.fromEntries(entries));
+        setStatsError(countsFailed);
+        setStatsLoading(false);
+      }).catch(() => {
+        if (version !== loadVersion.current) return;
+        setStatsError(true);
+        setStatsLoading(false);
+      });
     } catch (error) {
       console.error("Failed to load data:", error);
+      if (version === loadVersion.current) {
+        setDataError(error instanceof Error ? error.message : "Could not load courses. Please retry.");
+      }
     } finally {
-      setDataLoading(false);
+      if (version === loadVersion.current) setDataLoading(false);
     }
-  };
+  }, [user]);
+
+  useEffect(() => {
+    setCourses([]);
+    setStats({});
+    setMutationError(null);
+    if (user) void loadData();
+    return invalidateLoads;
+  }, [user, loadData, invalidateLoads]);
 
   // Toggle a reminder's done state from the aggregated dashboard list and
   // persist it on the owning course doc.
   const handleToggleReminder = async (courseId: string, reminderId: string) => {
     const course = courses.find((c) => c.id === courseId);
-    if (!course) return;
+    if (!course || pendingCourses.current.has(courseId)) return;
+    pendingCourses.current.add(courseId);
+    setMutationError(null);
     const updated = (course.reminders || []).map((r) =>
       r.id === reminderId ? { ...r, done: !r.done } : r
     );
-    setCourses((prev) =>
-      prev.map((c) => (c.id === courseId ? { ...c, reminders: updated } : c))
-    );
     try {
-      await updateCourse(courseId, { reminders: updated });
+      const saved = await updateCourse(courseId, { reminders: updated }, { reminders: course.reminders || [] });
+      if (user?.uid !== activeUid.current) return;
+      setCourses((prev) =>
+        prev.map((c) => (c.id === courseId ? { ...c, reminders: saved.reminders } : c))
+      );
     } catch (error) {
       console.error("Failed to update reminder:", error);
+      if (user?.uid === activeUid.current) setMutationError(error instanceof Error ? error.message : "Could not save reminder. Please retry.");
+    } finally {
+      pendingCourses.current.delete(courseId);
     }
   };
 
@@ -116,19 +155,26 @@ export default function DashboardPage() {
     return t("Good evening");
   };
 
-  // Archive / restore a course from its card. Optimistic update; reconcile on error.
+  // Keep the course visible until archive/restore is persisted.
   const handleToggleArchive = async (e: React.MouseEvent, course: Course) => {
     e.preventDefault();
     e.stopPropagation();
+    if (pendingCourses.current.has(course.id)) return;
+    pendingCourses.current.add(course.id);
+    setMutationError(null);
     const next = !course.archived;
-    setCourses((prev) =>
-      prev.map((c) => (c.id === course.id ? { ...c, archived: next } : c))
-    );
     try {
       await updateCourse(course.id, { archived: next });
+      if (user?.uid !== activeUid.current) return;
+      setCourses((prev) =>
+        prev.map((c) => (c.id === course.id ? { ...c, archived: next } : c))
+      );
+      void loadData();
     } catch (error) {
       console.error("Failed to update archive state:", error);
-      loadData();
+      if (user?.uid === activeUid.current) setMutationError(error instanceof Error ? error.message : "Could not save archive state. Please retry.");
+    } finally {
+      pendingCourses.current.delete(course.id);
     }
   };
 
@@ -156,18 +202,24 @@ export default function DashboardPage() {
   const handleDeleteCourse = async (e: React.MouseEvent, courseId: string) => {
     e.preventDefault();
     e.stopPropagation();
+    if (pendingCourses.current.has(courseId)) return;
     if (
       !confirm(
-        "Delete this course? Uploaded materials for it will remain on the server."
+        "Permanently delete this course and all its uploaded files, study materials, chats, and schedule entries?"
       )
     )
       return;
+    pendingCourses.current.add(courseId);
     try {
       await deleteCourse(courseId);
-      loadData();
+      if (user?.uid !== activeUid.current) return;
+      setCourses((prev) => prev.filter((course) => course.id !== courseId));
+      await loadData();
     } catch (error) {
       console.error(error);
-      alert("Failed to delete course.");
+      if (user?.uid === activeUid.current) alert(error instanceof Error ? error.message : "Failed to delete course. Please retry.");
+    } finally {
+      pendingCourses.current.delete(courseId);
     }
   };
 
@@ -218,6 +270,15 @@ export default function DashboardPage() {
             </div>
           </div>
 
+          {(dataError || mutationError || statsError) && (
+            <div role="alert" className="bg-accent/10 border border-accent text-accent rounded-xl p-4 mb-6">
+              <p>{dataError || mutationError || t("Some course statistics could not be loaded.")}</p>
+              {(dataError || statsError) && (
+                <button onClick={() => void loadData()} className="mt-2 underline font-medium">{t("Retry")}</button>
+              )}
+            </div>
+          )}
+
           {/* Stats */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-12">
             {statCards.map((s) => (
@@ -226,7 +287,7 @@ export default function DashboardPage() {
                   {s.label}
                 </div>
                 <div className={`font-serif text-5xl font-medium tracking-tight ${s.accent}`}>
-                  {s.value}
+                  {statsLoading && s.label !== t("Courses") ? "…" : s.value}
                 </div>
                 <div className="text-sm text-ink-mute mt-2 font-mono">{s.note}</div>
               </div>
@@ -248,7 +309,7 @@ export default function DashboardPage() {
                   />
                 ))}
               </div>
-            ) : activeCourses.length === 0 ? (
+            ) : dataError ? null : activeCourses.length === 0 ? (
               <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-16 text-center">
                 <div className="text-5xl mb-4">📚</div>
                 <h3 className="font-serif text-2xl font-medium mb-2">

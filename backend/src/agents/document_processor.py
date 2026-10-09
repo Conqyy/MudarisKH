@@ -6,6 +6,8 @@ import logging
 from src.config import settings
 from src.config import prompts
 from src.utils.ai_retry import chat_with_retry
+from src.utils.ai_contracts import validate_analysis, response_text
+from src.utils.text_normalization import excerpt
 
 logger = logging.getLogger("MudarisDocProcessor")
 
@@ -18,7 +20,7 @@ class DocumentProcessorAgent:
             default_headers={
                 "HTTP-Referer": "https://mudaris-app.com",
                 "X-Title": "Mudaris AI Engine"
-            }
+            }, timeout=90.0, max_retries=0,
         )
         self.model_id = settings.OPENROUTER_MODEL
 
@@ -34,7 +36,7 @@ class DocumentProcessorAgent:
 
     def _extract_pdf(self, file_bytes: bytes) -> str:
         # Robust extraction: PyMuPDF first (handles tricky font encodings that
-        # PyPDF2 returns empty for), with PyPDF2 as a fallback.
+        # pypdf returns empty for), with pypdf as a fallback.
         from src.utils.pdf_extract import extract_pdf_text
         return extract_pdf_text(file_bytes)
 
@@ -50,6 +52,14 @@ class DocumentProcessorAgent:
                         line = para.text.strip()
                         if line:
                             texts.append(line)
+                if shape.has_table:
+                    for row in shape.table.rows:
+                        line = ' | '.join(cell.text.strip() for cell in row.cells)
+                        if line.strip(): texts.append(line)
+            if slide.has_notes_slide:
+                frame = slide.notes_slide.notes_text_frame
+                if frame is not None and frame.text.strip():
+                    texts.append('[Speaker notes]\n' + frame.text.strip())
             if texts:
                 slides.append(f"[Slide {i+1}]\n" + "\n".join(texts))
         return "\n\n".join(slides)
@@ -62,6 +72,15 @@ class DocumentProcessorAgent:
             text = para.text.strip()
             if text:
                 paragraphs.append(text)
+        for index, table in enumerate(doc.tables):
+            cells = [' | '.join(cell.text.strip() for cell in row.cells) for row in table.rows]
+            if any(cells):
+                paragraphs.append(f'[Table {index + 1}]\n' + '\n'.join(cells))
+        for section in doc.sections:
+            for area in (section.header, section.footer):
+                for paragraph in area.paragraphs:
+                    if paragraph.text.strip() and paragraph.text.strip() not in paragraphs:
+                        paragraphs.append(paragraph.text.strip())
         return "\n\n".join(paragraphs)
 
     def analyze_document(self, text: str, course_title: str, image_uris: list = None) -> dict:
@@ -73,9 +92,9 @@ class DocumentProcessorAgent:
         """
         from src.utils.json_parse import parse_with_retry
 
-        logger.info(f"Analyzing document for course: {course_title}"
+        logger.info("Analyzing lecture document"
                     + (f" (+{len(image_uris)} page images)" if image_uris else ""))
-        truncated = text[:15000]
+        truncated = excerpt(text, 30000)
 
         def _user_content():
             if image_uris:
@@ -106,7 +125,7 @@ class DocumentProcessorAgent:
                 temperature=0.1,
                 max_tokens=settings.OPENROUTER_MAX_TOKENS,
             )
-            return (response.choices[0].message.content or "").strip()
+            return response_text(response)
 
         result = parse_with_retry(
             _call,
@@ -118,6 +137,7 @@ class DocumentProcessorAgent:
                 "keyConceptCount",
             ),
             label="document analysis",
+            validator=lambda data: validate_analysis('document', data),
         )
 
         # Sanity check: if every output field is empty, the analysis was
@@ -133,6 +153,8 @@ class DocumentProcessorAgent:
                 "have been overloaded or had trouble with this content."
             )
 
+        result['_contextCoverage'] = {'characters': len(text), 'includedCharacters': len(truncated), 'excerpted': len(text) > 30000,
+                                      'imagesIncluded': min(len(image_uris or []), 8), 'imagesAvailable': len(image_uris or [])}
         return result
 
     def analyze_tutorial(self, text: str, course_title: str, image_uris: list = None) -> dict:
@@ -143,9 +165,9 @@ class DocumentProcessorAgent:
         Page images let the model read tables, equations, diagrams, and code."""
         from src.utils.json_parse import parse_with_retry
 
-        logger.info(f"Analyzing tutorial for course: {course_title}"
+        logger.info("Analyzing tutorial"
                     + (f" (+{len(image_uris)} page images)" if image_uris else ""))
-        truncated = text[:15000]
+        truncated = excerpt(text, 30000)
 
         def _user_content():
             if image_uris:
@@ -178,12 +200,13 @@ class DocumentProcessorAgent:
                 # it isn't truncated mid-output.
                 max_tokens=max(settings.OPENROUTER_MAX_TOKENS, 8000),
             )
-            return (response.choices[0].message.content or "").strip()
+            return response_text(response)
 
         result = parse_with_retry(
             _call,
             required_keys=("topics", "problems", "formulas", "skills", "problemCount"),
             label="tutorial analysis",
+            validator=lambda data: validate_analysis('tutorial', data),
         )
 
         problems = result.get("problems") or []
@@ -194,4 +217,6 @@ class DocumentProcessorAgent:
                 "topics). Try re-analyzing — the model may have been overloaded."
             )
 
+        result['_contextCoverage'] = {'characters': len(text), 'includedCharacters': len(truncated), 'excerpted': len(text) > 30000,
+                                      'imagesIncluded': min(len(image_uris or []), 8), 'imagesAvailable': len(image_uris or [])}
         return result

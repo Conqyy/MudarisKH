@@ -6,6 +6,9 @@ export const AR: Record<string, string> = {
   // ---- Brand / persona ----
   "Mudaris": "مُدرّس",
   "AI Study Assistant": "مساعدك الذكي للمذاكرة",
+  "Study tools": "أدوات المذاكرة",
+  "Course-grounded help": "مساعدة من محتوى مادتك",
+  "Download study materials": "تحميل مواد المذاكرة",
 
   // ---- Navbar / nav ----
   "Home": "الرئيسية",

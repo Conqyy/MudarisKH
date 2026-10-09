@@ -17,6 +17,40 @@ from typing import Callable, Any
 logger = logging.getLogger("MudarisJSONParse")
 
 
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('Duplicate JSON field')
+        result[key] = value
+    return result
+
+
+def _loads(value):
+    return json.loads(value, object_pairs_hook=_unique_object,
+                      parse_constant=lambda value: (_ for _ in ()).throw(ValueError('Nonfinite JSON number')))
+
+
+def _repair_trailing_commas(value):
+    output, in_string, escaped = [], False, False
+    for index, char in enumerate(value):
+        if in_string:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        if char == ',' and value[index + 1:].lstrip().startswith(('}', ']')):
+            continue
+        output.append(char)
+    return ''.join(output)
+
+
 def extract_json_object(raw: str) -> dict:
     """Best-effort extraction of a JSON object from an AI response.
 
@@ -35,18 +69,18 @@ def extract_json_object(raw: str) -> dict:
 
     # 1. Direct
     try:
-        result = json.loads(s)
+        result = _loads(s)
         if isinstance(result, dict):
             return result
     except json.JSONDecodeError:
         pass
 
-    # 2. Strip code fences anywhere
-    stripped = re.sub(r"```(?:json|JSON|tex|latex)?\s*", "", s)
-    stripped = stripped.replace("```", "").strip()
+    # Strip only surrounding fences. Backticks inside JSON text are content.
+    stripped = re.sub(r"^```(?:json|JSON)?\s*\n?", "", s)
+    stripped = re.sub(r"\n?```\s*$", "", stripped).strip()
     if stripped != s:
         try:
-            result = json.loads(stripped)
+            result = _loads(stripped)
             if isinstance(result, dict):
                 return result
         except json.JSONDecodeError:
@@ -58,86 +92,24 @@ def extract_json_object(raw: str) -> dict:
     if start != -1 and end > start:
         candidate = stripped[start : end + 1]
         try:
-            result = json.loads(candidate)
+            result = _loads(candidate)
             if isinstance(result, dict):
                 return result
         except json.JSONDecodeError:
             pass
 
         # 4. Strip trailing commas, retry
-        repaired = re.sub(r",(\s*[}\]])", r"\1", candidate)
+        repaired = _repair_trailing_commas(candidate)
         try:
-            result = json.loads(repaired)
+            result = _loads(repaired)
             if isinstance(result, dict):
                 return result
         except json.JSONDecodeError:
             pass
 
-    # 5. Recover TRUNCATED JSON (output cut off by the token limit). Roll back to
-    #    the last complete element and auto-close the open arrays/objects, so a
-    #    partial-but-valid result (e.g. the first N problems) still succeeds.
-    recovered = _recover_truncated_json(stripped)
-    if isinstance(recovered, dict):
-        logger.warning("Recovered a truncated JSON object (output was likely cut off).")
-        return recovered
-
-    raise ValueError(
-        f"Could not extract a JSON object from the AI response. "
-        f"First 300 chars: {raw[:300]!r}"
-    )
-
-
-def _recover_truncated_json(s: str):
-    """Best-effort recovery of a JSON object whose output was cut off mid-stream.
-
-    Walks the text tracking string state and the bracket stack, recording a
-    checkpoint after every completed value (closing quote / `}` / `]`). On
-    failure it rolls back to the latest checkpoint that parses cleanly after the
-    open brackets are closed — dropping the half-written tail. Returns a dict or
-    None.
-    """
-    start = s.find("{")
-    if start == -1:
-        return None
-    candidate = s[start:]
-
-    stack = []          # open closers, in the order they were opened
-    in_str = False
-    esc = False
-    checkpoints = []    # (exclusive_index, tuple(stack)) after each complete value
-
-    for i, ch in enumerate(candidate):
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-                checkpoints.append((i + 1, tuple(stack)))
-        else:
-            if ch == '"':
-                in_str = True
-            elif ch == "{":
-                stack.append("}")
-            elif ch == "[":
-                stack.append("]")
-            elif ch in "}]":
-                if stack:
-                    stack.pop()
-                checkpoints.append((i + 1, tuple(stack)))
-
-    # Try the most-complete checkpoints first.
-    for idx, stk in reversed(checkpoints):
-        prefix = re.sub(r"[\s,]*$", "", candidate[:idx])
-        fixed = prefix + "".join(reversed(stk))
-        try:
-            obj = json.loads(fixed)
-            if isinstance(obj, dict):
-                return obj
-        except json.JSONDecodeError:
-            continue
-    return None
+    # Never close missing brackets or discard unfinished elements: a valid
+    # prefix is not a complete analysis and must be retried.
+    raise ValueError("The AI response is incomplete or is not a valid JSON object")
 
 
 def parse_with_retry(
@@ -145,6 +117,7 @@ def parse_with_retry(
     *,
     required_keys: tuple = (),
     label: str = "analysis",
+    validator: Callable[[dict], dict] = None,
 ) -> dict:
     """Call an AI function that returns raw text, parse JSON, retry once on failure.
 
@@ -152,8 +125,7 @@ def parse_with_retry(
         call: A function (reminder_suffix: str) -> raw_text. The reminder is
               appended to the system prompt on the retry attempt to nudge the
               model toward strict JSON.
-        required_keys: Keys that must exist in the parsed object (defaults are
-              set to empty values if missing — they won't trigger failure).
+        required_keys: Required fields; missing or incorrectly typed fields retry and then fail.
         label: A human-readable label for log messages ("document analysis", etc.).
 
     Returns:
@@ -162,32 +134,26 @@ def parse_with_retry(
     Raises:
         RuntimeError if neither attempt produces a parseable object.
     """
-    # Attempt 1
-    raw = call("")
-    try:
-        result = extract_json_object(raw)
-    except ValueError as e:
-        logger.warning(
-            f"{label}: first attempt unparseable ({e}); retrying with stricter prompt."
-        )
-        # Attempt 2 — append a strict reminder
-        reminder = (
-            "\n\nCRITICAL: Your previous reply was not valid JSON. "
-            "Reply with ONLY the JSON object — no prose, no fences, no explanations. "
-            "Begin your reply with `{` and end with `}`. Nothing else."
-        )
-        raw = call(reminder)
+    reminder = ''
+    for attempt in range(2):
         try:
+            raw = call(reminder)
             result = extract_json_object(raw)
-        except ValueError as e2:
-            logger.error(f"{label}: both attempts unparseable: {e2}")
-            raise RuntimeError(
-                f"The AI didn't produce a valid {label}. This is usually a "
-                "transient issue — please try again."
-            ) from e2
-
-    # Ensure required keys exist with empty defaults
-    for key in required_keys:
-        result.setdefault(key, [] if key != "keyConceptCount" and key != "totalQuestions" else 0)
-
-    return result
+            for key in required_keys:
+                if key not in result:
+                    raise ValueError('Required AI output field missing')
+                if key in ('keyConceptCount', 'totalQuestions', 'problemCount'):
+                    if type(result[key]) is not int or result[key] < 0:
+                        raise ValueError('AI count must be a nonnegative integer')
+                elif key in ('summary', 'gradingBlueprint'):
+                    if not isinstance(result[key], str):
+                        raise ValueError('AI output field must be text')
+                elif not isinstance(result[key], list):
+                    raise ValueError('AI output field must be an array')
+            return validator(result) if validator else result
+        except (ValueError, TypeError, KeyError) as error:
+            logger.warning('%s: invalid or incomplete structured output (attempt %d/2)', label, attempt + 1)
+            if attempt == 1:
+                raise RuntimeError(f'The AI did not produce a complete, valid {label}. Please retry.') from error
+            reminder = ('\n\nCRITICAL: Return one COMPLETE JSON object matching ALL required schema fields '
+                        'and their types/counts. Do not omit items, truncate, add prose, or use fences.')

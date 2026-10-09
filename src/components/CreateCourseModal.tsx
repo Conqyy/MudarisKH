@@ -1,5 +1,7 @@
 "use client";
 
+import { useDialog } from "@/lib/use-dialog";
+
 import { useState, FormEvent } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { createCourse } from "@/lib/firestore-helpers";
@@ -27,6 +29,7 @@ export default function CreateCourseModal({
 }: Props) {
   const { user } = useAuth();
 
+  const dialogRef = useDialog(onClose);
   const [code, setCode] = useState("");
   const [title, setTitle] = useState("");
   const [instructor, setInstructor] = useState("");
@@ -65,7 +68,7 @@ export default function CreateCourseModal({
 
   return (
     <div
-      className="fixed inset-0 bg-ink/50 backdrop-blur-md z-[100] flex items-center justify-center p-6 animate-fade-in"
+      ref={dialogRef} role="dialog" aria-modal="true" aria-label="Create a course" tabIndex={-1} className="fixed inset-0 bg-ink/50 backdrop-blur-md z-[100] flex items-center justify-center p-6 animate-fade-in"
       onClick={onClose}
     >
       <div
@@ -74,6 +77,7 @@ export default function CreateCourseModal({
       >
         <button
           onClick={onClose}
+          aria-label="Close dialog"
           className="absolute top-5 right-5 text-2xl text-ink-soft hover:text-ink leading-none w-8 h-8 flex items-center justify-center rounded-full hover:bg-bg-alt transition"
         >
           ×
@@ -94,10 +98,10 @@ export default function CreateCourseModal({
 
         <form onSubmit={handleSubmit} className="space-y-5">
           <div>
-            <label className="block text-sm font-medium text-ink-soft mb-2">
+            <label htmlFor="course-code" className="block text-sm font-medium text-ink-soft mb-2">
               Course code <span className="text-accent">*</span>
             </label>
-            <input
+            <input id="course-code"
               type="text"
               value={code}
               onChange={(e) => setCode(e.target.value)}
@@ -109,10 +113,10 @@ export default function CreateCourseModal({
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-ink-soft mb-2">
+            <label htmlFor="course-title" className="block text-sm font-medium text-ink-soft mb-2">
               Course title <span className="text-accent">*</span>
             </label>
-            <input
+            <input id="course-title"
               type="text"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
@@ -124,11 +128,11 @@ export default function CreateCourseModal({
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-ink-soft mb-2">
+            <label htmlFor="course-instructor" className="block text-sm font-medium text-ink-soft mb-2">
               Instructor{" "}
               <span className="text-ink-mute font-normal">(optional)</span>
             </label>
-            <input
+            <input id="course-instructor"
               type="text"
               value={instructor}
               onChange={(e) => setInstructor(e.target.value)}

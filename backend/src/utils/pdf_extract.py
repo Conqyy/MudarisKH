@@ -1,9 +1,9 @@
 """Robust PDF text extraction.
 
-PyPDF2 frequently returns empty or garbled text for perfectly valid *text*
+pypdf frequently returns empty or garbled text for perfectly valid *text*
 PDFs whose fonts lack a ToUnicode map (common with many LaTeX/exporter-produced
 files). PyMuPDF (fitz) handles those far better, so we try it first and only
-fall back to PyPDF2 if needed.
+fall back to pypdf if needed.
 """
 import io
 import logging
@@ -40,11 +40,11 @@ def _extract_with_pymupdf(file_bytes: bytes) -> str:
     return "\n\n".join(pages)
 
 
-def _extract_with_pypdf2(file_bytes: bytes) -> str:
+def _extract_with_pypdf(file_bytes: bytes) -> str:
     try:
-        from PyPDF2 import PdfReader
+        from pypdf import PdfReader
     except Exception as e:  # pragma: no cover
-        logger.warning(f"PyPDF2 not available: {e}")
+        logger.warning(f"pypdf not available: {e}")
         return ""
 
     pages = []
@@ -55,13 +55,13 @@ def _extract_with_pypdf2(file_bytes: bytes) -> str:
             if txt:
                 pages.append(f"[Page {i + 1}]\n{txt}")
     except Exception as e:
-        logger.warning(f"PyPDF2 extraction error: {e}")
+        logger.warning(f"pypdf extraction error: {e}")
 
     return "\n\n".join(pages)
 
 
 def extract_pdf_text(file_bytes: bytes) -> str:
-    """Extract text from a PDF using PyMuPDF first, PyPDF2 as a fallback.
+    """Extract text from a PDF using PyMuPDF first, pypdf as a fallback.
 
     Returns the richer of the two results. May return "" for scanned/
     image-only PDFs (which would require OCR to read).
@@ -70,8 +70,8 @@ def extract_pdf_text(file_bytes: bytes) -> str:
     if len(primary.strip()) >= _MIN_MEANINGFUL:
         return primary
 
-    logger.warning("PyMuPDF yielded little/no text; trying PyPDF2 fallback.")
-    fallback = _extract_with_pypdf2(file_bytes)
+    logger.warning("PyMuPDF yielded little/no text; trying pypdf fallback.")
+    fallback = _extract_with_pypdf(file_bytes)
 
     best = primary if len(primary.strip()) >= len(fallback.strip()) else fallback
     if not best.strip():
@@ -91,7 +91,7 @@ def image_to_image_uri(file_bytes: bytes) -> str:
     """Normalize an uploaded photo/image into a PNG data-URI a vision model can
     read. Applies EXIF orientation (so sideways phone photos are upright),
     converts to RGB, and downscales very large photos to keep the payload sane.
-    Falls back to the raw bytes as JPEG if Pillow can't decode it."""
+    Rejects bytes that cannot be decoded as an image."""
     import base64
     try:
         from PIL import Image, ImageOps
@@ -106,8 +106,8 @@ def image_to_image_uri(file_bytes: bytes) -> str:
         img.save(buf, format="PNG")
         return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
     except Exception as e:
-        logger.warning(f"Image normalize failed ({e}); passing raw bytes as JPEG.")
-        return "data:image/jpeg;base64," + base64.b64encode(file_bytes).decode()
+        logger.warning('Image normalization failed: %s', type(e).__name__)
+        raise ValueError('The uploaded image could not be decoded') from e
 
 
 def pdf_to_image_uris(file_bytes: bytes, max_pages: int = 8, zoom: float = 2.0) -> list:
@@ -124,7 +124,10 @@ def pdf_to_image_uris(file_bytes: bytes, max_pages: int = 8, zoom: float = 2.0) 
     uris = []
     try:
         with fitz.open(stream=file_bytes, filetype="pdf") as doc:
-            for page in doc[:max_pages]:
+            count = min(max(1, max_pages), len(doc))
+            indices = sorted({round(i * (len(doc) - 1) / max(1, count - 1)) for i in range(count)})
+            for index in indices:
+                page = doc[index]
                 pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
                 png = pix.tobytes("png")
                 uris.append("data:image/png;base64," + base64.b64encode(png).decode())

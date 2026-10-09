@@ -10,10 +10,10 @@
       "autoPort": true
     },
     {
-      "//": "Must run from backend/ — the Firebase key path and uploads/ resolve relative to the working directory.",
+      "//": "Run from backend/ for environment and credential files; uploads and local data are anchored to backend/.",
       "name": "backend",
       "runtimeExecutable": "cmd",
-      "runtimeArgs": ["/c", "cd backend && venv\\Scripts\\python.exe -m src.api"],
+      "runtimeArgs": ["/c", "cd backend && .venv\\Scripts\\python.exe -m src.api"],
       "port": 8000,
       "//autoPort": "Fixed port: .env.local points the frontend at http://127.0.0.1:8000.",
       "autoPort": false

@@ -131,12 +131,12 @@ function ActivityRow({
   };
 
   return (
-    <Link
-      href={entry.href}
+    <div
       className={`group flex items-center gap-4 p-5 hover:bg-bg-alt transition ${
         first ? "" : "border-t border-line"
       }`}
     >
+      <Link href={entry.href} className="flex flex-1 min-w-0 items-center gap-4">
       <div className="w-10 h-10 rounded-xl bg-bg-alt flex items-center justify-center text-lg flex-shrink-0">
         {KIND_ICON[entry.kind]}
       </div>
@@ -163,24 +163,27 @@ function ActivityRow({
           </span>
         </div>
       </div>
+      </Link>
       <button
         onClick={handleStar}
+        aria-label={marked ? "Remove bookmark" : "Add bookmark"}
         title={marked ? "Remove bookmark" : "Add bookmark"}
         className={`w-8 h-8 rounded-full flex items-center justify-center text-sm transition flex-shrink-0 ${
           marked
             ? "bg-gold/15 text-gold"
-            : "text-ink-mute hover:bg-bg-alt hover:text-ink opacity-0 group-hover:opacity-100"
+            : "text-ink-mute hover:bg-bg-alt hover:text-ink opacity-100 md:opacity-0 md:group-hover:opacity-100 focus:opacity-100"
         }`}
       >
         {marked ? "★" : "☆"}
       </button>
       <button
         onClick={handleRemove}
+        aria-label={mode === "recent" ? "Remove from recent" : "Remove bookmark"}
         title={mode === "recent" ? "Remove from recent" : "Remove bookmark"}
-        className="w-8 h-8 rounded-full flex items-center justify-center text-ink-mute hover:bg-accent hover:text-paper transition flex-shrink-0 opacity-0 group-hover:opacity-100 text-sm"
+        className="w-8 h-8 rounded-full flex items-center justify-center text-ink-mute hover:bg-accent hover:text-paper transition flex-shrink-0 opacity-100 md:opacity-0 md:group-hover:opacity-100 focus:opacity-100 text-sm"
       >
         ×
       </button>
-    </Link>
+    </div>
   );
 }

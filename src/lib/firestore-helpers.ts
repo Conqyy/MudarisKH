@@ -5,11 +5,15 @@ import {
   getDoc,
   getDocs,
   updateDoc,
-  deleteDoc,
+  runTransaction,
   query,
   where,
 } from "firebase/firestore";
-import { db } from "./firebase";
+import { auth, db } from "./firebase";
+import { API_URL, apiFetch } from "./api";
+import { stripUndefinedDeep } from "./firestore-serialization";
+import { clearDeletedActivity, requireDeletionSuccess } from "./data-lifecycle";
+import { courseConflict, mergeReminderChanges, sameStoredValue } from "./course-mutations";
 
 // ============ TYPES ============
 export type ReminderType =
@@ -100,6 +104,10 @@ export interface CourseDocument {
 
 // ============ AUDIO RECORDINGS (Model 2) ============
 export interface AudioRecording {
+  sourceUrl?: string;
+  sourceType?: "upload" | "url" | "notes";
+  audioExt?: string;
+  hadTitle?: boolean;
   id: string;
   courseId: string;
   userId: string;
@@ -200,34 +208,12 @@ export interface Tutorial {
   processedAt?: number;
 }
 
-// Firestore rejects `undefined` field values — strip them before writing.
-// Firestore rejects `undefined` ANYWHERE in the payload — including values
-// nested inside arrays/objects (e.g. reminders[].date when left blank). This
-// strips `undefined` recursively so such writes don't silently throw.
-function stripUndefinedDeep(value: any): any {
-  if (Array.isArray(value)) {
-    return value.map((v) => stripUndefinedDeep(v));
-  }
-  if (value && typeof value === "object" && !(value instanceof Date)) {
-    const out: Record<string, any> = {};
-    for (const [k, v] of Object.entries(value)) {
-      if (v !== undefined) out[k] = stripUndefinedDeep(v);
-    }
-    return out;
-  }
-  return value;
-}
-
-function stripUndefined<T extends Record<string, any>>(obj: T): Partial<T> {
-  return stripUndefinedDeep(obj) as Partial<T>;
-}
-
 // ============ COURSES ============
 export async function createCourse(
   course: Omit<Course, "id" | "createdAt">
 ): Promise<string> {
   const docRef = await addDoc(collection(db, "courses"), {
-    ...stripUndefined(course),
+    ...stripUndefinedDeep(course),
     createdAt: Date.now(),
   });
   return docRef.id;
@@ -249,13 +235,47 @@ export async function getCourse(courseId: string): Promise<Course | null> {
 
 export async function updateCourse(
   courseId: string,
-  data: Partial<Course>
-): Promise<void> {
-  await updateDoc(doc(db, "courses", courseId), stripUndefined(data));
+  data: Partial<Course>,
+  baseline?: Partial<Course>
+): Promise<Partial<Course>> {
+  const clean = stripUndefinedDeep(data);
+  const courseRef = doc(db, "courses", courseId);
+  if (!baseline && !clean.titleOverrides) {
+    await updateDoc(courseRef, clean);
+    return clean;
+  }
+  return runTransaction(db, async (transaction) => {
+    const snapshot = await transaction.get(courseRef);
+    if (!snapshot.exists()) throw new Error("The course no longer exists.");
+    const current = snapshot.data() as Course;
+    const patch = { ...clean };
+    if (clean.reminders && baseline?.reminders) {
+      patch.reminders = mergeReminderChanges(baseline.reminders, clean.reminders, current.reminders || []);
+    }
+    if (clean.titleOverrides) {
+      const overrides = { ...(current.titleOverrides || {}) };
+      for (const [id, title] of Object.entries(clean.titleOverrides)) {
+        const expected = baseline?.titleOverrides?.[id];
+        if (baseline?.titleOverrides && overrides[id] !== expected && overrides[id] !== title) throw courseConflict();
+        overrides[id] = title;
+      }
+      patch.titleOverrides = overrides;
+    }
+    for (const key of ["documentOrder", "audioOrder", "examOrder", "tutorialOrder"] as const) {
+      if (clean[key] && baseline && key in baseline &&
+          !sameStoredValue(current[key] || [], baseline[key] || []) &&
+          !sameStoredValue(current[key] || [], clean[key])) throw courseConflict();
+    }
+    transaction.update(courseRef, patch);
+    return patch;
+  });
 }
 
 export async function deleteCourse(courseId: string): Promise<void> {
-  await deleteDoc(doc(db, "courses", courseId));
+  const uid = auth.currentUser?.uid;
+  const response = await apiFetch(`${API_URL}/api/courses/${encodeURIComponent(courseId)}`, { method: "DELETE" });
+  await requireDeletionSuccess(response, "course");
+  if (uid) clearDeletedActivity(uid, courseId);
 }
 
 // ============ LECTURES ============
@@ -269,7 +289,7 @@ export async function updateLecture(
   lectureId: string,
   data: Partial<Lecture>
 ): Promise<void> {
-  await updateDoc(doc(db, "lectures", lectureId), data);
+  await updateDoc(doc(db, "lectures", lectureId), stripUndefinedDeep(data));
 }
 
 // NOTE: documents, audio recordings, historical exams and tutorials are

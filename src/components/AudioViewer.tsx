@@ -1,5 +1,7 @@
 "use client";
 
+import { useDialog } from "@/lib/use-dialog";
+
 import { useState } from "react";
 import { AudioRecording } from "@/lib/firestore-helpers";
 import BookmarkButton from "@/components/BookmarkButton";
@@ -22,6 +24,7 @@ export default function AudioViewer({
   courseCode,
   courseColor,
 }: AudioViewerProps) {
+  const dialogRef = useDialog(onClose);
   const insights = recording.insights;
 
   // The analysis endpoint needs an Authorization header, which <a href> cannot
@@ -66,7 +69,7 @@ export default function AudioViewer({
       : "text-ink-mute bg-bg-alt";
 
   return (
-    <div className="fixed inset-0 z-50 flex">
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Audio recording" tabIndex={-1} className="fixed inset-0 z-[100] flex">
       <div
         className="absolute inset-0 bg-ink/30 backdrop-blur-sm"
         onClick={onClose}
@@ -77,6 +80,7 @@ export default function AudioViewer({
         <div className="border-b border-line px-6 py-4 flex items-center gap-4 flex-shrink-0">
           <button
             onClick={onClose}
+          aria-label="Close dialog"
             className="w-8 h-8 rounded-full border border-line flex items-center justify-center text-ink-mute hover:bg-bg-alt transition text-sm"
           >
             &times;
