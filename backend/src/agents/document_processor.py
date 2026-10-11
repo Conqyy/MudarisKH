@@ -114,7 +114,9 @@ class DocumentProcessorAgent:
                         'imageStart': start, 'imageEnd': start + len(batch), 'imageCount': len(images)}
             results.append(self._source_request(prompts.SOURCE_VISUAL_SYSTEM_PROMPT, evidence, batch,
                                                 validate_source_visual_result, 'source visual extraction'))
-        readability = ('uncertain' if any(r['readability'] == 'uncertain' for r in results)
+        # A warned blank read is unresolved even when another asset is readable.
+        readability = ('uncertain' if any(r['readability'] == 'uncertain'
+                                         or (r['readability'] == 'blank' and r['warnings']) for r in results)
                        else 'blank' if all(r['readability'] == 'blank' for r in results) else 'readable')
         merged = {'text': '\n\n'.join(r['text'] for r in results if r['text'].strip()),
                   'visualDescription': '\n\n'.join(r['visualDescription'] for r in results if r['visualDescription'].strip()),

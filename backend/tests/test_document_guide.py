@@ -175,6 +175,32 @@ def test_visual_uncertainty_in_late_asset_cannot_be_hidden(monkeypatch):
     assert contracts.source_coverage([prepared])['complete'] is False
 
 
+@pytest.mark.parametrize('readable_first', [True, False])
+def test_mixed_readable_and_blank_with_warnings_stays_unresolved_after_mapping(monkeypatch, readable_first):
+    readable = reading(text='Visible text', visualDescription='Two connected nodes')
+    unresolved_blank = reading(text='', visualDescription='', readability='blank', warnings=['Unreadable labels'])
+    replies = iter([output(value) for value in
+                    ([readable, unresolved_blank] if readable_first else [unresolved_blank, readable])])
+    seen = capture(monkeypatch, lambda r: next(replies))
+    original = unit(unitId='s0001', kind='slide', text='Native heading', needsVisualRead=True,
+                    visualReadStatus='pending', visualAssets=[
+                        {'assetId': f'image{i}', 'kind': 'image', 'mimeType': 'image/png',
+                         'relationshipId': f'rId{i}'} for i in range(9)])
+    result = agent().read_source_visual(original, [f'data:image/png;base64,{i}' for i in range(9)])
+    prepared = contracts.apply_source_visual_result(original, result)
+    source = contracts.build_source_manifest('doc', 'a' * 64, 'pptx', [prepared])
+    assert [len(image_urls(r)) for r in seen] == [8, 1]
+    assert result['text'] == 'Visible text'
+    assert result['visualDescription'] == 'Two connected nodes'
+    assert result['warnings'] == prepared['warnings'] == ['Unreadable labels']
+    assert prepared['text'] == 'Native heading'
+    assert prepared['visualText'] == 'Visible text\n\nTwo connected nodes'
+    assert prepared['visualAssets'] == original['visualAssets']
+    assert result['readability'] == prepared['visualReadStatus'] == 'uncertain'
+    assert source['coverage']['complete'] is False
+    assert source['coverage']['unresolvedUnitIds'] == ['s0001']
+
+
 def test_guide_truncated_response_retries_and_failed_late_batch_returns_no_guide(monkeypatch):
     source = contracts.build_source_manifest('doc', 'a' * 64, 'pdf', [unit(text='A' * 50000)])
     replies = iter([output({}, 'length'), None, output({}, 'length'), output({}, 'length')])
