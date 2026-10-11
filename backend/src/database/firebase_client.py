@@ -6,10 +6,12 @@ import threading
 import uuid
 import tempfile
 import re
+import hashlib
+from copy import deepcopy
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
-from src.utils.storage_paths import BACKEND_ROOT, UPLOADS_ROOT, resolve_storage_path, validate_component, STORAGE_CATEGORIES
+from src.utils.storage_paths import BACKEND_ROOT, UPLOADS_ROOT, resolve_storage_path, validate_component, STORAGE_CATEGORIES, document_artifact_prefix
 
 logger = logging.getLogger("MudarisDatabase")
 
@@ -190,6 +192,9 @@ class FirebaseClient:
         course_id = data.get('courseId') or None
         if collection_name in self.OWNED_COLLECTIONS and not user_id:
             raise ValueError('Application records require an owner')
+        def authorize_foundation(row):
+            if row and (row.get('userId') != user_id or row.get('courseId') != course_id):
+                raise DataConflict('Foundation ownership or course association changed')
         if self.use_local:
             self._assert_write_allowed(user_id, course_id)
             local = self._read_local_db()
@@ -197,6 +202,9 @@ class FirebaseClient:
             doc_id = f"{collection_name}_{uuid.uuid4().hex}"
             if collection_name == 'courses':
                 self._assert_write_allowed(user_id, doc_id, parent_required=False)
+            if collection_name == 'documents':
+                authorize_foundation(local.get('document_foundations', {}).get(course_id, {}))
+                local.get('document_foundations', {}).pop(course_id, None)
             local[collection_name][doc_id] = data
             self._write_local_db(local)
             return doc_id
@@ -206,7 +214,14 @@ class FirebaseClient:
         def save(transaction):
             self._assert_write_allowed(user_id, doc_ref.id if collection_name == 'courses' else course_id,
                                        transaction, parent_required=collection_name != 'courses')
+            foundation_ref, foundation = None, None
+            if collection_name == 'documents':
+                foundation_ref = self.db.collection('document_foundations').document(course_id)
+                foundation = foundation_ref.get(transaction=transaction)
+                authorize_foundation(foundation.to_dict() or {} if foundation.exists else {})
             transaction.set(doc_ref, data)
+            if foundation is not None and foundation.exists:
+                transaction.delete(foundation_ref)
             return doc_ref.id
         return save(self.db.transaction())
 
@@ -216,6 +231,8 @@ class FirebaseClient:
             local = self._read_local_db()
             if collection_name in local and doc_id in local[collection_name]:
                 current = local[collection_name][doc_id]
+                if collection_name == 'documents' and current.get('status') == 'deleting':
+                    raise DataDeletionConflict('Document cleanup is in progress; updates are disabled')
                 self._assert_update_owner(current, data)
                 self._assert_write_allowed(current.get('userId') or current.get('uid'), doc_id if collection_name == 'courses' else data.get('courseId', current.get('courseId')) or None)
                 validate_record_size({**current, **data})
@@ -231,6 +248,8 @@ class FirebaseClient:
             if not snapshot.exists:
                 return False
             current = snapshot.to_dict() or {}
+            if collection_name == 'documents' and current.get('status') == 'deleting':
+                raise DataDeletionConflict('Document cleanup is in progress; updates are disabled')
             self._assert_update_owner(current, data)
             self._assert_write_allowed(current.get('userId') or current.get('uid'), doc_id if collection_name == 'courses' else data.get('courseId', current.get('courseId')) or None, transaction)
             validate_record_size({**current, **data})
@@ -785,7 +804,8 @@ class FirebaseClient:
 
     # --- Firebase Storage helpers ---
     @local_locked
-    def upload_file_to_storage(self, file_bytes: bytes, storage_path: str, user_id: str = None) -> str:
+    def upload_file_to_storage(self, file_bytes: bytes, storage_path: str, user_id: str = None,
+                               *, require_remote: bool = False) -> str:
         local_path = resolve_storage_path(storage_path, user_id, root=UPLOADS_ROOT)
         owner, course_id = storage_path.split('/')[1:3]
         self._assert_write_allowed(owner, course_id)
@@ -801,6 +821,8 @@ class FirebaseClient:
                 blob.upload_from_string(file_bytes)
                 # All cloud objects remain private; the API serves their bytes.
             except Exception as e:
+                if require_remote:
+                    raise
                 logger.warning('Cloud upload failed (%s); retaining private local copy', type(e).__name__)
         try:
             self._assert_write_allowed(owner, course_id)
@@ -856,6 +878,374 @@ class FirebaseClient:
                          "tutorials", "exams", "flashcard_sets", "summaries",
                          "tutor_chats", "schedule_entries", "lectures", "_schedule_versions",
                          "document_foundations")
+
+    @staticmethod
+    def _document_identity(user_id, course_id, doc_id):
+        for value, label in ((user_id, 'user ID'), (course_id, 'course ID'), (doc_id, 'document ID')):
+            validate_component(value, label)
+
+    @staticmethod
+    def _document_row_allowed(row, user_id, course_id, *, allow_deleting=False):
+        if (not row or row.get('userId') != user_id or row.get('courseId') != course_id
+                or (not allow_deleting and row.get('status') == 'deleting')):
+            raise DataConflict('Document is no longer available')
+
+    @local_locked
+    def get_owned_document(self, user_id: str, course_id: str, doc_id: str) -> dict:
+        self._document_identity(user_id, course_id, doc_id)
+        self._assert_write_allowed(user_id, course_id)
+        row = self.get_document(doc_id)
+        self._document_row_allowed(row, user_id, course_id)
+        return row
+
+    @local_locked
+    def _document_atomic(self, user_id, course_id, doc_id, change, *, clear_confirmation=False,
+                         allow_deleting=False, require_parent=True):
+        """Read parent/deletion fences and target before any transaction writes."""
+        self._document_identity(user_id, course_id, doc_id)
+        def apply(row, foundation):
+            self._document_row_allowed(row, user_id, course_id, allow_deleting=allow_deleting)
+            if clear_confirmation and foundation and (foundation.get('userId') != user_id or foundation.get('courseId') != course_id):
+                raise DataConflict('Foundation ownership or course association changed')
+            updated, result = change(deepcopy(row))
+            if updated is not None:
+                validate_record_size(updated)
+            return updated, result
+        if self.use_local:
+            if require_parent:
+                self._assert_write_allowed(user_id, course_id)
+            local = self._read_local_db()
+            updated, result = apply(local.get('documents', {}).get(doc_id, {}),
+                                    local.get('document_foundations', {}).get(course_id, {}))
+            if updated is not None:
+                local['documents'][doc_id] = updated
+                if clear_confirmation:
+                    local.get('document_foundations', {}).pop(course_id, None)
+                self._write_local_db(local)
+            return result
+        from google.cloud import firestore
+        reference = self.db.collection('documents').document(doc_id)
+        foundation_ref = self.db.collection('document_foundations').document(course_id)
+        @firestore.transactional
+        def update(transaction):
+            if require_parent:
+                self._assert_write_allowed(user_id, course_id, transaction)
+            snapshot = reference.get(transaction=transaction)
+            foundation_snapshot = foundation_ref.get(transaction=transaction) if clear_confirmation else None
+            foundation = foundation_snapshot.to_dict() or {} if foundation_snapshot and foundation_snapshot.exists else {}
+            updated, result = apply(snapshot.to_dict() or {} if snapshot.exists else {}, foundation)
+            if updated is not None:
+                transaction.update(reference, updated)
+                if clear_confirmation:
+                    transaction.delete(foundation_ref)
+            return result
+        return update(self.db.transaction())
+
+    @staticmethod
+    def _job_clock(now_ms, lease_ms):
+        if type(now_ms) is not int or now_ms < 0 or type(lease_ms) is not int or lease_ms <= 0:
+            raise ValueError('Invalid document job lease')
+
+    @staticmethod
+    def _live_document_claim(row, job_id, claim_token, now_ms):
+        job = row.get('processingJob') or {}
+        return (job.get('id') == job_id and bool(claim_token) and job.get('claimToken') == claim_token
+                and row.get('status') not in {'completed', 'failed'}
+                and job.get('stage') in {'preparing', 'guiding'}
+                and type(job.get('leaseUntil')) is int and job['leaseUntil'] > now_ms
+                and job.get('sourceDigest') == row.get('originalDigest'))
+
+    def start_document_job(self, user_id: str, course_id: str, doc_id: str, *,
+                            source_digest: str, force_guide: bool = False) -> dict:
+        if not isinstance(source_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', source_digest):
+            raise ValueError('Invalid original source digest')
+        if type(force_guide) is not bool:
+            raise ValueError('Invalid guide retry flag')
+        job = {'id': uuid.uuid4().hex, 'kind': 'guide' if force_guide else 'prepare',
+               'sourceDigest': source_digest, 'claimToken': None, 'leaseUntil': 0, 'stage': 'queued', 'cursor': None}
+        def start(row):
+            if row.get('originalDigest') not in (None, source_digest):
+                raise DataConflict('Original source digest changed')
+            version = row.get('sourceVersions', {}).get(row.get('sourceRevision'), {})
+            prepared = (force_guide and row.get('preparationStatus') == 'completed'
+                        and version.get('originalDigest') == source_digest and version.get('coverageComplete') is True)
+            row.update({'originalDigest': source_digest, 'processingJob': job, 'status': 'processing',
+                        'preparationStatus': 'completed' if prepared else 'pending', 'guideStatus': 'pending', 'error': None})
+            return row, deepcopy(job)
+        return self._document_atomic(user_id, course_id, doc_id, start, clear_confirmation=True)
+
+    def claim_document_job(self, user_id: str, course_id: str, doc_id: str, job_id: str, *,
+                            worker_id: str, now_ms: int, lease_ms: int = 300000) -> dict | None:
+        self._job_clock(now_ms, lease_ms)
+        validate_component(worker_id, 'worker ID')
+        def claim(row):
+            job = row.get('processingJob') or {}
+            if (job.get('id') != job_id or job.get('stage') not in {'queued', 'preparing', 'guiding'}
+                    or row.get('status') in {'completed', 'failed'}
+                    or job.get('sourceDigest') != row.get('originalDigest')
+                    or job.get('leaseUntil', 0) > now_ms):
+                return None, None
+            job.update({'claimToken': uuid.uuid4().hex, 'leaseUntil': now_ms + lease_ms})
+            version = row.get('sourceVersions', {}).get(row.get('sourceRevision'), {})
+            prepared = (row.get('preparationStatus') == 'completed' and version.get('coverageComplete') is True
+                        and version.get('originalDigest') == row.get('originalDigest'))
+            job['stage'] = 'guiding' if prepared else 'preparing'
+            active_status = 'guideStatus' if prepared else 'preparationStatus'
+            if row.get(active_status) != 'completed':
+                row[active_status] = 'processing'
+            return row, deepcopy(job)
+        try:
+            return self._document_atomic(user_id, course_id, doc_id, claim)
+        except DataConflict:
+            return None
+
+    def checkpoint_document_job(self, user_id: str, course_id: str, doc_id: str, job_id: str,
+                                 claim_token: str, *, changes: dict, now_ms: int, lease_ms: int = 300000) -> bool:
+        self._job_clock(now_ms, lease_ms)
+        allowed = {'stage', 'cursor', 'preparationStatus', 'guideStatus', 'status', 'error', 'guide', 'guideRevision', 'analysis'}
+        if not isinstance(changes, dict) or set(changes) - allowed:
+            raise ValueError('Invalid document job checkpoint fields')
+        changes = deepcopy(changes)
+        validate_record_size(changes)
+        if 'cursor' in changes:
+            cursor = changes['cursor']
+            if (cursor is not None and not (type(cursor) is int and cursor >= 0)
+                    and not (isinstance(cursor, dict) and len(cursor) <= 32
+                             and all(k in {'unitIndex', 'chunkIndex', 'batchIndex'}
+                                     and type(v) is int and v >= 0 for k, v in cursor.items()))):
+                raise ValueError('Document job cursor must contain only compact numeric positions')
+        for field in ('preparationStatus', 'guideStatus'):
+            if field in changes and changes[field] not in {'pending', 'processing', 'completed', 'failed'}:
+                raise ValueError('Invalid document stage status')
+        if 'status' in changes and changes['status'] not in {'processing', 'completed', 'failed'}:
+            raise ValueError('Invalid document status')
+        if 'stage' in changes and changes['stage'] not in {'preparing', 'guiding', 'completed', 'failed'}:
+            raise ValueError('Invalid processing job stage')
+        if 'error' in changes and changes['error'] is not None and not isinstance(changes['error'], str):
+            raise ValueError('Invalid document error')
+        if ('guideRevision' in changes or 'analysis' in changes) and 'guide' not in changes:
+            raise ValueError('Guide metadata requires a validated guide')
+        try:
+            current = self.get_owned_document(user_id, course_id, doc_id)
+        except DataConflict:
+            return False
+        if not self._live_document_claim(current, job_id, claim_token, now_ms):
+            return False
+        manifest = None
+        if ('guide' in changes or current.get('guideStatus') == 'completed' or changes.get('guideStatus') == 'completed'
+                or changes.get('stage') == 'completed' or changes.get('status') == 'completed'):
+            from src.services.document_library import DocumentLibrary
+            try:
+                manifest = DocumentLibrary(self).load_manifest(user_id, course_id, doc_id)
+            except DataConflict:
+                return False
+        def checkpoint(row):
+            if not self._live_document_claim(row, job_id, claim_token, now_ms):
+                return None, False
+            job_changes = {key: changes[key] for key in ('stage', 'cursor') if key in changes}
+            updates = {key: value for key, value in changes.items() if key not in job_changes}
+            if manifest is not None and manifest['sourceRevision'] != row.get('sourceRevision'):
+                return None, False
+            if 'guide' in updates:
+                from src.utils.source_contracts import validate_guide, guide_digest, guide_to_legacy_analysis
+                guide = validate_guide(updates['guide'], manifest)
+                digest = guide_digest(guide)
+                if 'guideRevision' in updates and updates['guideRevision'] != digest:
+                    raise ValueError('Guide revision mismatch')
+                analysis = guide_to_legacy_analysis(guide)
+                if 'analysis' in updates and updates['analysis'] != analysis:
+                    raise ValueError('Guide compatibility metadata mismatch')
+                updates.update({'guide': guide, 'guideRevision': digest, 'analysis': analysis})
+            row.update(updates)
+            if any(row.get(key) == 'failed' for key in ('status', 'preparationStatus', 'guideStatus')):
+                job_changes['stage'] = 'failed'
+            version = row.get('sourceVersions', {}).get(row.get('sourceRevision'), {})
+            if row.get('preparationStatus') == 'completed' and (version.get('coverageComplete') is not True or version.get('originalDigest') != row.get('originalDigest')):
+                raise ValueError('Preparation requires a complete current source version')
+            if job_changes.get('stage') == 'guiding' and row.get('preparationStatus') != 'completed':
+                raise ValueError('Guiding requires completed source preparation')
+            if row.get('guideStatus') == 'completed':
+                from src.utils.source_contracts import validate_guide, guide_digest
+                guide = validate_guide(row.get('guide'), manifest)
+                if (row.get('preparationStatus') != 'completed' or not guide['unitCoverage']['complete']
+                        or guide_digest(guide) != row.get('guideRevision')):
+                    raise ValueError('Guide completion requires complete current source coverage')
+            if job_changes.get('stage') == 'completed' or row.get('status') == 'completed':
+                if row.get('preparationStatus') != 'completed' or row.get('guideStatus') != 'completed':
+                    raise ValueError('Both document stages must complete before unlock')
+                row['status'] = 'completed'
+                job_changes['stage'] = 'completed'
+            if job_changes.get('stage') == 'failed':
+                row['status'] = 'failed'
+                row['guideStatus' if row.get('preparationStatus') == 'completed' else 'preparationStatus'] = 'failed'
+            row['processingJob'].update({**job_changes, 'leaseUntil': now_ms + lease_ms})
+            return row, True
+        try:
+            return self._document_atomic(user_id, course_id, doc_id, checkpoint)
+        except DataConflict:
+            return False
+
+    def get_pending_document_jobs(self, limit: int = 1000, *, now_ms: int) -> list[dict]:
+        self._job_clock(now_ms, 1)
+        limit = max(1, min(int(limit), 1000))
+        if self.use_local:
+            rows = [{**row, 'id': key} for key, row in self._read_local_db().get('documents', {}).items()]
+        else:
+            rows = [{**snapshot.to_dict(), 'id': snapshot.id} for snapshot in self.db.collection('documents').stream()]
+        pending = []
+        for row in rows:
+            job = row.get('processingJob') or {}
+            if (job.get('stage') not in {'queued', 'preparing', 'guiding'}
+                    or row.get('status') in {'completed', 'failed'}
+                    or job.get('leaseUntil', 0) > now_ms or job.get('sourceDigest') != row.get('originalDigest')):
+                continue
+            try:
+                self.get_owned_document(row.get('userId'), row.get('courseId'), row['id'])
+            except (ValueError, TypeError):
+                continue
+            pending.append(row)
+            if len(pending) >= limit:
+                break
+        return pending
+
+    @local_locked
+    def invalidate_document_foundation(self, user_id: str, course_id: str) -> bool:
+        validate_component(user_id, 'user ID')
+        validate_component(course_id, 'course ID')
+        def authorize(row):
+            if row and (row.get('userId') != user_id or row.get('courseId') != course_id):
+                raise DataConflict('Foundation ownership or course association changed')
+        if self.use_local:
+            self._assert_write_allowed(user_id, course_id)
+            local = self._read_local_db()
+            authorize(local.get('document_foundations', {}).get(course_id, {}))
+            local.get('document_foundations', {}).pop(course_id, None)
+            self._write_local_db(local)
+            return True
+        from google.cloud import firestore
+        reference = self.db.collection('document_foundations').document(course_id)
+        @firestore.transactional
+        def invalidate(transaction):
+            self._assert_write_allowed(user_id, course_id, transaction)
+            snapshot = reference.get(transaction=transaction)
+            authorize(snapshot.to_dict() or {} if snapshot.exists else {})
+            transaction.delete(reference)
+            return True
+        return invalidate(self.db.transaction())
+
+    @staticmethod
+    def validate_document_storage_path(user_id: str, course_id: str, path: str, *, doc_id: str = None):
+        resolve_storage_path(path, user_id, root=UPLOADS_ROOT)
+        if path.split('/')[:3] != ['documents', user_id, course_id]:
+            raise ValueError('Document storage namespace mismatch')
+        if doc_id is not None and not path.split('/')[-1].startswith(document_artifact_prefix(doc_id)):
+            raise ValueError('Document artifact namespace mismatch')
+
+    def reserve_document_artifacts(self, user_id: str, course_id: str, doc_id: str, job_id: str,
+                                   claim_token: str, *, paths: list[str], now_ms: int) -> bool:
+        self._job_clock(now_ms, 1)
+        if not isinstance(paths, list) or not paths or len(set(paths)) != len(paths):
+            raise ValueError('Artifact reservations require unique paths')
+        for path in paths:
+            self.validate_document_storage_path(user_id, course_id, path, doc_id=doc_id)
+            if not path.split('/')[-1].startswith(document_artifact_prefix(doc_id) + job_id + '-' + claim_token + '-'):
+                raise ValueError('Artifact claim namespace mismatch')
+        def reserve(row):
+            if not self._live_document_claim(row, job_id, claim_token, now_ms):
+                return None, False
+            if set(paths) & set(self._record_storage_paths(row, user_id, course_id)):
+                raise ValueError('Artifact path is already reserved or published')
+            row['pendingArtifactPaths'] = [*row.get('pendingArtifactPaths', []), *paths]
+            return row, True
+        try:
+            return self._document_atomic(user_id, course_id, doc_id, reserve)
+        except DataConflict:
+            return False
+
+    def publish_document_source(self, user_id: str, course_id: str, doc_id: str, job_id: str,
+                                claim_token: str, *, source_revision: str, version: dict, now_ms: int) -> bool:
+        self._job_clock(now_ms, 1)
+        if not isinstance(source_revision, str) or not re.fullmatch(r'[0-9a-f]{64}', source_revision):
+            raise ValueError('Invalid source revision')
+        if not isinstance(version, dict) or set(version) != {'manifestPath', 'manifestDigest', 'originalPath', 'originalDigest', 'fileType', 'unitCount', 'coverageComplete'}:
+            raise ValueError('Invalid compact source version')
+        paths = [version['originalPath'], version['manifestPath']]
+        for path in paths:
+            self.validate_document_storage_path(user_id, course_id, path, doc_id=doc_id)
+            if not path.split('/')[-1].startswith(document_artifact_prefix(doc_id) + job_id + '-' + claim_token + '-'):
+                raise ValueError('Artifact claim namespace mismatch')
+        try:
+            current = self.get_owned_document(user_id, course_id, doc_id)
+        except DataConflict:
+            return False
+        if not self._live_document_claim(current, job_id, claim_token, now_ms):
+            return False
+        from src.utils.source_contracts import validate_manifest
+        body = self.download_file_from_storage(version['manifestPath'], user_id).read_bytes()
+        if hashlib.sha256(body).hexdigest() != version['manifestDigest']:
+            raise ValueError('Source manifest artifact digest mismatch')
+        manifest = validate_manifest(json.loads(body))
+        original = self.download_file_from_storage(version['originalPath'], user_id).read_bytes()
+        if (hashlib.sha256(original).hexdigest() != version['originalDigest']
+                or manifest['documentId'] != doc_id or manifest['sourceRevision'] != source_revision
+                or manifest['originalDigest'] != version['originalDigest'] or manifest['fileType'] != version['fileType']
+                or type(version['unitCount']) is not int or manifest['unitCount'] != version['unitCount']
+                or type(version['coverageComplete']) is not bool or manifest['coverage']['complete'] != version['coverageComplete']):
+            raise ValueError('Published version contradicts its immutable source artifacts')
+        def publish(row):
+            if not self._live_document_claim(row, job_id, claim_token, now_ms):
+                return None, False
+            if version['originalDigest'] != row['originalDigest'] or not set(paths).issubset(row.get('pendingArtifactPaths', [])):
+                raise DataConflict('Source artifact reservation changed')
+            versions = row.setdefault('sourceVersions', {})
+            existing = versions.get(source_revision)
+            if existing and any(existing.get(k) != version[k] for k in ('originalDigest', 'fileType', 'manifestDigest', 'unitCount', 'coverageComplete')):
+                raise DataConflict('Immutable source revision conflict')
+            versions.setdefault(source_revision, deepcopy(version))
+            row.update({'sourceRevision': source_revision, 'sourceManifestPath': versions[source_revision]['manifestPath'],
+                        'sourceManifestDigest': versions[source_revision]['manifestDigest'],
+                        'preparationStatus': 'completed' if version['coverageComplete'] else 'processing',
+                        'pendingArtifactPaths': [p for p in row.get('pendingArtifactPaths', []) if p not in paths]})
+            return row, True
+        try:
+            return self._document_atomic(user_id, course_id, doc_id, publish, clear_confirmation=True)
+        except DataConflict:
+            return False
+
+    def release_document_artifacts(self, user_id: str, course_id: str, doc_id: str, *, paths: list[str]) -> bool:
+        for path in paths:
+            self.validate_document_storage_path(user_id, course_id, path, doc_id=doc_id)
+        def release(row):
+            row['pendingArtifactPaths'] = [p for p in row.get('pendingArtifactPaths', []) if p not in paths]
+            return row, True
+        try:
+            return self._document_atomic(user_id, course_id, doc_id, release, allow_deleting=True, require_parent=False)
+        except DataConflict:
+            return False
+
+    @local_locked
+    def delete_document_data(self, user_id: str, doc_id: str) -> dict:
+        validate_component(user_id, 'user ID')
+        validate_component(doc_id, 'document ID')
+        row = self.get_document(doc_id)
+        if not row:
+            return {'documents': 0, 'files': 0}
+        if row.get('userId') != user_id:
+            raise ValueError('Document not owned')
+        course_id = validate_component(row.get('courseId'), 'course ID')
+        self._record_storage_paths(row, user_id, course_id)
+        def mark(current):
+            self._record_storage_paths({**current, 'id': doc_id}, user_id, course_id)
+            current.update({'status': 'deleting', 'processingJob': None})
+            return current, current
+        deleting = self._document_atomic(user_id, course_id, doc_id, mark, clear_confirmation=True,
+                                         allow_deleting=True, require_parent=False)
+        paths = set(self._record_storage_paths(deleting, user_id, course_id))
+        self._delete_record_files(deleting, user_id)
+        files = len(paths) + self._cleanup_storage_namespace(user_id, course_id,
+                filename_prefix=document_artifact_prefix(doc_id), categories=('documents',))
+        self._flat_delete('documents', doc_id)
+        return {'documents': 1, 'files': files}
 
     def get_owned_course(self, user_id: str, course_id: str) -> dict:
         validate_component(user_id, "user ID")
@@ -949,12 +1339,20 @@ class FirebaseClient:
             if row.get(key):
                 paths.append(row[key])
         paths.extend(row.get("supersededSolutionPaths", []) or [])
+        derivatives = list(row.get('pendingArtifactPaths', []) or [])
+        if row.get('sourceManifestPath'):
+            derivatives.append(row['sourceManifestPath'])
+        for version in (row.get('sourceVersions', {}) or {}).values():
+            derivatives.extend(version.get(key) for key in ('manifestPath', 'originalPath') if version.get(key))
+        for path in derivatives:
+            self.validate_document_storage_path(user_id, course_id or row.get('courseId'), path, doc_id=row.get('id'))
+        paths.extend(derivatives)
         for path in paths:
             resolve_storage_path(path, user_id, root=UPLOADS_ROOT)
             expected_course = course_id or row.get("courseId")
             if expected_course and path.split("/")[2] != expected_course:
                 raise ValueError("Storage course mismatch")
-        return paths
+        return list(dict.fromkeys(paths))
 
     def _delete_record_files(self, row: dict, user_id: str):
         for path in self._record_storage_paths(row, user_id):

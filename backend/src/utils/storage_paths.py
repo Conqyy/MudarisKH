@@ -1,5 +1,6 @@
 """Canonical private storage paths shared by uploads, serving and cleanup."""
 from pathlib import Path
+import hashlib
 import re
 import unicodedata
 
@@ -24,6 +25,24 @@ def build_storage_path(user_id: str, course_id: str, category: str, filename: st
         raise ValueError("Invalid storage category")
     return "/".join((category, validate_component(user_id, "user ID"),
                      validate_component(course_id, "course ID"), validate_component(filename, "filename")))
+
+
+def document_artifact_prefix(document_id: str) -> str:
+    """An exact hashed namespace, immune to adjacent document-ID prefixes."""
+    validate_component(document_id, 'document ID')
+    return 'source-' + hashlib.sha256(document_id.encode('utf-8')).hexdigest() + '-'
+
+
+def build_document_artifact_path(user_id: str, course_id: str, document_id: str,
+                                 job_id: str, claim_token: str, attempt_id: str,
+                                 suffix: str) -> str:
+    for value in (job_id, claim_token, attempt_id):
+        if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{32}', value):
+            raise ValueError('Invalid artifact identity')
+    if suffix not in {'manifest.json', 'original.pdf', 'original.pptx', 'original.docx'}:
+        raise ValueError('Invalid source artifact kind')
+    filename = document_artifact_prefix(document_id) + '-'.join((job_id, claim_token, attempt_id, suffix))
+    return build_storage_path(user_id, course_id, 'documents', filename)
 
 
 def resolve_storage_path(storage_path: str, user_id: str = None, root: Path = None) -> Path:
