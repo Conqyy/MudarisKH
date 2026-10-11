@@ -6,6 +6,7 @@ import re
 import time
 import uuid
 
+from src.database.firebase_client import DataSizeConflict
 from src.utils.document_sources import render_source_unit
 from src.utils.source_contracts import validate_manifest, validate_source_reference
 from src.utils.storage_paths import build_document_artifact_path
@@ -47,18 +48,30 @@ class DocumentLibrary:
                        'originalPath': paths[0], 'originalDigest': manifest['originalDigest'],
                        'fileType': manifest['fileType'], 'unitCount': manifest['unitCount'],
                        'coverageComplete': manifest['coverage']['complete']}
-            if not self.database.publish_document_source(user_id, course_id, doc_id, job_id, claim_token,
-                                                         source_revision=manifest['sourceRevision'], version=version,
-                                                         now_ms=int(time.time() * 1000)):
-                raise ValueError('Document job claim is no longer live')
-            # An identical existing revision keeps its immutable pointers.
-            current = self._document(user_id, course_id, doc_id)['sourceVersions'][manifest['sourceRevision']]
-            if current['manifestPath'] != paths[1]:
-                self._compensate(user_id, course_id, doc_id, paths)
-            return manifest
         except Exception:
             self._compensate(user_id, course_id, doc_id, paths)
             raise
+        # Publication may commit even when its transport response fails. Do not
+        # compensate an exception here: a later read cannot prove nonadoption.
+        try:
+            retained = self.database.publish_document_source(user_id, course_id, doc_id, job_id, claim_token,
+                                                             source_revision=manifest['sourceRevision'], version=version,
+                                                             now_ms=int(time.time() * 1000))
+        except DataSizeConflict:
+            # The record guard runs before any transaction write; preserve its
+            # split-source guidance after removing only this rejected attempt.
+            self._compensate(user_id, course_id, doc_id, paths)
+            raise
+        if retained is None:
+            self._compensate(user_id, course_id, doc_id, paths)
+            raise ValueError('Document source publication was rejected')
+        # The atomic result includes the final immutable pointers, including
+        # an earlier version when an identical revision is published again.
+        adopted = {retained['originalPath'], retained['manifestPath']}
+        unadopted = [path for path in paths if path not in adopted]
+        if unadopted:
+            self._compensate(user_id, course_id, doc_id, unadopted)
+        return manifest
 
     def _compensate(self, user_id, course_id, doc_id, paths):
         # Failed cleanup keeps pending metadata for a later lifecycle cleanup.

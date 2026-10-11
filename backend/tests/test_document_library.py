@@ -288,6 +288,7 @@ def test_incomplete_manifest_never_completes_preparation(library):
 
 
 def test_publishing_over_record_limit_compensates_reserved_assets(library, monkeypatch):
+    from src.database.firebase_client import DataSizeConflict
     db = library.database
     doc, job, claim, manifest = prepare(library)
     # Fill only existing metadata; reservation fits, but complete version references do not.
@@ -298,7 +299,8 @@ def test_publishing_over_record_limit_compensates_reserved_assets(library, monke
         uploads.append(path)
         return upload(data, path, user_id, **kwargs)
     monkeypatch.setattr(db, 'upload_file_to_storage', track)
-    with pytest.raises(ValueError): library.save_manifest('u', 'c', doc, job['id'], claim['claimToken'], manifest)
+    with pytest.raises(DataSizeConflict, match='Split the source'):
+        library.save_manifest('u', 'c', doc, job['id'], claim['claimToken'], manifest)
     assert len(uploads) == 2
     assert not db.get_document(doc).get('sourceVersions')
     assert db.get_document(doc).get('pendingArtifactPaths', []) == []
@@ -342,8 +344,7 @@ def test_source_publication_rejects_claim_reserved_but_forged_version(library):
     version = {'manifestPath': paths[1], 'manifestDigest': 'a' * 64,
                'originalPath': paths[0], 'originalDigest': manifest['originalDigest'], 'fileType': 'pdf',
                'unitCount': 1, 'coverageComplete': True}
-    with pytest.raises(ValueError):
-        db.publish_document_source('u', 'c', doc, job['id'], claim['claimToken'], source_revision=manifest['sourceRevision'], version=version, now_ms=int(time.time() * 1000))
+    assert db.publish_document_source('u', 'c', doc, job['id'], claim['claimToken'], source_revision=manifest['sourceRevision'], version=version, now_ms=int(time.time() * 1000)) is None
     assert db.get_document(doc).get('sourceVersions', {}) == {}
 
 
@@ -407,3 +408,70 @@ def test_guiding_checkpoint_requires_complete_preparation(library):
     doc, job, claim, manifest = prepare(library)
     with pytest.raises(ValueError):
         db.checkpoint_document_job('u', 'c', doc, job['id'], claim['claimToken'], changes={'stage': 'guiding', 'guideStatus': 'processing'}, now_ms=int(time.time() * 1000))
+
+
+def test_successful_publication_never_compensates_adopted_assets_when_later_reads_fail(library, monkeypatch):
+    db = library.database
+    doc, job, claim, manifest = prepare(library)
+    publish, owned_document = db.publish_document_source, db.get_owned_document
+    def unavailable_read(*args, **kwargs):
+        raise ConnectionError('Postcommit database read unavailable')
+    def commit_then_disable_reads(*args, **kwargs):
+        result = publish(*args, **kwargs)
+        monkeypatch.setattr(db, 'get_owned_document', unavailable_read)
+        return result
+    monkeypatch.setattr(db, 'publish_document_source', commit_then_disable_reads)
+    saved = None
+    try:
+        saved = library.save_manifest('u', 'c', doc, job['id'], claim['claimToken'], manifest)
+    except ConnectionError:
+        pass
+    monkeypatch.setattr(db, 'get_owned_document', owned_document)
+    assert library.load_manifest('u', 'c', doc)['sourceRevision'] == manifest['sourceRevision']
+    assert library.render_reference('u', 'c', {'documentId': doc, 'sourceRevision': manifest['sourceRevision'], 'unitId': 'p0001'})
+    assert saved == manifest
+
+
+def test_ambiguous_commit_response_preserves_exact_committed_source_assets(library, monkeypatch):
+    db = library.database
+    doc, job, claim, manifest = prepare(library)
+    publish = db.publish_document_source
+    def lose_commit_response(*args, **kwargs):
+        publish(*args, **kwargs)
+        raise ConnectionError('Commit succeeded but response was lost')
+    monkeypatch.setattr(db, 'publish_document_source', lose_commit_response)
+    with pytest.raises(ConnectionError):
+        library.save_manifest('u', 'c', doc, job['id'], claim['claimToken'], manifest)
+    assert library.load_manifest('u', 'c', doc)['sourceRevision'] == manifest['sourceRevision']
+    assert library.render_reference('u', 'c', {'documentId': doc, 'sourceRevision': manifest['sourceRevision'], 'unitId': 'p0001'})
+    assert db.get_document(doc)['pendingArtifactPaths'] == []
+
+
+def test_ambiguous_uncommitted_publication_retains_reservations_for_lifecycle_cleanup(library, monkeypatch):
+    db = library.database
+    doc, job, claim, manifest = prepare(library)
+    def unavailable_publish(*args, **kwargs):
+        raise ConnectionError('Cannot determine whether publication committed')
+    monkeypatch.setattr(db, 'publish_document_source', unavailable_publish)
+    with pytest.raises(ConnectionError):
+        library.save_manifest('u', 'c', doc, job['id'], claim['claimToken'], manifest)
+    row = db.get_document(doc)
+    assert row.get('sourceVersions', {}) == {}
+    assert len(row['pendingArtifactPaths']) == 2
+    for path in row['pendingArtifactPaths']:
+        assert db.download_file_from_storage(path, 'u').is_file()
+    assert db.delete_document_data('u', doc)['documents'] == 1
+    for path in row['pendingArtifactPaths']:
+        with pytest.raises(FileNotFoundError): db.download_file_from_storage(path, 'u')
+
+
+def test_repeated_revision_cleans_only_unadopted_attempt_using_atomic_retained_pointers(library):
+    db = library.database
+    doc, job, claim, manifest = prepare(library)
+    library.save_manifest('u', 'c', doc, job['id'], claim['claimToken'], manifest)
+    original_version = deepcopy(db.get_document(doc)['sourceVersions'][manifest['sourceRevision']])
+    assert library.save_manifest('u', 'c', doc, job['id'], claim['claimToken'], manifest) == manifest
+    assert db.get_document(doc)['sourceVersions'][manifest['sourceRevision']] == original_version
+    assert db.get_document(doc)['pendingArtifactPaths'] == []
+    directory = db.download_file_from_storage(original_version['manifestPath'], 'u').parent
+    assert len(list(directory.iterdir())) == 3  # Current original and two retained artifacts.

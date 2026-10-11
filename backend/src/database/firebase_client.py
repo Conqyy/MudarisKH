@@ -1163,7 +1163,13 @@ class FirebaseClient:
             return False
 
     def publish_document_source(self, user_id: str, course_id: str, doc_id: str, job_id: str,
-                                claim_token: str, *, source_revision: str, version: dict, now_ms: int) -> bool:
+                                claim_token: str, *, source_revision: str, version: dict, now_ms: int) -> dict | None:
+        """Return atomic retained pointers; None means definitely not adopted.
+
+        DataSizeConflict is a definite prewrite rejection with user guidance.
+        Other transaction/transport errors may have an unknown commit outcome;
+        callers must preserve attempt assets when such errors escape.
+        """
         self._job_clock(now_ms, 1)
         if not isinstance(source_revision, str) or not re.fullmatch(r'[0-9a-f]{64}', source_revision):
             raise ValueError('Invalid source revision')
@@ -1177,24 +1183,28 @@ class FirebaseClient:
         try:
             current = self.get_owned_document(user_id, course_id, doc_id)
         except DataConflict:
-            return False
+            return None
         if not self._live_document_claim(current, job_id, claim_token, now_ms):
-            return False
+            return None
         from src.utils.source_contracts import validate_manifest
-        body = self.download_file_from_storage(version['manifestPath'], user_id).read_bytes()
-        if hashlib.sha256(body).hexdigest() != version['manifestDigest']:
-            raise ValueError('Source manifest artifact digest mismatch')
-        manifest = validate_manifest(json.loads(body))
-        original = self.download_file_from_storage(version['originalPath'], user_id).read_bytes()
-        if (hashlib.sha256(original).hexdigest() != version['originalDigest']
-                or manifest['documentId'] != doc_id or manifest['sourceRevision'] != source_revision
-                or manifest['originalDigest'] != version['originalDigest'] or manifest['fileType'] != version['fileType']
-                or type(version['unitCount']) is not int or manifest['unitCount'] != version['unitCount']
-                or type(version['coverageComplete']) is not bool or manifest['coverage']['complete'] != version['coverageComplete']):
-            raise ValueError('Published version contradicts its immutable source artifacts')
+        try:
+            # This scope only reads/validates; no publication has been attempted.
+            body = self.download_file_from_storage(version['manifestPath'], user_id).read_bytes()
+            if hashlib.sha256(body).hexdigest() != version['manifestDigest']:
+                return None
+            manifest = validate_manifest(json.loads(body))
+            original = self.download_file_from_storage(version['originalPath'], user_id).read_bytes()
+            if (hashlib.sha256(original).hexdigest() != version['originalDigest']
+                    or manifest['documentId'] != doc_id or manifest['sourceRevision'] != source_revision
+                    or manifest['originalDigest'] != version['originalDigest'] or manifest['fileType'] != version['fileType']
+                    or type(version['unitCount']) is not int or manifest['unitCount'] != version['unitCount']
+                    or type(version['coverageComplete']) is not bool or manifest['coverage']['complete'] != version['coverageComplete']):
+                return None
+        except (ValueError, FileNotFoundError):
+            return None
         def publish(row):
             if not self._live_document_claim(row, job_id, claim_token, now_ms):
-                return None, False
+                return None, None
             if version['originalDigest'] != row['originalDigest'] or not set(paths).issubset(row.get('pendingArtifactPaths', [])):
                 raise DataConflict('Source artifact reservation changed')
             versions = row.setdefault('sourceVersions', {})
@@ -1206,11 +1216,12 @@ class FirebaseClient:
                         'sourceManifestDigest': versions[source_revision]['manifestDigest'],
                         'preparationStatus': 'completed' if version['coverageComplete'] else 'processing',
                         'pendingArtifactPaths': [p for p in row.get('pendingArtifactPaths', []) if p not in paths]})
-            return row, True
+            return row, deepcopy(versions[source_revision])
         try:
             return self._document_atomic(user_id, course_id, doc_id, publish, clear_confirmation=True)
         except DataConflict:
-            return False
+            # These application rejections are raised before transaction writes.
+            return None
 
     def release_document_artifacts(self, user_id: str, course_id: str, doc_id: str, *, paths: list[str]) -> bool:
         for path in paths:
