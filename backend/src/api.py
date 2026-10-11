@@ -1996,7 +1996,20 @@ async def upload_exam_solution(doc_id: str, file: UploadFile = File(...), uid: s
 def get_course_intelligence_endpoint(course_id: str, uid: str = Depends(require_uid)):
     _require_course(course_id, uid)
     intelligence = db_client.get_course_intelligence(course_id, user_id=uid)
-    return {"status": "success", **intelligence}
+    # The aggregation snapshot is private input to source readers. The metadata
+    # endpoint must not start returning complete manifests or original bodies.
+    fields = ('document_analyses', 'document_texts', 'audio_insights', 'historical_analyses',
+              'historical_texts', 'tutorial_analyses', 'tutorial_texts', 'source_ids', 'counts')
+    public = {key: intelligence[key] for key in fields if key in intelligence}
+    public['document_guides'] = []
+    scope = intelligence.get('source_scope')
+    if scope is not None:
+        public['document_texts'] = []
+        counts = {m['documentId']: m['unitCount'] for m in scope['manifests']}
+        public['document_guides'] = [{'documentId': d['id'], 'sourceRevision': d['sourceRevision'],
+                                      'guideRevision': d['guideRevision'], 'unitCount': counts[d['id']]}
+                                     for d in scope['documents']]
+    return {"status": "success", **public}
 
 
 # ──────────────────────────────────────────────────

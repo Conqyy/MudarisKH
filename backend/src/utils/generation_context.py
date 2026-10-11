@@ -1,6 +1,16 @@
 """Shared source-context formatting for independent study generators."""
 import re
+import json
 from src.utils.text_normalization import as_text, text_list, budget_sources, source_texts
+
+
+def source_bundle_text(bundle: dict) -> str:
+    """Canonical data-only evidence formatting used by planner budget accounting.
+
+    Callers place this in a user/data message and supply separate instructions.
+    Formatting does not convert planned coverage into successful processing.
+    """
+    return json.dumps(bundle, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
 def _as_text(item) -> str:
@@ -18,9 +28,7 @@ def _join_texts(items, sep: str = ", ", limit: int | None = None) -> str:
 
 
 def _course_topic_list(document_insights: list) -> list:
-    """The current course's topic whitelist (display only), from the lecture
-    documents. Used as context for generation — the in/out-of-scope DECISION for
-    past-exam topics is made by the Historical Exam Analyzer, not here."""
+    """Legacy navigation labels for display; never authoritative source scope."""
     seen, out = set(), []
     for doc in document_insights or []:
         title = re.sub(r"^\s*\d+\s*[-.)]\s*", "", as_text(doc.get("documentTitle"))).strip()

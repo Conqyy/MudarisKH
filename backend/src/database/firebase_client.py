@@ -752,17 +752,36 @@ class FirebaseClient:
             historical = [h for h in historical if h.get("userId") == user_id]
             tutorials = [t for t in tutorials if t.get("userId") == user_id]
 
-        completed_docs = [d for d in docs if d.get("status") == "completed" and d.get("analysis")]
-        completed_docs = self._select_sources(completed_docs, document_ids)
+        source_scope = None
+        if user_id is not None:
+            from src.services.document_library import DocumentLibrary
+            from src.utils.source_context import resolve_source_scope
+            source_scope = resolve_source_scope(self, DocumentLibrary(self), user_id, course_id, document_ids)
+            # Internal snapshot only: HTTP consumers must project safe metadata.
+            # Selection/readiness comes from validated original artifacts, never
+            # the legacy analysis compatibility field.
+            by_id = {row['id']: row for row in docs}
+            completed_docs = [{**source, 'analysis': by_id.get(source['id'], {}).get('analysis')}
+                              for source in source_scope['documents']]
+        else:
+            # Preserve old trusted internal callers without inferring an owner.
+            # This path intentionally cannot produce an authorized source scope.
+            completed_docs = [d for d in docs if d.get("status") == "completed" and d.get("analysis")]
+            completed_docs = self._select_sources(completed_docs, document_ids)
         # Merge the document's title into its analysis — the title is often the
         # clearest topic name (e.g. "13- NP-Completeness") and is used for course
         # scope matching alongside the extracted topics.
+        from src.utils.source_contracts import guide_to_legacy_analysis
         doc_analyses = []
         for d in completed_docs:
-            a = dict(d.get("analysis", {}) or {})
+            a = dict(d.get("analysis") or (guide_to_legacy_analysis(d['guide']) if source_scope is not None else {}))
             a.setdefault("documentTitle", d.get("title", ""))
             doc_analyses.append(a)
         doc_texts = [d.get("extractedText", "") for d in completed_docs if d.get("extractedText")]
+        if source_scope is not None:
+            doc_texts = ['\n\n'.join(unit.get(field, '') for unit in manifest['units']
+                                     for field in ('text', 'visualText') if unit.get(field, ''))
+                         for manifest in source_scope['manifests']]
 
         completed_audio = [a for a in audio if a.get("status") == "completed" and a.get("insights")]
         completed_audio = self._select_sources(completed_audio, audio_ids)
@@ -781,6 +800,11 @@ class FirebaseClient:
         tut_texts = [t.get("extractedText", "") for t in completed_tut if t.get("extractedText")]
 
         return {
+            "source_scope": source_scope,
+            "source_manifests": deepcopy(source_scope['manifests']) if source_scope is not None else [],
+            "document_guides": [{'documentId': d['id'], 'sourceRevision': d['sourceRevision'],
+                                 'guideRevision': d['guideRevision'], 'guide': deepcopy(d['guide'])}
+                                for d in source_scope['documents']] if source_scope is not None else [],
             "document_analyses": doc_analyses,
             "document_texts": doc_texts,
             "audio_insights": audio_insights,

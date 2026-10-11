@@ -260,10 +260,16 @@ def test_explicit_source_ids_preserve_requested_historical_reference_order(datab
     ('audio_recordings', 'audio_ids', 'audio_ids', 'audio_insights', 'insights'),
     ('tutorials', 'tutorial_ids', 'tutorial_ids', 'tutorial_analyses', 'analysis'),
 ])
-def test_source_order_applies_to_every_generator_source_type(database, collection, selection, provenance, result_key, stored_key):
+def test_source_order_applies_to_every_generator_source_type(database, monkeypatch, collection, selection, provenance, result_key, stored_key):
     records = database._read_local_db()
     records[collection] = {key: {'userId': 'u', 'courseId': 'c', 'status': 'completed', stored_key: {'sourceLabel': key}}
                            for key in ('a', 'b')}
+    if collection == 'documents':
+        from tests.foundation_fixtures import lecture_document
+        rows = [lecture_document(key, userId='u', courseId='c', analysis={'sourceLabel': key}) for key in ('a', 'b')]
+        artifacts = {path: file for row in rows for path, file in row['_artifactFiles'].items()}
+        records[collection] = {row['id']: {key: value for key, value in row.items() if not key.startswith('_')} for row in rows}
+        monkeypatch.setattr(database, 'download_file_from_storage', lambda path, uid: artifacts[path])
     database._write_local_db(records)
     result = database.get_course_intelligence('c', **{selection: ['b', 'a']}, user_id='u')
     assert [item['sourceLabel'] for item in result[result_key]] == ['b', 'a']

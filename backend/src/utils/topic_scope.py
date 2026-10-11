@@ -1,9 +1,7 @@
-"""Course-scope topic matching.
+"""Source-aware topic retagging and legacy lexical navigation helpers.
 
-Decides whether a past-exam topic is still covered by the course's CURRENT
-lecture documents. Used by the Historical Exam Analyzer to tag each past-exam
-topic as in/out of the current course (so removed topics don't drive exam
-generation). Pure string heuristics — no LLM call.
+Only the source-scope path delegates semantic support to verified readings.
+Legacy metadata heuristics remain for unmigrated callers, never as source proof.
 """
 import re
 import unicodedata
@@ -55,7 +53,7 @@ def scope_words(text: str) -> set:
 
 def course_scope_from_docs(document_insights: list) -> tuple:
     """Build (display_topics, scope_word_set) from the current lecture documents.
-    These define the course as taught NOW — the authoritative topic whitelist."""
+    Legacy metadata vocabulary supports navigation, not authoritative scope."""
     display, words = [], set()
     for doc in document_insights or []:
         # The document title is often the clearest topic name (e.g. a chapter
@@ -93,8 +91,13 @@ def course_scope_from_docs(document_insights: list) -> tuple:
     return uniq, words
 
 
-def retag_topic_weights(historical_analyses: list, document_insights: list) -> list:
-    """Re-decide each past-exam topic's ``inScope`` flag against the documents
+def retag_topic_weights(historical_analyses: list, document_insights: list, *,
+                        source_scope: dict | None = None, read_evidence=None) -> list:
+    """With source_scope, apply evidence matching recursively without changing
+    structural paper observations. read_evidence follows source_context's
+    trusted synchronous callback contract; missing proof stays unverified.
+
+    Legacy path: re-decide each past-exam topic's ``inScope`` flag against the documents
     the student SELECTED for this generation (not the whole course).
 
     The Historical Exam Analyzer tags ``inScope`` once at upload time, against
@@ -107,6 +110,24 @@ def retag_topic_weights(historical_analyses: list, document_insights: list) -> l
     Returns shallow copies (the stored analyses are never mutated). When no
     documents were selected there is nothing to scope against, so the analyses
     scope flags are cleared so historical-only generation remains usable."""
+    if source_scope is not None:
+        from copy import deepcopy
+        from src.utils.source_context import match_supporting_topics
+        out = []
+        for analysis in historical_analyses or []:
+            row = deepcopy(analysis or {})
+            row['topicWeights'] = match_supporting_topics(row.get('topicWeights') or [], source_scope, read_evidence)
+            row['scopeChecked'] = True
+            row['scopeStatus'] = 'source_evidence'
+            row['outOfCourseTopics'] = [as_text(w.get('topic')) for w in row['topicWeights']
+                                        if w['scopeStatus'] == 'outside_selected_scope']
+            if isinstance(row.get('papers'), list):
+                row['papers'] = retag_topic_weights(row['papers'], document_insights,
+                                                   source_scope=source_scope, read_evidence=read_evidence)
+            out.append(row)
+        return out
+    # Compatibility path for legacy upload-time metadata tagging. New source
+    # consumers must pass source_scope and never treat this heuristic as proof.
     _, words = course_scope_from_docs(document_insights)
     out = []
     for h in historical_analyses or []:

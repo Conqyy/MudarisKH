@@ -71,11 +71,15 @@ class DataStorageTests(unittest.TestCase):
         self.assertEqual(result['counts']['documents'], 0)
 
     def test_source_provenance_matches_only_owned_completed_sources(self):
-        self.seed({'documents': {
-            'a': {'courseId': 'c', 'userId': 'u', 'status': 'completed', 'analysis': {'topics': ['one']}},
-            'b': {'courseId': 'c', 'userId': 'other', 'status': 'completed', 'analysis': {'topics': ['two']}},
-        }})
-        result = self.client.get_course_intelligence('c', user_id='u')
+        from tests.foundation_fixtures import lecture_document
+        owned = lecture_document('a', userId='u', courseId='c', analysis=None)
+        foreign = lecture_document('b', userId='other', courseId='c')
+        self.seed({'courses': {'c': {'userId': 'u'}}, 'documents': {
+            row['id']: {key: value for key, value in row.items() if not key.startswith('_')}
+            for row in (owned, foreign)}})
+        with patch.object(self.client, 'download_file_from_storage',
+                          side_effect=lambda path, uid: owned['_artifactFiles'][path]):
+            result = self.client.get_course_intelligence('c', user_id='u')
         self.assertEqual(result.get('source_ids'), {'document_ids': ['a'], 'audio_ids': [], 'historical_exam_ids': [], 'tutorial_ids': []})
 
     def test_simultaneous_saves_keep_all_rows_and_unique_ids(self):

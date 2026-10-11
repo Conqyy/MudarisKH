@@ -95,7 +95,8 @@ def _topic_key(value):
 
 def _topic_rows(paper):
     return [row for row in paper.get("topicWeights", [])
-            if isinstance(row, dict) and row.get("inScope") is not False]
+            if isinstance(row, dict) and row.get("inScope") is not False
+            and ('scopeStatus' not in row or (row.get('scopeStatus') == 'matched' and row.get('sourceRefs')))]
 
 
 def _topic_display_labels(papers):

@@ -9,6 +9,10 @@ GUIDE_VERSION = 1
 PREPARATION_VERSION = 1
 MAX_SOURCE_UNITS = 160
 MAX_SOURCE_CHARACTERS = 600_000
+# Planning safety budgets, independent of per-file extraction limits.
+MAX_SOURCE_PLAN_BATCHES = 128
+MAX_SOURCE_PLAN_UNITS = 3200
+SOURCE_SCOPE_STATUSES = frozenset({'matched', 'unverified', 'outside_selected_scope'})
 FILE_TYPES = {'pdf': ('p', 'page'), 'pptx': ('s', 'slide'), 'docx': ('b', 'block')}
 VISUAL_READ_STATUSES = frozenset({'not_required', 'pending', 'readable', 'blank', 'uncertain', 'unsupported'})
 

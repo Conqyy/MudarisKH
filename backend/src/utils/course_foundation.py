@@ -49,7 +49,7 @@ def _usable_analysis(value):
     return analysis
 
 
-def hydrate_document_source(database, document: dict) -> dict:
+def hydrate_document_source(database, document: dict, *, library=None) -> dict:
     """Validate owned artifacts before giving the pure status builder evidence."""
     from src.services.document_library import DocumentLibrary
     result = {**document, '_sourceArtifactsValid': False}
@@ -58,7 +58,7 @@ def hydrate_document_source(database, document: dict) -> dict:
         return result
     try:
         uid, course_id, doc_id = document['userId'], document['courseId'], document['id']
-        library = DocumentLibrary(database)
+        library = library if library is not None else DocumentLibrary(database)
         manifest = library.load_manifest(uid, course_id, doc_id)
         row = database.get_owned_document(uid, course_id, doc_id)
         if any(row.get(key) != document.get(key) for key in _REVISION_FIELDS):
