@@ -112,6 +112,29 @@ def validate_analysis(kind: str, data: dict) -> dict:
             _number(item, 'percentage', upper=100)
         _text(data, 'gradingBlueprint')
         _strings(data, 'patterns')
+        if data.get('examType') not in (None, 'quiz', 'midterm', 'final'):
+            raise ValueError('Invalid historical exam type')
+        if data.get('totalMarks') is not None:
+            _number(data, 'totalMarks', lower=0.000001)
+        if data.get('analysisVersion') == 2:
+            papers = _objects(data, 'papers', ('paperId',), True)
+            if _number(data, 'paperCount', lower=1, integer=True) != len(papers):
+                raise ValueError('Historical paper count disagrees with detected papers')
+            ids, previous_end = set(), 0
+            for paper in papers:
+                if paper['paperId'] in ids or 'papers' in paper:
+                    raise ValueError('Historical paper IDs are duplicated or nested')
+                ids.add(paper['paperId'])
+                start = _number(paper, 'startPage', lower=1, integer=True)
+                end = _number(paper, 'endPage', lower=start, integer=True)
+                if start <= previous_end:
+                    raise ValueError('Historical paper page ranges overlap')
+                previous_end = end
+                if paper.get('totalMarks') is not None:
+                    _number(paper, 'totalMarks', lower=0.000001)
+                validate_analysis('historical', paper)
+            if _number(data, 'collectionQuestionCount', lower=1, integer=True) != sum(p['totalQuestions'] for p in papers):
+                raise ValueError('Historical collection question count disagrees with papers')
     else:
         raise ValueError('Unknown analysis contract')
     return data
@@ -181,7 +204,7 @@ def validate_rubrics(rubrics: dict) -> dict:
     return rubrics
 
 
-def validate_exam_contract(tex: str, rubrics: dict, historical: list = None, total_marks=None) -> dict:
+def validate_exam_contract(tex: str, rubrics: dict, historical: list = None, total_marks=None, *, blueprint=None) -> dict:
     if not isinstance(tex, str) or '\\begin{document}' not in tex or '\\end{document}' not in tex:
         raise ValueError('Exam LaTeX is incomplete')
     validate_rubrics(rubrics)
@@ -189,13 +212,16 @@ def validate_exam_contract(tex: str, rubrics: dict, historical: list = None, tot
     printed = exam_question_numbers(tex)
     if printed != list(range(1, len(questions) + 1)):
         raise ValueError('Printed exam questions do not match rubric question IDs')
-    if historical:
-        reference = historical[0]
+    if blueprint is None and historical:
+        from src.utils.exam_blueprint import build_exam_blueprint
+        blueprint = build_exam_blueprint(historical, total_marks)
+    if blueprint:
+        reference = blueprint
         expected = Counter({item['type']: item['count'] for item in reference.get('questionTypes', [])})
         actual = Counter(row['question_type'] for row in questions.values())
-        if expected and actual != expected: raise ValueError('Exam question mix differs from the selected reference exam')
+        if expected and actual != expected: raise ValueError('Exam question mix differs from the predicted blueprint')
         if reference.get('totalQuestions') and len(questions) != reference['totalQuestions']:
-            raise ValueError('Exam question count differs from the selected reference exam')
+            raise ValueError('Exam question count differs from the predicted blueprint')
     if total_marks is not None:
         if abs(sum(row['max_score'] for row in questions.values()) - total_marks) > 0.001:
             raise ValueError('Exam rubric marks differ from requested total')

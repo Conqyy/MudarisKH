@@ -10,7 +10,12 @@ import ReorderableList from "../../src/components/ReorderableList";
 import CoursePage from "../../src/app/course/[id]/page";
 
 const mocks = vi.hoisted(() => ({ api: vi.fn(), file: vi.fn(), object: vi.fn(), recent: vi.fn(), updateCourse: vi.fn(), user: { uid: "u1" }, course: { id: "c1", userId: "u1", code: "CS", name: "Course", color: "sage" } }));
-vi.mock("@/lib/api", () => ({ apiFetch: mocks.api, apiJson: async (url: string, init?: RequestInit) => { const res = await mocks.api(url, init); const data = await res.json(); if (!res.ok) throw new Error(data?.detail || `Request failed (${res.status})`); return data; }, fetchFileObjectUrl: mocks.file, fetchObjectUrl: mocks.object }));
+vi.mock("@/lib/api", () => ({ apiFetch: mocks.api, apiJson: async (url: string, init?: RequestInit) => {
+  // These regressions exercise saved content and asynchronous work in a course
+  // whose document prerequisite has already been satisfied.
+  if (url.endsWith("/foundation") && (!init?.method || init.method === "GET")) return { ready: true, state: "ready", revision: "confirmed-documents", documentCount: 1, completedCount: 1, pendingCount: 0, failedCount: 0, message: "Confirmed" };
+  const res = await mocks.api(url, init); const data = await res.json(); if (!res.ok) throw new Error(data?.detail || `Request failed (${res.status})`); return data;
+}, fetchFileObjectUrl: mocks.file, fetchObjectUrl: mocks.object }));
 vi.mock("@/lib/auth-context", () => ({ useAuth: () => ({ user: mocks.user, loading: false }) }));
 vi.mock("@/lib/firestore-helpers", () => ({ getCourse: async () => mocks.course, getUserCourses: async () => [mocks.course], updateCourse: mocks.updateCourse }));
 vi.mock("@/lib/activity", () => ({ useTrackRecent: mocks.recent }));

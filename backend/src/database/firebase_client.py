@@ -569,7 +569,8 @@ class FirebaseClient:
 
     @local_locked
     def append_tutor_messages(self, user_id: str, course_id: str, chat_id: str,
-                              expected_messages: list, new_messages: list, updated_at: int) -> dict:
+                              expected_messages: list, new_messages: list, updated_at: int,
+                              *, foundation_revision: str = None) -> dict:
         """Atomically append one turn only to the exact authorized prior history."""
         validate_component(user_id, 'user ID')
         validate_component(course_id, 'course ID')
@@ -589,7 +590,10 @@ class FirebaseClient:
             messages = list(expected_messages) + [dict(message) for message in new_messages]
             if len(json.dumps(messages, ensure_ascii=False).encode('utf-8')) > 750000:
                 raise ValueError('This conversation is too large; start a new chat')
-            return {'messages': messages, 'updatedAt': updated_at}
+            data = {'messages': messages, 'updatedAt': updated_at}
+            if foundation_revision is not None:
+                data['foundationRevision'] = foundation_revision
+            return data
 
         if self.use_local:
             self._assert_write_allowed(user_id, course_id)
@@ -747,7 +751,7 @@ class FirebaseClient:
 
         completed_hist = [h for h in historical if h.get("status") == "completed" and h.get("analysis")]
         completed_hist = self._select_sources(completed_hist, historical_exam_ids)
-        hist_analyses = [h.get("analysis", {}) for h in completed_hist]
+        hist_analyses = [{**h.get("analysis", {}), 'sourceId': h['id'], 'sourceTitle': h.get('title', '')} for h in completed_hist]
         hist_texts = [h.get("extractedText", "") for h in completed_hist if h.get("extractedText")]
 
         # Tutorials: ideas/content only — fed to the generator WITHOUT grading
@@ -850,7 +854,8 @@ class FirebaseClient:
     # --- Ownership, restart recovery, and application-data lifecycle ---
     OWNED_COLLECTIONS = ("documents", "audio_recordings", "historical_exams",
                          "tutorials", "exams", "flashcard_sets", "summaries",
-                         "tutor_chats", "schedule_entries", "lectures", "_schedule_versions")
+                         "tutor_chats", "schedule_entries", "lectures", "_schedule_versions",
+                         "document_foundations")
 
     def get_owned_course(self, user_id: str, course_id: str) -> dict:
         validate_component(user_id, "user ID")
@@ -859,6 +864,54 @@ class FirebaseClient:
             return {}
         course = self._flat_get("courses", course_id)
         return course if course.get("userId") == user_id else {}
+
+    @local_locked
+    def get_document_foundation(self, user_id: str, course_id: str) -> dict:
+        """Read private confirmation metadata for an available owned course."""
+        validate_component(user_id, 'user ID')
+        validate_component(course_id, 'course ID')
+        if not self.get_owned_course(user_id, course_id) or self.is_course_deleting(course_id):
+            return {}
+        row = self._flat_get('document_foundations', course_id)
+        if row.get('userId') != user_id or row.get('courseId') != course_id:
+            return {}
+        revision = row.get('revision')
+        if not isinstance(revision, str) or not revision.strip() or len(revision) > 128:
+            return {}
+        return row
+
+    @local_locked
+    def confirm_document_foundation(self, user_id: str, course_id: str, revision: str) -> bool:
+        """Atomically save backend-only confirmation without changing course data."""
+        validate_component(user_id, 'user ID')
+        validate_component(course_id, 'course ID')
+        if not isinstance(revision, str) or not revision.strip() or len(revision) > 128:
+            raise ValueError('A nonempty foundation revision of at most 128 characters is required')
+        data = {'userId': user_id, 'courseId': course_id, 'revision': revision}
+
+        def authorize(current):
+            if current and (current.get('userId') != user_id or current.get('courseId') != course_id):
+                raise DataConflict('Foundation ownership or course association changed')
+
+        if self.use_local:
+            self._assert_write_allowed(user_id, course_id)
+            local = self._read_local_db()
+            authorize(local.get('document_foundations', {}).get(course_id, {}))
+            local.setdefault('document_foundations', {})[course_id] = data
+            self._write_local_db(local)
+            return True
+        from google.cloud import firestore
+        reference = self.db.collection('document_foundations').document(course_id)
+
+        @firestore.transactional
+        def confirm(transaction):
+            self._assert_write_allowed(user_id, course_id, transaction)
+            snapshot = reference.get(transaction=transaction)
+            authorize(snapshot.to_dict() or {} if snapshot.exists else {})
+            transaction.set(reference, data)
+            return True
+
+        return confirm(self.db.transaction())
 
     def _flat_query_by_user(self, collection: str, user_id: str) -> list:
         if self.use_local:

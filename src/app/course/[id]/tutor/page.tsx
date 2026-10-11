@@ -7,7 +7,10 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import Navbar from "@/components/Navbar";
 import Sidebar from "@/components/Sidebar";
+import { CourseFoundationGate } from "@/components/CourseFoundationGate";
+import { useCourseFoundation } from "@/hooks/useCourseFoundation";
 import { useAuth } from "@/lib/auth-context";
+import { useLang } from "@/lib/i18n";
 import { getCourse, getUserCourses, Course } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 
@@ -74,6 +77,13 @@ export default function TutorPage() {
   const router = useRouter();
   const params = useParams();
   const courseId = params.id as string;
+  const { t } = useLang();
+  const { foundation, loading: foundationLoading, error: foundationError, refresh: refreshFoundation } = useCourseFoundation(courseId);
+  const foundationReady = !foundationLoading && !foundationError && foundation?.ready === true;
+  const foundationReadyRef = useRef(foundationReady);
+  foundationReadyRef.current = foundationReady;
+  const foundationUnknownRef = useRef(foundationLoading || !!foundationError);
+  foundationUnknownRef.current = foundationLoading || !!foundationError;
 
   const [course, setCourse] = useState<Course | null>(null);
   const [allCourses, setAllCourses] = useState<Course[]>([]);
@@ -126,6 +136,12 @@ export default function TutorPage() {
 
   // Fullscreen / focus mode for the chat
   const [fullscreen, setFullscreen] = useState(false);
+
+  useEffect(() => {
+    if (foundationLoading || foundationError || foundationReady) return;
+    if (pendingTurn.current) invalidateConversation(true);
+    setFullscreen(false);
+  }, [foundationReady, foundationLoading, foundationError]);
 
   // Press Esc to leave fullscreen
   useEffect(() => {
@@ -305,7 +321,7 @@ export default function TutorPage() {
 
   const send = async (text: string) => {
     const content = text.trim();
-    if (!content || thinking || openingChat || conversationRequest.current || !user) return;
+    if (!content || thinking || openingChat || conversationRequest.current || !user || !foundationReadyRef.current) return;
     const version = conversationVersion.current;
     const controller = new AbortController();
     conversationRequest.current = controller;
@@ -333,10 +349,20 @@ export default function TutorPage() {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => null);
-        throw new Error(res.status === 409 ? "This conversation changed. Reopen it from History, then send your draft again." : err?.detail || `Tutor error (${res.status})`);
+        if (res.status === 409) {
+          if (controller.signal.aborted || version !== conversationVersion.current) return;
+          const currentFoundation = await refreshFoundation();
+          if (currentFoundation?.ready) {
+            setMessages(messages);
+            setInput(content);
+            setSendError("This conversation changed. Reopen it from History, then send your draft again.");
+          }
+          return;
+        }
+        throw new Error(err?.detail || `Tutor error (${res.status})`);
       }
       const data = await res.json();
-      if (version !== conversationVersion.current) return;
+      if (version !== conversationVersion.current || controller.signal.aborted || (!foundationReadyRef.current && !foundationUnknownRef.current)) return;
       setMessages((prev) => [...prev, { role: "assistant", content: data.reply || "" }]);
       if (data.chat_id) { activeChatId.current = data.chat_id; setChatId(data.chat_id); }
       loadChats();
@@ -374,6 +400,23 @@ export default function TutorPage() {
               Back to Dashboard
             </Link>
           </div>
+        </div>
+      </>
+    );
+  }
+
+  if (!foundationReady) {
+    return (
+      <>
+        <Navbar />
+        <div className="pt-20 flex">
+          <Sidebar courses={allCourses} />
+          <main className="flex-1 px-6 md:px-10 py-8 max-w-4xl mx-auto w-full">
+            <Link href={`/course/${courseId}`} className="inline-block mb-6 text-sm text-ink-soft hover:text-accent transition">
+              ← {t("Back to course")}
+            </Link>
+            <CourseFoundationGate courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} onRetry={refreshFoundation} />
+          </main>
         </div>
       </>
     );
@@ -784,7 +827,7 @@ export default function TutorPage() {
                   />
                   <button
                     type="submit"
-                    disabled={!input.trim() || thinking || openingChat}
+                    disabled={!input.trim() || thinking || openingChat || !foundationReady}
                     className="bg-ink text-paper px-5 py-2.5 rounded-2xl text-sm font-medium hover:bg-accent transition disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
                   >
                     Send

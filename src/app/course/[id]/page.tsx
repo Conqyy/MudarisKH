@@ -36,6 +36,17 @@ import { ordered } from "@/lib/ordering";
 import { useLang } from "@/lib/i18n";
 
 import { apiFetch, apiJson } from "@/lib/api";
+import { useCourseFoundation } from "@/hooks/useCourseFoundation";
+import { CourseFoundationGate } from "@/components/CourseFoundationGate";
+
+function StudyAction({ ready, href, label, className, reason }: { ready: boolean; href: string; label: string; className: string; reason: string }) {
+  return ready ? <Link href={href} className={className}>{label} →</Link> : (
+    <div>
+      <p className="mb-3 text-xs text-ink-soft">{reason}</p>
+      <button disabled aria-describedby="foundation-lock-reason" className={`${className} w-full opacity-50 cursor-not-allowed`}><span aria-hidden="true">🔒</span> {label}</button>
+    </div>
+  );
+}
 // Reorder an array of items to match a list of ids.
 function applyOrder<T extends { id: string }>(
   items: T[],
@@ -52,6 +63,7 @@ export default function CoursePage() {
   const searchParams = useSearchParams();
   const courseId = params.id as string;
   const { t } = useLang();
+  const { foundation, loading: foundationLoading, error: foundationError, refresh: refreshFoundation, confirm: confirmFoundation } = useCourseFoundation(courseId);
 
   const [course, setCourse] = useState<Course | null>(null);
   const [allCourses, setAllCourses] = useState<Course[]>([]);
@@ -72,6 +84,10 @@ export default function CoursePage() {
   const [showTutorialUpload, setShowTutorialUpload] = useState(false);
   const [viewingDoc, setViewingDoc] = useState<CourseDocument | null>(null);
   const [viewingAudio, setViewingAudio] = useState<AudioRecording | null>(null);
+  const [documentChanging, setDocumentChanging] = useState(false);
+  const documentPolls = useRef(0);
+  const foundationReady = foundation?.ready === true && !foundationLoading && !foundationError && !showDocUpload && !documentChanging;
+  const lockReason = t("Complete and confirm all lecture documents to unlock.");
 
   useEffect(() => {
     if (!loading && !user) router.push("/signin");
@@ -80,6 +96,35 @@ export default function CoursePage() {
   useEffect(() => {
     if (user && courseId) loadDataRef.current?.();
   }, [user, courseId]);
+
+  useEffect(() => {
+    if (!pageLoading && searchParams?.get("section") === "documents") {
+      document.getElementById("documents")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    }
+  }, [pageLoading, searchParams]);
+
+  // A document upload may be processing when this page is opened elsewhere.
+  // Stop after ten minutes; the foundation panel retains an explicit retry.
+  useEffect(() => {
+    if (!user?.uid || !documents.some(d => d.status === "pending" || d.status === "processing")) { documentPolls.current = 0; return; }
+    if (documentPolls.current >= 120) return;
+    const controller = new AbortController();
+    let inFlight = false;
+    const timer = setInterval(async () => {
+      if (documentPolls.current >= 120) { clearInterval(timer); return; }
+      if (inFlight) return;
+      inFlight = true;
+      documentPolls.current += 1;
+      try {
+        const data = await apiJson(`${API_URL}/api/documents/${courseId}`, { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        setDocuments(ordered(data.documents || [], course?.documentOrder, course?.titleOverrides));
+        void refreshFoundation();
+      } catch { /* Keep retrying within the polling limit. */ }
+      finally { inFlight = false; }
+    }, 5000);
+    return () => { clearInterval(timer); controller.abort(); };
+  }, [courseId, course?.documentOrder, course?.titleOverrides, documents, refreshFoundation, user?.uid]);
 
   // Poll while any audio recording is still being processed (download →
   // transcribe → analyze can take a while for long videos), so the status
@@ -157,6 +202,7 @@ export default function CoursePage() {
       if (controller.signal.aborted) return;
       setCourse(courseData);
       setAllCourses(allCoursesData);
+      void refreshFoundation();
 
       // Fetch from backend API (bypasses Firestore security rules)
       await Promise.all([
@@ -216,9 +262,10 @@ export default function CoursePage() {
         method: "DELETE",
       });
       if (!res.ok) throw new Error(`Delete failed (${res.status})`);
-      if (kind === "documents")
+      if (kind === "documents") {
         setDocuments((prev) => prev.filter((d) => d.id !== id));
-      else if (kind === "audio")
+        await refreshFoundation();
+      } else if (kind === "audio")
         setAudioRecordings((prev) => prev.filter((a) => a.id !== id));
       else if (kind === "tutorials")
         setTutorials((prev) => prev.filter((t) => t.id !== id));
@@ -325,6 +372,8 @@ export default function CoursePage() {
       return;
 
     // Optimistic: mark as processing
+    setDocumentChanging(true);
+    void refreshFoundation();
     setDocuments((prev) =>
       prev.map((d) =>
         d.id === doc.id ? { ...d, status: "processing", errorMessage: "" } : d
@@ -358,11 +407,15 @@ export default function CoursePage() {
         )
       );
       alert(e.message || "Re-analysis failed. Try again in a moment.");
+    } finally {
+      await refreshFoundation();
+      setDocumentChanging(false);
     }
   };
 
   // ---- Re-analyze a recording / typed note (retry after a failed AI call) ----
   const handleReanalyzeRecording = async (rec: AudioRecording) => {
+    if (!foundationReady) return;
     if (
       !confirm(
         `Re-analyze "${rec.title}"? This runs the AI again on the saved text.`
@@ -405,7 +458,8 @@ export default function CoursePage() {
 
   // True if a completed document has an essentially empty analysis.
   const isEmptyAnalysis = (doc: CourseDocument) => {
-    if (doc.status !== "completed" || !doc.analysis) return false;
+    if (doc.status !== "completed") return false;
+    if (!doc.analysis) return true;
     const a = doc.analysis;
     return (
       (a.topics?.length || 0) === 0 &&
@@ -457,7 +511,7 @@ export default function CoursePage() {
 
   const completedDocs = documents.filter((d) => d.status === "completed").length;
   const completedHist = historicalExams.filter((h) => h.status === "completed").length;
-  const examReady = completedDocs > 0 && completedHist > 0;
+  const examReady = foundationReady && completedDocs > 0 && completedHist > 0;
 
   return (
     <>
@@ -523,8 +577,17 @@ export default function CoursePage() {
           </div>
 
 
+          <CourseFoundationGate courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} onRetry={refreshFoundation} />
+          {!foundationReady && <p id="foundation-lock-reason" className="mb-6 text-sm text-ink-soft">{lockReason}</p>}
+          {foundation?.state === "confirmation_required" && !foundationLoading && !documentChanging && !showDocUpload && (
+            <div className="mb-8 bg-paper border border-sage/30 rounded-2xl p-6">
+              <p className="text-sm text-ink-soft mb-4">{t("Upload every lecture document you intend to study before confirming. Adding, deleting, or reanalyzing a document will require confirmation again.")}</p>
+              <button onClick={() => void confirmFoundation()} className="bg-sage text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition">{t("I've uploaded all lecture documents")}</button>
+            </div>
+          )}
+
           {/* Exam readiness bar */}
-          <div className="mb-12 bg-paper border border-line rounded-2xl px-6 py-4 flex items-center justify-between gap-4">
+          {foundationReady && <div className="mb-12 bg-paper border border-line rounded-2xl px-6 py-4 flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <span
                 className={`w-2.5 h-2.5 rounded-full ${
@@ -543,7 +606,7 @@ export default function CoursePage() {
                 )}
               </span>
             </div>
-          </div>
+          </div>}
 
           {/* Reminders */}
           <CourseReminders
@@ -670,12 +733,10 @@ export default function CoursePage() {
                   {t("Chat with a coach grounded in your documents, recordings, and past exams.")}
                 </p>
               </div>
-              <Link
+              <StudyAction ready={foundationReady} reason={lockReason} label={t("Ask the Coach")}
                 href={`/course/${courseId}/tutor`}
                 className="bg-accent text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2"
-              >
-                {t("Ask the Coach")} →
-              </Link>
+              />
             </div>
 
             <div className="bg-paper border border-line rounded-3xl p-7 flex flex-col justify-between gap-5">
@@ -688,12 +749,10 @@ export default function CoursePage() {
                   {t("An AI exam from your documents, matched to your past exams.")}
                 </p>
               </div>
-              <Link
+              <StudyAction ready={foundationReady} reason={lockReason} label={t("Generate Exam")}
                 href={`/course/${courseId}/exam`}
                 className="bg-[#3f6f7d] text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2"
-              >
-                {t("Generate Exam")} →
-              </Link>
+              />
             </div>
 
             <div className="bg-paper border border-line rounded-3xl p-7 flex flex-col justify-between gap-5">
@@ -706,12 +765,10 @@ export default function CoursePage() {
                   {t("Study cards weighted by past exams and lecture emphasis.")}
                 </p>
               </div>
-              <Link
+              <StudyAction ready={foundationReady} reason={lockReason} label={t("Make Flashcards")}
                 href={`/course/${courseId}/flashcards`}
                 className="bg-sage text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2"
-              >
-                {t("Make Flashcards")} →
-              </Link>
+              />
             </div>
 
             <div className="bg-paper border border-line rounded-3xl p-7 flex flex-col justify-between gap-5">
@@ -724,17 +781,15 @@ export default function CoursePage() {
                   {t("A structured study summary, focused on what your exams test.")}
                 </p>
               </div>
-              <Link
+              <StudyAction ready={foundationReady} reason={lockReason} label={t("Make Summary")}
                 href={`/course/${courseId}/summary`}
                 className="bg-gold text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2"
-              >
-                {t("Make Summary")} →
-              </Link>
+              />
             </div>
           </section>
 
           {/* Documents Section */}
-          <section className="mb-12">
+          <section id="documents" className="mb-12 scroll-mt-24" aria-label={t("Documents")}>
             <div className="flex items-center justify-between mb-6">
               <h2 className="font-serif text-2xl font-medium tracking-tight">
                 {t("Documents")}
@@ -789,19 +844,20 @@ export default function CoursePage() {
                 )}
                 renderStatus={(doc) => {
                   const empty = isEmptyAnalysis(doc);
+                  const rejected = foundation?.failedDocumentIds?.includes(doc.id) === true;
                   const needsRetry =
-                    doc.status === "failed" || empty;
+                    doc.status === "failed" || empty || rejected;
                   return (
                     <span className="inline-flex items-center gap-2">
-                      {doc.status === "completed" && !empty && (
+                      {doc.status === "completed" && !empty && !rejected && (
                         <span className="text-sage">● {t("Analyzed")}</span>
                       )}
-                      {doc.status === "completed" && empty && (
+                      {doc.status === "completed" && (empty || rejected) && (
                         <span
                           className="text-gold"
-                          title="Analysis came back empty"
+                          title={t(rejected ? "Analysis needs attention" : "Analysis came back empty")}
                         >
-                          ● {t("Empty")}
+                          ● {t(rejected ? "Failed" : "Empty")}
                         </span>
                       )}
                       {doc.status === "processing" && (
@@ -845,11 +901,14 @@ export default function CoursePage() {
               </h2>
               <button
                 onClick={() => setShowHistExamUpload(true)}
-                className="bg-accent text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2"
+                disabled={!foundationReady} aria-describedby="foundation-lock-reason"
+                className="bg-accent text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <span>+</span> {t("Upload")}
+                <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload")}
               </button>
             </div>
+
+            {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
 
             {historicalExams.length === 0 ? (
               <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
@@ -862,9 +921,10 @@ export default function CoursePage() {
                 </p>
                 <button
                   onClick={() => setShowHistExamUpload(true)}
-                  className="bg-accent text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition"
+                  disabled={!foundationReady} aria-describedby="foundation-lock-reason"
+                  className="bg-accent text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  + {t("Upload your first past exam")}
+                  <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload your first past exam")}
                 </button>
               </div>
             ) : (
@@ -883,8 +943,9 @@ export default function CoursePage() {
                 renderMeta={(exam) => (
                   <>
                     {new Date(exam.uploadedAt).toLocaleDateString()}
-                    {exam.analysis &&
-                      ` · ${exam.analysis.totalQuestions} ${t("questions")}`}
+                    {exam.analysis && (exam.analysis.paperCount
+                      ? ` · ${exam.analysis.paperCount} ${t("papers")} · ~${exam.analysis.totalQuestions} ${t("questions per paper")}`
+                      : ` · ${exam.analysis.totalQuestions} ${t("questions")}`)}
                   </>
                 )}
                 renderStatus={(exam) => (
@@ -920,11 +981,14 @@ export default function CoursePage() {
               </div>
               <button
                 onClick={() => setShowTutorialUpload(true)}
-                className="bg-[#3f6f7d] text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2 flex-shrink-0"
+                disabled={!foundationReady} aria-describedby="foundation-lock-reason"
+                className="bg-[#3f6f7d] text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2 flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <span>+</span> {t("Upload")}
+                <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload")}
               </button>
             </div>
+
+            {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
 
             {tutorials.length === 0 ? (
               <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
@@ -937,9 +1001,10 @@ export default function CoursePage() {
                 </p>
                 <button
                   onClick={() => setShowTutorialUpload(true)}
-                  className="bg-[#3f6f7d] text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition"
+                  disabled={!foundationReady} aria-describedby="foundation-lock-reason"
+                  className="bg-[#3f6f7d] text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  + {t("Upload your first tutorial")}
+                  <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload your first tutorial")}
                 </button>
               </div>
             ) : (
@@ -991,11 +1056,14 @@ export default function CoursePage() {
               </h2>
               <button
                 onClick={() => setShowAudioUpload(true)}
-                className="bg-gold text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2"
+                disabled={!foundationReady} aria-describedby="foundation-lock-reason"
+                className="bg-gold text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <span>+</span> {t("Upload")}
+                <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload")}
               </button>
             </div>
+
+            {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
 
             {audioRecordings.length === 0 ? (
               <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
@@ -1008,9 +1076,10 @@ export default function CoursePage() {
                 </p>
                 <button
                   onClick={() => setShowAudioUpload(true)}
-                  className="bg-gold text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition"
+                  disabled={!foundationReady} aria-describedby="foundation-lock-reason"
+                  className="bg-gold text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  + {t("Upload your first recording")}
+                  <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload your first recording")}
                 </button>
               </div>
             ) : (
@@ -1068,14 +1137,15 @@ export default function CoursePage() {
                         notes always are; recordings once transcribed). */}
                     {rec.status === "failed" && !!(rec.transcript || rec.storagePath || rec.sourceUrl) && (
                       <button
+                        disabled={!foundationReady} aria-describedby="foundation-lock-reason"
                         onClick={(e) => {
                           e.stopPropagation();
                           handleReanalyzeRecording(rec);
                         }}
-                        className="ms-2 text-[10px] underline text-accent hover:text-ink"
+                        className="ms-2 text-[10px] underline text-accent hover:text-ink disabled:opacity-50 disabled:cursor-not-allowed"
                         title="Run AI analysis again"
                       >
-                        {t("retry")}
+                        {!foundationReady && <span aria-hidden="true">🔒 </span>}{t("retry")}
                       </button>
                     )}
                   </>
@@ -1098,12 +1168,12 @@ export default function CoursePage() {
       {showDocUpload && (
         <UploadDocumentModal
           courseId={course.id}
-          onClose={() => setShowDocUpload(false)}
-          onSuccess={loadData}
+          onClose={() => { setShowDocUpload(false); void loadData(); }}
+          onSuccess={refreshFoundation}
         />
       )}
 
-      {showAudioUpload && (
+      {showAudioUpload && foundationReady && (
         <UploadAudioModal
           courseId={course.id}
           onClose={() => setShowAudioUpload(false)}
@@ -1111,7 +1181,7 @@ export default function CoursePage() {
         />
       )}
 
-      {showHistExamUpload && (
+      {showHistExamUpload && foundationReady && (
         <UploadHistoricalExamModal
           courseId={course.id}
           onClose={() => setShowHistExamUpload(false)}
@@ -1119,7 +1189,7 @@ export default function CoursePage() {
         />
       )}
 
-      {showTutorialUpload && (
+      {showTutorialUpload && foundationReady && (
         <UploadTutorialModal
           courseId={course.id}
           onClose={() => setShowTutorialUpload(false)}

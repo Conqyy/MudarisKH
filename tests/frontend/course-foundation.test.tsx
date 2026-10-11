@@ -1,0 +1,174 @@
+import React from "react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const fake = vi.hoisted(() => ({
+  user: { uid: "student" },
+  foundation: { ready: false, state: "confirmation_required", revision: "revision-1", documentCount: 1, completedCount: 1, pendingCount: 0, failedCount: 0, failedDocumentIds: [] as string[], message: "Confirm all lecture documents." },
+  foundationError: "", confirmError: "", confirmation: null as { revision: string } | null,
+  documentRows: [] as any[],
+}));
+vi.mock("next/navigation", () => ({ useParams: () => ({ id: "course-1" }), useSearchParams: () => new URLSearchParams(), useRouter: () => ({ push: vi.fn() }) }));
+vi.mock("next/link", () => ({ default: ({ children, ...props }: any) => <a {...props}>{children}</a> }));
+vi.mock("@/lib/auth-context", () => ({ useAuth: () => ({ user: fake.user, loading: false }) }));
+vi.mock("@/lib/i18n", () => ({ useLang: () => ({ t: (text: string) => text }) }));
+vi.mock("@/lib/activity", () => ({ useTrackRecent: () => {} }));
+vi.mock("@/lib/firestore-helpers", () => ({
+  getCourse: async () => ({ id: "course-1", userId: "student", code: "CS101", title: "Algorithms", instructor: "Professor", color: "sage" }),
+  getUserCourses: async () => [], updateCourse: async (_id: string, data: unknown) => data, deleteCourse: async () => {},
+}));
+vi.mock("@/components/Navbar", () => ({ default: () => null }));
+vi.mock("@/components/Sidebar", () => ({ default: () => null }));
+vi.mock("@/components/BookmarkButton", () => ({ default: () => null }));
+vi.mock("@/components/EditCourseModal", () => ({ default: () => null }));
+vi.mock("@/components/UploadDocumentModal", () => ({ default: ({ onSuccess, onClose }: any) => <div role="dialog" aria-label="Document upload"><button onClick={() => { fake.foundation = { ...fake.foundation, ready: false, state: "confirmation_required", revision: "revision-2", documentCount: 2, completedCount: 2 }; onSuccess(); onClose(); }}>Finish document upload</button><button onClick={() => { fake.foundation = { ...fake.foundation, ready: false, state: "failed", revision: "revision-2", documentCount: 2, failedCount: 1 }; onClose(); }}>Close after a failed upload</button></div> }));
+vi.mock("@/lib/api", () => ({
+  API_URL: "http://backend",
+  apiJson: async (url: string, init?: RequestInit) => {
+    if (url.endsWith("/foundation/confirm")) {
+      fake.confirmation = JSON.parse(init?.body as string);
+      if (fake.confirmError) { fake.foundation = { ...fake.foundation, revision: "revision-2" }; throw new Error(fake.confirmError); }
+      fake.foundation = { ...fake.foundation, ready: true, state: "ready" };
+      return fake.foundation;
+    }
+    if (url.endsWith("/foundation")) { if (fake.foundationError) throw new Error(fake.foundationError); return fake.foundation; }
+    if (url.includes("/documents/")) return { documents: fake.documentRows };
+    return {};
+  },
+  apiFetch: async (url: string, init?: RequestInit) => {
+    if (init?.method === "DELETE") { fake.documentRows = []; fake.foundation = { ...fake.foundation, ready: false, state: "missing", revision: "revision-2", documentCount: 0, completedCount: 0 }; }
+    if (url.endsWith("/reanalyze")) { fake.foundation = { ...fake.foundation, state: "confirmation_required", revision: "revision-2", failedCount: 0, failedDocumentIds: [], completedCount: 1 }; }
+    return { ok: true, status: 200, json: async () => url.endsWith("/reanalyze") ? { analysis: { topics: ["Sorting"], definitions: [], formulas: [], chapterMapping: [] } } : {} };
+  },
+}));
+
+import CoursePage from "../../src/app/course/[id]/page";
+
+beforeEach(() => {
+  fake.foundation = { ready: false, state: "confirmation_required", revision: "revision-1", documentCount: 1, completedCount: 1, pendingCount: 0, failedCount: 0, failedDocumentIds: [], message: "Confirm all lecture documents." };
+  fake.foundationError = ""; fake.confirmError = ""; fake.confirmation = null;
+  fake.documentRows = [{ id: "doc-1", courseId: "course-1", userId: "student", title: "Lecture notes", fileType: "pdf", fileSize: 20, storagePath: "notes.pdf", status: "completed", uploadedAt: 1, analysis: { topics: ["Sorting"], definitions: [], formulas: [], chapterMapping: [] } }];
+  vi.stubGlobal("confirm", () => true); vi.stubGlobal("alert", vi.fn());
+});
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+describe("course document foundation", () => {
+  it("locks every supporting upload and study action while keeping lecture upload available", async () => {
+    render(<CoursePage />);
+    await screen.findByText("Algorithms");
+    for (const name of [/Ask the Coach/, /Generate Exam/, /Make Flashcards/, /Make Summary/]) {
+      expect((screen.getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(true);
+      expect(screen.queryByRole("link", { name })).toBeNull();
+    }
+    for (const name of ["Past Exams", "Tutorials", "Audio Recordings"]) {
+      const section = screen.getByRole("heading", { name }).closest("section")!;
+      for (const upload of within(section).getAllByRole("button", { name: /Upload/ })) expect((upload as HTMLButtonElement).disabled).toBe(true);
+      expect(section.textContent).toMatch(/lecture documents|locked/i);
+    }
+    const documents = screen.getByRole("heading", { name: "Documents" }).closest("section")!;
+    expect((within(documents).getByRole("button", { name: /Upload/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it.each(["missing", "processing", "failed", "ready"])("does not offer completion confirmation in %s state", async (state) => {
+    fake.foundation = { ...fake.foundation, state, ready: state === "ready" };
+    render(<CoursePage />);
+    await screen.findByText("Algorithms");
+    expect(screen.queryByRole("button", { name: /I've uploaded all lecture documents/ })).toBeNull();
+    if (state !== "ready") expect((screen.getByRole("button", { name: /Generate Exam/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("confirms the displayed revision and then unlocks all study actions", async () => {
+    render(<CoursePage />);
+    fireEvent.click(await screen.findByRole("button", { name: /I've uploaded all lecture documents/ }));
+    await screen.findByRole("link", { name: /Generate Exam/ });
+    expect(fake.confirmation).toEqual({ revision: "revision-1" });
+    expect(screen.queryByRole("button", { name: /I've uploaded all lecture documents/ })).toBeNull();
+  });
+
+  it("keeps failed foundation requests locked and recovers through retry", async () => {
+    fake.foundationError = "Foundation unavailable";
+    render(<CoursePage />);
+    await screen.findByText("Foundation unavailable");
+    expect((screen.getByRole("button", { name: /Generate Exam/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("link", { name: /Lecture documents/ }).getAttribute("href")).toBe("/course/course-1?section=documents");
+    fake.foundationError = ""; fake.foundation = { ...fake.foundation, state: "ready", ready: true };
+    fireEvent.click(screen.getByRole("button", { name: /Retry foundation/i }));
+    await screen.findByRole("link", { name: /Generate Exam/ });
+  });
+
+  it("refreshes a stale confirmation and keeps study tools locked", async () => {
+    fake.confirmError = "Documents changed. Review and confirm again.";
+    render(<CoursePage />);
+    fireEvent.click(await screen.findByRole("button", { name: /I've uploaded all lecture documents/ }));
+    await screen.findByText("Documents changed. Review and confirm again.");
+    expect((screen.getByRole("button", { name: /Generate Exam/ }) as HTMLButtonElement).disabled).toBe(true);
+    fake.confirmError = "";
+    fireEvent.click(screen.getByRole("button", { name: /I've uploaded all lecture documents/ }));
+    await screen.findByRole("link", { name: /Generate Exam/ });
+    expect(fake.confirmation).toEqual({ revision: "revision-2" });
+  });
+
+  it("locks a confirmed course again when a document upload changes its revision", async () => {
+    fake.foundation = { ...fake.foundation, ready: true, state: "ready" };
+    render(<CoursePage />);
+    await screen.findByRole("link", { name: /Generate Exam/ });
+    const documents = screen.getByRole("heading", { name: "Documents" }).closest("section")!;
+    fireEvent.click(within(documents).getByRole("button", { name: /Upload/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Finish document upload/ }));
+    await screen.findByRole("button", { name: /I've uploaded all lecture documents/ });
+    expect((screen.getByRole("button", { name: /Generate Exam/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("keeps document reading and deletion available and locks again after deleting the foundation", async () => {
+    fake.foundation = { ...fake.foundation, ready: true, state: "ready" };
+    render(<CoursePage />);
+    await screen.findByRole("link", { name: /Generate Exam/ });
+    const documents = screen.getByRole("heading", { name: "Documents" }).closest("section")!;
+    expect(within(documents).getByRole("button", { name: /^Lecture notes/ })).not.toBeNull();
+    fireEvent.click(within(documents).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(within(documents).queryByText("Lecture notes")).toBeNull());
+    await screen.findByRole("button", { name: /Generate Exam/ });
+    expect(screen.queryByRole("button", { name: /I've uploaded all lecture documents/ })).toBeNull();
+  });
+
+  it.each([undefined, { topics: [], definitions: [], formulas: [], chapterMapping: [] }])("offers document retry when a completed analysis is unusable (%j)", async (analysis) => {
+    fake.foundation = { ...fake.foundation, ready: false, state: "failed", completedCount: 0, failedCount: 1 };
+    fake.documentRows[0] = { ...fake.documentRows[0], analysis };
+    render(<CoursePage />);
+    await screen.findByText("Algorithms");
+    const documents = screen.getByRole("heading", { name: "Documents" }).closest("section")!;
+    const retry = within(documents).getByRole("button", { name: "retry" }) as HTMLButtonElement;
+    expect(retry.disabled).toBe(false);
+    fireEvent.click(retry);
+    await screen.findByRole("button", { name: /I've uploaded all lecture documents/ });
+    expect(within(documents).queryByText(/Analyzed/)).not.toBeNull();
+    expect((screen.getByRole("button", { name: /Generate Exam/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("rechecks uploaded documents when the upload modal closes before its success callback", async () => {
+    fake.foundation = { ...fake.foundation, ready: true, state: "ready" };
+    render(<CoursePage />);
+    await screen.findByRole("link", { name: /Generate Exam/ });
+    const documents = screen.getByRole("heading", { name: "Documents" }).closest("section")!;
+    fireEvent.click(within(documents).getByRole("button", { name: /Upload/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Close after a failed upload/ }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    const lockedAction = await screen.findByRole("button", { name: /Generate Exam/ });
+    expect(screen.queryByRole("link", { name: /Generate Exam/ })).toBeNull();
+    expect((lockedAction as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("offers retry for completed documents rejected by the server analysis policy", async () => {
+    fake.foundation = { ...fake.foundation, state: "failed", completedCount: 0, failedCount: 1, failedDocumentIds: ["doc-1"] };
+    fake.documentRows[0] = { ...fake.documentRows[0], status: "completed", analysis: { topics: ["Trees"] } };
+    render(<CoursePage />);
+    await screen.findByText("Algorithms");
+    const documents = screen.getByRole("heading", { name: "Documents" }).closest("section")!;
+    expect(within(documents).queryByText(/Analyzed/)).toBeNull();
+    const retry = within(documents).getByRole("button", { name: "retry" }) as HTMLButtonElement;
+    expect(retry.disabled).toBe(false);
+    fireEvent.click(retry);
+    await screen.findByRole("button", { name: /I've uploaded all lecture documents/ });
+    expect((screen.getByRole("button", { name: /Generate Exam/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});

@@ -5,7 +5,10 @@ import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
 import Navbar from "@/components/Navbar";
 import Sidebar from "@/components/Sidebar";
+import { CourseFoundationGate } from "@/components/CourseFoundationGate";
+import { useCourseFoundation } from "@/hooks/useCourseFoundation";
 import { useAuth } from "@/lib/auth-context";
+import { useLang } from "@/lib/i18n";
 import {
   getCourse,
   getUserCourses,
@@ -39,7 +42,7 @@ interface HistExamItem {
   id: string;
   title: string;
   status: string;
-  analysis?: { totalQuestions?: number };
+  analysis?: { totalQuestions?: number; paperCount?: number };
 }
 
 interface TutorialItem {
@@ -62,7 +65,7 @@ type PageState = "configure" | "generating" | "done" | "error";
 // "in progress" until the real backend request resolves.
 const GEN_STEPS = [
   { label: "Analyzing lecture documents", duration: 3000 },
-  { label: "Matching past exam format", duration: 3000 },
+  { label: "Predicting format across past papers", duration: 3000 },
   { label: "Generating exam questions", duration: 6000 },
   { label: "Building LaTeX document", duration: 3000 },
   { label: "Compiling PDF", duration: 4000 },
@@ -73,6 +76,13 @@ export default function ExamPage() {
   const router = useRouter();
   const params = useParams();
   const courseId = params.id as string;
+  const { t } = useLang();
+  const { foundation, loading: foundationLoading, error: foundationError, refresh: refreshFoundation } = useCourseFoundation(courseId);
+  const foundationReady = !foundationLoading && !foundationError && foundation?.ready === true;
+  const foundationReadyRef = useRef(foundationReady);
+  foundationReadyRef.current = foundationReady;
+  const foundationUnknownRef = useRef(foundationLoading || !!foundationError);
+  foundationUnknownRef.current = foundationLoading || !!foundationError;
 
   const [course, setCourse] = useState<Course | null>(null);
   const [allCourses, setAllCourses] = useState<Course[]>([]);
@@ -126,11 +136,22 @@ export default function ExamPage() {
   const genCancelled = useRef(false);
   const genFinished = useRef(false);
   const studyRequest = useRef<AbortController | null>(null);
+  const generationRequest = useRef<AbortController | null>(null);
   const genTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     genCancelled.current = false;
     return () => { genCancelled.current = true; studyRequest.current?.abort(); if (genTimer.current) clearTimeout(genTimer.current); };
   }, [courseId, user?.uid]);
+
+  useEffect(() => {
+    if (foundationLoading || foundationError || foundationReady || !generationRequest.current) return;
+    generationRequest.current.abort();
+    generationRequest.current = null;
+    genCancelled.current = true;
+    genFinished.current = true;
+    if (genTimer.current) clearTimeout(genTimer.current);
+    setPageState("configure");
+  }, [foundationReady, foundationLoading, foundationError]);
 
   // PDF preview state for the "done" view
   const [pdfAttempt, setPdfAttempt] = useState(0);
@@ -328,10 +349,11 @@ export default function ExamPage() {
   };
 
   const handleGenerate = async () => {
-    if (!user || !course) return;
+    if (!user || !course || !foundationReadyRef.current || !documents.some((doc) => selectedDocs.has(doc.id))) return;
     studyRequest.current?.abort();
     const controller = new AbortController();
     studyRequest.current = controller;
+    generationRequest.current = controller;
     setPageState("generating");
     setErrorMsg("");
 
@@ -381,11 +403,21 @@ export default function ExamPage() {
 
       if (!res.ok) {
         const err = await res.json().catch(() => null);
+        if (res.status === 409) {
+          if (controller.signal.aborted) return;
+          const currentFoundation = await refreshFoundation();
+          if (currentFoundation?.ready) {
+            genFinished.current = true;
+            setErrorMsg(err?.detail || `Backend returned ${res.status}`);
+            setPageState("error");
+          }
+          return;
+        }
         throw new Error(err?.detail || `Backend returned ${res.status}`);
       }
 
       const data = await res.json();
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || (!foundationReadyRef.current && !foundationUnknownRef.current)) return;
       genFinished.current = true;
 
       // Take the student straight to the exam page (exam on the left, upload
@@ -411,6 +443,8 @@ export default function ExamPage() {
           "Could not connect to the backend. Make sure the server is running."
       );
       setPageState("error");
+    } finally {
+      if (generationRequest.current === controller) generationRequest.current = null;
     }
   };
 
@@ -453,6 +487,23 @@ export default function ExamPage() {
     );
   }
 
+  if (!foundationReady && pageState !== "done") {
+    return (
+      <>
+        <Navbar />
+        <div className="pt-20 flex">
+          <Sidebar courses={allCourses} />
+          <main className="flex-1 px-6 md:px-10 py-8 max-w-4xl mx-auto w-full">
+            <Link href={`/course/${courseId}`} className="inline-block mb-6 text-sm text-ink-soft hover:text-accent transition">
+              ← {t("Back to course")}
+            </Link>
+            <CourseFoundationGate courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} onRetry={refreshFoundation} />
+          </main>
+        </div>
+      </>
+    );
+  }
+
   const renderConfigure = () => (
     <div className="space-y-8">
       {/* Document selection */}
@@ -461,10 +512,9 @@ export default function ExamPage() {
           Select lecture documents
         </h3>
         <p className="text-sm text-ink-soft mb-4">
-          Questions are asked <span className="text-ink font-medium">only</span> on the
-          topics in the documents you tick. Past exams still set the format, question
-          types, and marks — a past-exam question on a chapter you didn&apos;t select is
-          re-asked on one you did.
+          Questions cover <span className="text-ink font-medium">only</span> the
+          topics in the documents you select. All selected past papers inform the
+          predicted question mix and topic emphasis within that scope.
         </p>
 
         {documents.length === 0 ? (
@@ -539,8 +589,8 @@ export default function ExamPage() {
             Base it on past exams
           </h3>
           <p className="text-sm text-ink-soft mb-4">
-            The generated exam mirrors the format and grading weights of the past
-            exams you select here, and weights topics by how heavily they appear in them.
+            Predict one exam from recurring patterns across all selected papers.
+            Merged PDFs are analyzed as collections of individual exams.
           </p>
           <div className="bg-paper border border-line rounded-2xl overflow-hidden">
             {histExams.map((h, idx) => (
@@ -562,7 +612,9 @@ export default function ExamPage() {
                 <div className="flex-1 min-w-0">
                   <div className="font-medium truncate">{h.title}</div>
                   <div className="text-xs text-ink-mute font-mono">
-                    {h.analysis?.totalQuestions
+                    {h.analysis?.paperCount
+                      ? `${h.analysis.paperCount} papers · ~${h.analysis.totalQuestions} questions per paper`
+                      : h.analysis?.totalQuestions
                       ? `${h.analysis.totalQuestions} questions`
                       : "analyzed"}
                   </div>
@@ -855,15 +907,15 @@ export default function ExamPage() {
       {/* Generate button */}
       <button
         onClick={handleGenerate}
-        disabled={documents.length > 0 && selectedDocs.size === 0}
+        disabled={!foundationReady || !documents.some((doc) => selectedDocs.has(doc.id))}
         className="w-full bg-ink text-paper py-4 rounded-full text-sm font-medium hover:bg-accent transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2.5 disabled:opacity-50 disabled:cursor-not-allowed"
       >
         Generate Exam <span>→</span>
       </button>
 
       <p className="text-xs text-ink-mute text-center font-mono">
-        Generation usually takes 2–3 minutes. Question count and format are derived
-        from your past exams. Please keep this tab open.
+        Question count and format are predicted from all selected papers and your
+        requested marks. Older uploads may need a one-time rescan. Keep this tab open.
       </p>
 
       {/* Previous exams */}
@@ -943,10 +995,10 @@ export default function ExamPage() {
           Generating your exam…
         </h2>
         <p className="text-ink-soft text-sm mb-8 max-w-md mx-auto leading-relaxed">
-          Matching the format of your past exams with content from your selected
+          Predicting a format from all your past papers using content from your selected
           lectures.{" "}
           <span className="text-ink font-medium">
-            This usually takes 2–3 minutes
+            Older uploads may need a one-time rescan
           </span>{" "}
           — please keep this tab open.
         </p>

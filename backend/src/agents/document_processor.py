@@ -8,6 +8,7 @@ from src.config import prompts
 from src.utils.ai_retry import chat_with_retry
 from src.utils.ai_contracts import validate_analysis, response_text
 from src.utils.text_normalization import excerpt
+from src.utils.course_foundation import build_foundation_context
 
 logger = logging.getLogger("MudarisDocProcessor")
 
@@ -157,7 +158,8 @@ class DocumentProcessorAgent:
                                       'imagesIncluded': min(len(image_uris or []), 8), 'imagesAvailable': len(image_uris or [])}
         return result
 
-    def analyze_tutorial(self, text: str, course_title: str, image_uris: list = None) -> dict:
+    def analyze_tutorial(self, text: str, course_title: str, image_uris: list = None,
+                         document_insights: list = None) -> dict:
         """Analyze a TUTORIAL / practice-problem sheet. Unlike a lecture document,
         a tutorial is a set of QUESTIONS the student solves — so we capture each
         problem (what it asks, the given data/tables, the concept, and the method)
@@ -168,13 +170,22 @@ class DocumentProcessorAgent:
         logger.info("Analyzing tutorial"
                     + (f" (+{len(image_uris)} page images)" if image_uris else ""))
         truncated = excerpt(text, 30000)
+        reference = build_foundation_context(document_insights)
+        grounding = (
+            '\n\nUse the lecture document reference for course topic and method alignment. '
+            'The tutorial text and page images remain the primary evidence: preserve every '
+            'original problem, given data, requested task, and problem count. Do not replace '
+            'the exercises with lecture examples or solve them. Describe unsupported course '
+            'alignment honestly in the existing concept/method fields. Keep the existing '
+            'output schema.\n\n' + reference if reference else ''
+        )
 
         def _user_content():
             if image_uris:
                 parts = [{
                     "type": "text",
                     "text": (
-                        f"Course: {course_title}\n\nThe tutorial pages are shown as images below"
+                        f"Course: {course_title}{grounding}\n\nThe tutorial pages are shown as images below"
                         " (read the problems, tables, equations, diagrams, and code in them)."
                         + (f"\n\n---EXTRACTED TEXT (for reference)---\n{truncated}" if truncated.strip() else "")
                     ),
@@ -182,7 +193,7 @@ class DocumentProcessorAgent:
                 for uri in image_uris[:8]:
                     parts.append({"type": "image_url", "image_url": {"url": uri}})
                 return parts
-            return f"Course: {course_title}\n\n---TUTORIAL TEXT---\n{truncated}"
+            return f"Course: {course_title}{grounding}\n\n---TUTORIAL TEXT---\n{truncated}"
 
         def _call(reminder: str) -> str:
             response = chat_with_retry(

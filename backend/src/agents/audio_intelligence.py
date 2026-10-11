@@ -9,6 +9,7 @@ from src.utils.ai_retry import chat_with_retry, call_with_retry
 from src.utils.ai_contracts import validate_analysis, response_text
 from src.utils.text_normalization import excerpt
 from src.utils.media_safety import FFMPEG_INPUT_OPTIONS
+from src.utils.course_foundation import build_foundation_context
 
 logger = logging.getLogger("MudarisAudioIntel")
 
@@ -205,12 +206,24 @@ class AudioIntelligenceAgent:
                 allowed += 1
         return allowed / len(letters) >= 0.5
 
-    def analyze_transcript(self, transcript: str, course_title: str) -> dict:
+    def analyze_transcript(self, transcript: str, course_title: str,
+                           document_insights: list = None) -> dict:
         logger.info("Analyzing transcript")
 
         # Feed (almost) the whole transcript so the summary covers the ENTIRE
         # lecture, not just the first ~15 min. Gemini Pro has a large context.
         truncated = excerpt(transcript, 120000)
+        reference = build_foundation_context(document_insights)
+        grounding = (
+            '\n\nUse the lecture document reference to resolve academic terminology, '
+            'identify taught chapters, and relate professor hints to course concepts. '
+            'The transcript remains the primary evidence of what the professor actually said. '
+            'Preserve verbatim transcript quotes; never add document-only claims to the '
+            'professor\'s statements or invent exam hints. Describe unsupported or out-of-scope '
+            'discussion honestly in the existing summary/chapter fields rather than forcing '
+            'course alignment. Keep the existing output schema.\n\n' + reference
+            if reference else ''
+        )
 
         from src.utils.json_parse import parse_with_retry
 
@@ -225,7 +238,7 @@ class AudioIntelligenceAgent:
                     },
                     {
                         "role": "user",
-                        "content": f"Course: {course_title}\n\n---LECTURE TRANSCRIPT---\n{truncated}",
+                        "content": f"Course: {course_title}{grounding}\n\n---LECTURE TRANSCRIPT---\n{truncated}",
                     },
                 ],
                 temperature=0.1,

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from tests.foundation_fixtures import confirm_lecture_foundation
 
 
 def test_audio_keeps_transcript_when_analysis_fails(api_module, monkeypatch):
@@ -10,6 +11,7 @@ def test_audio_keeps_transcript_when_analysis_fails(api_module, monkeypatch):
     db = MagicMock()
     db.get_audio_recording.return_value = {"id": "rec", "userId": "owner", "courseId": "course", "storagePath": "audio/owner/course/input.mp3"}
     db.get_owned_course.return_value = {"id": "course", "userId": "owner", "title": "Course"}
+    confirm_lecture_foundation(db)
     db.audio_job_exists.return_value = True
     monkeypatch.setattr(api, "db_client", db)
     audio = MagicMock()
@@ -78,6 +80,7 @@ def test_tex_rejects_file_input_and_shell_commands():
 
 def test_audio_temp_failure_releases_worker_slot(api_module, monkeypatch):
     db = MagicMock()
+    confirm_lecture_foundation(db)
     db.get_audio_recording.return_value = {"userId": "owner", "courseId": "course"}
     db.audio_job_exists.return_value = True
     monkeypatch.setattr(api_module, "db_client", db)

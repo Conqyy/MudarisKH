@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from tests.foundation_fixtures import confirm_lecture_foundation, lecture_document
 
 
 def owned_db(monkeypatch, api):
@@ -35,9 +36,9 @@ def test_document_reanalysis_persists_success(monkeypatch, api_module):
 def test_generation_preserves_explicit_empty_selections(monkeypatch, api_module, tool):
     api = api_module
     db = owned_db(monkeypatch, api)
-    db.get_course_documents.return_value = [{"id": "doc", "userId": "owner", "status": "completed", "title": "Limits", "analysis": {"topics": ["Limits"]}}]
+    documents = confirm_lecture_foundation(db, [lecture_document()])
     db.get_course_intelligence.return_value = {
-        "document_analyses": [{"topics": ["Limits"], "documentTitle": "Limits"}],
+        "document_analyses": [{**documents[0]['analysis'], "documentTitle": "Limits"}],
         "document_texts": ["Limits and derivatives"], "historical_analyses": [],
         "counts": {"documents": 1, "audio": 0, "historical_exams": 0, "tutorials": 0},
         "source_ids": {"document_ids": ["doc"], "audio_ids": [], "historical_exam_ids": [], "tutorial_ids": []},
@@ -50,6 +51,7 @@ def test_generation_preserves_explicit_empty_selections(monkeypatch, api_module,
     agent.extract_and_save_exam_metadata.return_value = {"cleaned_tex": agent.compile_enhanced_exam.return_value, "rubrics": rubric}
     agent.repair_latex.side_effect = lambda value: value
     monkeypatch.setattr(api, "ai_agent", agent)
+    monkeypatch.setattr(api, "summary_agent", agent)
     monkeypatch.setattr("src.utils.compile_pdf.compile_tex_to_pdf", lambda *a, **k: None)
     monkeypatch.setattr("src.utils.pdf_response.compile_temp_pdf", lambda *a, **k: None)
     payload = dict(user_id="spoofed", course_id="course", document_ids=["doc"], audio_ids=[], historical_exam_ids=[], tutorial_ids=[])
@@ -68,6 +70,7 @@ def test_generation_preserves_explicit_empty_selections(monkeypatch, api_module,
 def test_tutor_rejects_foreign_chat_before_model_call(monkeypatch, api_module):
     api = api_module
     db = owned_db(monkeypatch, api)
+    confirm_lecture_foundation(db)
     db.get_tutor_chat.return_value = {"id": "other-chat", "userId": "other", "courseId": "course"}
     tutor = MagicMock()
     monkeypatch.setattr(api, "tutor_agent", tutor)
@@ -110,22 +113,51 @@ def test_mark_normalization_has_exact_total_and_numeric_question_order(api_modul
 def test_summary_title_uses_owned_selected_sources(monkeypatch, api_module):
     api = api_module
     db = owned_db(monkeypatch, api)
+    documents = confirm_lecture_foundation(db, [
+        lecture_document(title='My Limits'),
+        lecture_document('other', title='Private Other Title', userId='other'),
+    ])
     db.get_course_intelligence.return_value = {
-        "document_analyses": [{"topics": ["Limits"]}],
+        "document_analyses": [documents[0]['analysis']],
         "historical_analyses": [], "counts": {"documents": 1},
         "source_ids": {"document_ids": ["doc"], "audio_ids": [], "historical_exam_ids": [], "tutorial_ids": []},
     }
-    db.get_course_documents.return_value = [
-        {"id": "doc", "userId": "owner", "title": "My Limits", "status": "completed", "analysis": {"topics": ["Limits"]}},
-        {"id": "other", "userId": "other", "title": "Private Other Title", "status": "completed", "analysis": {"topics": ["Limits"]}},
-    ]
     agent = MagicMock()
     agent.generate_summary.return_value = {"title": "Generic AI title", "sections": [{"heading": "Limits", "content": "A detailed limit explanation"}]}
-    monkeypatch.setattr(api, "ai_agent", agent)
+    monkeypatch.setattr(api, "summary_agent", agent)
     result = api.generate_summary_endpoint(api.SummaryGenerateRequest(user_id="owner", course_id="course"), uid="owner")
     saved = db.save_summary.call_args.args[2]
     assert "Private Other Title" not in saved["title"]
     assert result["title"] == saved["title"]
+
+
+def test_summary_generation_routes_to_independent_agent(monkeypatch, api_module):
+    api = api_module
+    db = owned_db(monkeypatch, api)
+    documents = confirm_lecture_foundation(db)
+    db.get_course_intelligence.return_value = {
+        "document_analyses": [documents[0]['analysis']],
+        "historical_analyses": [], "source_ids": {"document_ids": ["doc"]},
+    }
+    summary_agent = MagicMock()
+    summary_agent.generate_summary.return_value = {
+        "title": "Limits", "sections": [{"heading": "Limits", "content": "A detailed limit explanation"}],
+    }
+    exam_agent = MagicMock()
+    exam_agent.generate_summary.side_effect = AssertionError("Summary was routed through the exam agent")
+    monkeypatch.setattr(api, "summary_agent", summary_agent, raising=False)
+    monkeypatch.setattr(api, "ai_agent", exam_agent)
+
+    result = api.generate_summary_endpoint(api.SummaryGenerateRequest(
+        user_id="spoofed", course_id="course", document_ids=["doc"], audio_ids=[],
+        historical_exam_ids=[], tutorial_ids=[], instructions="Focus on limits",
+    ), uid="owner")
+
+    assert result["status"] == "success"
+    summary_agent.generate_summary.assert_called_once()
+    assert summary_agent.generate_summary.call_args.kwargs["instructions"] == "Focus on limits"
+    assert db.save_summary.call_args.args[:2] == ("owner", "course")
+    assert exam_agent.mock_calls == []
 
 
 def test_course_delete_rejects_other_owner(monkeypatch, api_module):

@@ -5,9 +5,12 @@ import { useRouter, useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import Navbar from "@/components/Navbar";
 import Sidebar from "@/components/Sidebar";
+import { CourseFoundationGate } from "@/components/CourseFoundationGate";
+import { useCourseFoundation } from "@/hooks/useCourseFoundation";
 import BookmarkButton from "@/components/BookmarkButton";
 import { useTrackRecent } from "@/lib/activity";
 import { useAuth } from "@/lib/auth-context";
+import { useLang } from "@/lib/i18n";
 import { getCourse, getUserCourses, Course } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 
@@ -75,6 +78,13 @@ export default function FlashcardsPage() {
   const router = useRouter();
   const params = useParams();
   const courseId = params.id as string;
+  const { t } = useLang();
+  const { foundation, loading: foundationLoading, error: foundationError, refresh: refreshFoundation } = useCourseFoundation(courseId);
+  const foundationReady = !foundationLoading && !foundationError && foundation?.ready === true;
+  const foundationReadyRef = useRef(foundationReady);
+  foundationReadyRef.current = foundationReady;
+  const foundationUnknownRef = useRef(foundationLoading || !!foundationError);
+  foundationUnknownRef.current = foundationLoading || !!foundationError;
   const searchParams = useSearchParams();
   const requestedId = searchParams.get("flashcards");
   const openedRequest = useRef("");
@@ -114,11 +124,22 @@ export default function FlashcardsPage() {
   const genCancelled = useRef(false);
   const genFinished = useRef(false);
   const studyRequest = useRef<AbortController | null>(null);
+  const generationRequest = useRef<AbortController | null>(null);
   const genTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     genCancelled.current = false;
     return () => { genCancelled.current = true; studyRequest.current?.abort(); if (genTimer.current) clearTimeout(genTimer.current); };
   }, [courseId, user?.uid]);
+
+  useEffect(() => {
+    if (foundationLoading || foundationError || foundationReady || !generationRequest.current) return;
+    generationRequest.current.abort();
+    generationRequest.current = null;
+    genCancelled.current = true;
+    genFinished.current = true;
+    if (genTimer.current) clearTimeout(genTimer.current);
+    setPageState("configure");
+  }, [foundationReady, foundationLoading, foundationError]);
 
   const activityItem = course && viewingId && pageState === "study" ? { kind: "flashcards" as const, id: viewingId, title: viewingTitle, href: "/course/" + courseId + "/flashcards?flashcards=" + encodeURIComponent(viewingId), courseCode: course.code, courseColor: course.color } : null;
   useTrackRecent(activityItem);
@@ -257,10 +278,11 @@ export default function FlashcardsPage() {
   };
 
   const handleGenerate = async () => {
-    if (!user || !course) return;
+    if (!user || !course || !foundationReadyRef.current || !documents.some((doc) => selectedDocs.has(doc.id))) return;
     studyRequest.current?.abort();
     const controller = new AbortController();
     studyRequest.current = controller;
+    generationRequest.current = controller;
     setPageState("generating");
     setErrorMsg("");
 
@@ -301,10 +323,20 @@ export default function FlashcardsPage() {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => null);
+        if (res.status === 409) {
+          if (controller.signal.aborted) return;
+          const currentFoundation = await refreshFoundation();
+          if (currentFoundation?.ready) {
+            genFinished.current = true;
+            setErrorMsg(err?.detail || `Backend returned ${res.status}`);
+            setPageState("error");
+          }
+          return;
+        }
         throw new Error(err?.detail || `Backend returned ${res.status}`);
       }
       const data = await res.json();
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || (!foundationReadyRef.current && !foundationUnknownRef.current)) return;
       genFinished.current = true;
       setGenCompleted(new Set(GEN_STEPS.map((_, i) => i)));
       setViewingId(data.doc_id || "");
@@ -316,6 +348,8 @@ export default function FlashcardsPage() {
       genFinished.current = true;
       setErrorMsg(e.message || "Could not generate flashcards.");
       setPageState("error");
+    } finally {
+      if (generationRequest.current === controller) generationRequest.current = null;
     }
   };
 
@@ -387,6 +421,23 @@ export default function FlashcardsPage() {
               Back to Dashboard
             </Link>
           </div>
+        </div>
+      </>
+    );
+  }
+
+  if (!foundationReady && pageState !== "study") {
+    return (
+      <>
+        <Navbar />
+        <div className="pt-20 flex">
+          <Sidebar courses={allCourses} />
+          <main className="flex-1 px-6 md:px-10 py-8 max-w-4xl mx-auto w-full">
+            <Link href={`/course/${courseId}`} className="inline-block mb-6 text-sm text-ink-soft hover:text-accent transition">
+              ← {t("Back to course")}
+            </Link>
+            <CourseFoundationGate courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} onRetry={refreshFoundation} />
+          </main>
         </div>
       </>
     );
@@ -588,7 +639,7 @@ export default function FlashcardsPage() {
 
       <button
         onClick={handleGenerate}
-        disabled={documents.length > 0 && selectedDocs.size === 0}
+        disabled={!foundationReady || !documents.some((doc) => selectedDocs.has(doc.id))}
         className="w-full bg-ink text-paper py-4 rounded-full text-sm font-medium hover:bg-accent transition-all hover:-translate-y-0.5 hover:shadow-lift disabled:opacity-50 disabled:cursor-not-allowed"
       >
         Generate Flashcards →

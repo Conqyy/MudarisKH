@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock
 
 import pytest
+from tests.foundation_fixtures import confirm_lecture_foundation
 
 
 def test_scope_never_keeps_unrelated_majority(api_module):
@@ -18,6 +19,7 @@ def test_generation_without_sources_never_calls_model(monkeypatch, api_module):
     api = api_module
     db = MagicMock()
     db.get_owned_course.return_value = {"userId": "owner"}
+    confirm_lecture_foundation(db)
     db.get_course_intelligence.return_value = {"counts": {"documents": 0, "audio": 0, "historical_exams": 0, "tutorials": 0}}
     monkeypatch.setattr(api, "db_client", db)
     agent = MagicMock()

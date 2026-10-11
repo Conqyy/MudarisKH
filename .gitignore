@@ -71,7 +71,7 @@ mudaris_local_db.json
 mudaris_local_db.json.lock
 /.pytest-pdf-temp/
 .pytest_cache/
-backend/.pytest-pdf*/
+backend/.pytest-*/
 *.tex
 *.aux
 *.log

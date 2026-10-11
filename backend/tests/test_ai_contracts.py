@@ -12,6 +12,7 @@ from src.utils.topic_scope import course_scope_from_docs, topic_in_scope, retag_
 from src.utils.ai_retry import chat_with_retry
 from src.agents.tutor_agent import AITutorAgent
 from src.agents.exam_generator import ExamGeneratorAgent
+from src.agents.summary_generator import SummaryGeneratorAgent
 from src.utils.pdf_extract import image_to_image_uri
 from src.utils.ai_contracts import validate_analysis, validate_summary, validate_exam_contract
 from src.agents.document_processor import DocumentProcessorAgent
@@ -104,10 +105,10 @@ def test_wrong_flashcard_count_is_rejected_instead_of_claiming_success():
 
 
 def test_malformed_summary_does_not_return_empty_success():
-    agent = ExamGeneratorAgent.__new__(ExamGeneratorAgent)
+    agent = SummaryGeneratorAgent.__new__(SummaryGeneratorAgent)
     agent.client, agent.model_id = object(), 'fake'
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='private malformed output'), finish_reason='stop')])
-    with patch('src.agents.exam_generator.chat_with_retry', return_value=response):
+    with patch('src.agents.summary_generator.chat_with_retry', return_value=response):
         with pytest.raises((RuntimeError, ValueError)):
             agent.generate_summary({}, [])
 
@@ -207,7 +208,7 @@ def test_normalized_marks_update_printed_values_without_altering_question_text()
 
 
 def test_summary_generation_includes_every_selected_raw_document():
-    agent = ExamGeneratorAgent.__new__(ExamGeneratorAgent)
+    agent = SummaryGeneratorAgent.__new__(SummaryGeneratorAgent)
     agent.client, agent.model_id = object(), 'fake'
     valid = {'title': 'T', 'overview': 'Overview', 'sections': [{'heading': 'H', 'content': 'C', 'keyPoints': [], 'examLikelihood': 'medium', 'examWeight': 100}], 'keyTerms': [], 'examFocus': []}
     response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=json.dumps(valid)), finish_reason='stop')])
@@ -215,7 +216,7 @@ def test_summary_generation_includes_every_selected_raw_document():
     def fake_call(*args, **kwargs):
         prompts.append(kwargs['messages'][1]['content'])
         return response
-    with patch('src.agents.exam_generator.chat_with_retry', side_effect=fake_call):
+    with patch('src.agents.summary_generator.chat_with_retry', side_effect=fake_call):
         result = agent.generate_summary({}, [], document_texts=[f'SOURCE{i} ' * 3000 for i in range(9)])
     assert len(result['sections']) == 1
     for i in range(9): assert f'SOURCE{i}' in prompts[0]

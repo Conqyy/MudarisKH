@@ -5,41 +5,13 @@ import logging
 from src.config import settings
 from src.config import prompts
 from src.utils.ai_retry import chat_with_retry
-from src.utils.text_normalization import as_text, text_list, normalize_insights, budget_sources, source_texts
-from src.utils.ai_contracts import validate_summary, validate_flashcards, validate_answers, validate_exam_contract, validate_rubrics, exam_question_numbers
+from src.utils.text_normalization import as_text, normalize_insights, budget_sources, source_texts
+from src.utils.generation_context import _join_texts, _course_topic_list, tutorial_brief
+from src.utils.ai_contracts import validate_flashcards, validate_answers, validate_exam_contract, validate_rubrics, exam_question_numbers
 from src.utils.json_parse import parse_with_retry, extract_json_object
+from src.utils.exam_blueprint import build_exam_blueprint
 
 logger = logging.getLogger("MudarisExamGenerator")
-
-
-def _as_text(item) -> str:
-    """Coerce an analysis item to a display string. Some documents store
-    topics / formulas / workedExamples as dicts (e.g. {"title":..,"solution":..})
-    instead of plain strings — handle both so ", ".join(...) never crashes."""
-    return as_text(item)
-
-
-def _join_texts(items, sep: str = ", ", limit: int | None = None) -> str:
-    """Join a list of analysis items into a string, tolerating dict/non-string
-    items (see _as_text). Replaces bare ", ".join(...) on raw analysis lists."""
-    items = list(items or [])
-    return sep.join(t for t in (_as_text(i) for i in items) if t)
-
-
-def _course_topic_list(document_insights: list) -> list:
-    """The current course's topic whitelist (display only), from the lecture
-    documents. Used as context for generation — the in/out-of-scope DECISION for
-    past-exam topics is made by the Historical Exam Analyzer, not here."""
-    seen, out = set(), []
-    for doc in document_insights or []:
-        title = re.sub(r"^\s*\d+\s*[-.)]\s*", "", as_text(doc.get("documentTitle"))).strip()
-        names = ([title] if title else []) + text_list(doc.get("topics", []))
-        for t in names:
-            t = as_text(t)
-            if t and t.lower() not in seen:
-                seen.add(t.lower())
-                out.append(t)
-    return out
 
 
 class ExamGeneratorAgent:
@@ -60,7 +32,8 @@ class ExamGeneratorAgent:
                               historical_analysis: list = None,
                               document_texts: list = None, historical_texts: list = None,
                               tutorial_insights: list = None, tutorial_texts: list = None,
-                              total_marks: int = 40, exam_type: str = "Final") -> str:
+                              total_marks: int = 40, exam_type: str = "Final",
+                              exam_blueprint: dict = None) -> str:
         document_insights = normalize_insights(document_insights)
         audio_insights = normalize_insights(audio_insights)
         historical_analysis = normalize_insights(historical_analysis)
@@ -131,76 +104,31 @@ class ExamGeneratorAgent:
         from src.utils.topic_scope import retag_topic_weights
         historical_analysis = retag_topic_weights(historical_analysis, document_insights)
 
+        blueprint = exam_blueprint or build_exam_blueprint(historical_analysis, total_marks, exam_type)
+
         hist_section = ""
-        if historical_analysis:
-            hist_parts = []
-            for h in historical_analysis:
-                weights = h.get("topicWeights", [])
-                # Use the in/out-of-scope decision the ANALYZER already made and
-                # stored (inScope per topic). Topics removed from the syllabus
-                # (inScope == False) are dropped and the remaining in-scope topics
-                # are RENORMALIZED to sum to 100% so their share absorbs the
-                # removed topics' weight.
-                if any(w.get("inScope") is False for w in weights):
-                    in_scope = [w for w in weights if w.get("inScope") is not False]
-                    out_scope = [w for w in weights if w.get("inScope") is False]
-                    total_in = sum(float(w.get("weight", 0) or 0) for w in in_scope) or 1.0
-                    lines = [
-                        f"- {w.get('topic', '')}: {float(w.get('weight', 0) or 0) / total_in:.0%}"
-                        f" ({w.get('questionCount', 0)} questions in the old exam)"
-                        for w in in_scope
-                    ]
-                    for w in out_scope:
-                        lines.append(
-                            f"- {w.get('topic', '')}: OUT OF SCOPE — not covered by the SELECTED "
-                            "lecture documents; DO NOT ask this. Its questions are reassigned to the "
-                            "in-scope topics above (keep the same question type and marks)."
-                        )
-                    weights_str = "\n".join(lines)
-                    weights_str += (
-                        "\n(The in-scope percentages above are renormalized to total 100% over the "
-                        "topics still in the course — distribute questions/marks by these.)"
-                    )
-                else:
-                    weights_str = "\n".join([
-                        f"- {w.get('topic', '')}: {w.get('weight', 0):.0%} ({w.get('questionCount', 0)} questions)"
-                        for w in weights
-                    ])
-                qtypes = h.get("questionTypes", [])
-                # Give the EXACT count of each question type (not just %), so the
-                # generated exam reproduces the same number of MCQs, etc.
-                qtypes_str = "\n".join([
-                    f"  * {q.get('type', '')}: EXACTLY {q.get('count', 0)} question(s)"
-                    + (f" — style: {q.get('style')}" if q.get('style') else "")
-                    for q in qtypes
-                ])
-                total_q = h.get("totalQuestions", 0)
-                skills_str = _join_texts(h.get("skills"), ", ", 10)
-                patterns_str = "\n".join([f"  - {p}" for p in h.get("patterns", [])])
-                part = f"Total questions on this exam: {total_q}\n"
-                part += f"Topic Weights:\n{weights_str}\n"
-                part += f"Question Types — REPRODUCE THE SAME TYPES AND THE SAME NUMBER OF EACH:\n{qtypes_str}"
-                if skills_str:
-                    part += f"\nSkills tested: {skills_str}"
-                if patterns_str:
-                    part += f"\nFormat/structure patterns (replicate these):\n{patterns_str}"
-                part += f"\nGrading blueprint: {h.get('gradingBlueprint', 'N/A')}"
-                hist_parts.append(part)
+        if blueprint:
+            # Only the combined prediction is structural authority. Historical
+            # counts are evidence about separate papers, never a template to copy.
+            weights = [w for w in blueprint.get("topicWeights", []) if w.get("inScope") is not False]
             hist_section = (
-                "\n--- PAST-EXAM PATTERNS (match the EXACT question types and the EXACT number "
-                "of each type — especially the MCQ count — plus the grading weights, topic "
-                "weights, and overall format/layout) ---\n" + budget_sources([(f"analysis {i + 1}", part) for i, part in enumerate(hist_parts)], 12000)[0]
+                "\n--- COMBINED HISTORICAL EVIDENCE ---\n"
+                + json.dumps({
+                    "topicWeights": weights,
+                    "difficultyDistribution": blueprint.get("difficultyDistribution", []),
+                    "patterns": blueprint.get("patterns", []),
+                    "styles": blueprint.get("styles", []),
+                    "gradingPatterns": blueprint.get("gradingBlueprint", ""),
+                }, ensure_ascii=False)
             )
 
         hist_raw_section = ""
         if historical_texts:
             combined_hist = source_texts(historical_texts, 12000)
             hist_raw_section = (
-                "\n--- SELECTED PAST EXAM(S) RAW TEXT (match this format/sections/question-types AND "
-                "the marks assigned to each question. Use it for FORMAT and for weighting the "
-                "ALLOWED COURSE TOPICS only — a question here about a topic outside the allowed "
-                "scope must be re-asked on an allowed topic, keeping its type and marks) ---\n"
-                + combined_hist
+                "\n--- SELECTED PAST PAPERS RAW EXCERPTS (examples of question wording "
+                "and applied concepts, not a required layout or question count; one upload "
+                "may contain several distinct papers) ---\n" + combined_hist
             )
 
         # Tutorials: practice-problem IDEAS only. They inform the CONTENT/style of
@@ -268,7 +196,7 @@ class ExamGeneratorAgent:
         --- EXAM SPECIFICATION (REQUIRED) ---
         Exam Type: {exam_type}
         Total Marks: the exam MUST be worth exactly {total_marks} marks in total. Distribute marks across questions so they sum to {total_marks}. Show the marks for each question (e.g. "[5 marks]").
-        Scope: a "Quiz" is short and focused (few questions), a "Midterm" is medium-length, a "Final" is comprehensive and covers more topics. When a reference past exam exists, preserve its question counts and types and adjust marks only. Otherwise choose a suitable length for {exam_type}.
+        Scope: a "Quiz" is short and focused, a "Midterm" is medium-length, a "Final" is comprehensive. Use the predicted blueprint derived from all selected papers for the question counts and types. Without a blueprint, choose a suitable single-paper length for {exam_type} and {total_marks} marks.
         Title the exam header accordingly (e.g. "{exam_type} Examination").
 
         --- DOCUMENT HEADER (REQUIRED) ---
@@ -290,8 +218,13 @@ class ExamGeneratorAgent:
         {tutorial_section}
         """
 
-        if historical_analysis:
-            user_payload += "\nSTRUCTURAL REFERENCE: the FIRST selected past exam determines exact question types/counts. Later exams inform content and weighting only.\n" + json.dumps(historical_analysis[0].get('questionTypes', []), ensure_ascii=False)
+        if blueprint:
+            user_payload += (
+                "\n--- PREDICTED EXAM BLUEPRINT (the sole question-count/type contract for "
+                "this new paper; inferred from all selected individual papers, not copied "
+                "from the first upload or summed across a merged PDF) ---\n"
+                + json.dumps(blueprint, ensure_ascii=False)
+            )
         # Generate the exam, CONTINUING if the model runs out of output tokens
         # mid-document. A long exam (many questions + a rubrics block) frequently
         # exceeds a single response's token cap; instead of silently truncating
@@ -354,7 +287,7 @@ class ExamGeneratorAgent:
         if "\\end{document}" not in full or "</secret-rubrics>" not in full or finish == 'length':
             raise RuntimeError('The generated exam is incomplete. Please retry.')
         metadata = self.extract_and_save_exam_metadata(full, exam_id, user_id, course_id)
-        validate_exam_contract(metadata['cleaned_tex'], metadata['rubrics'], historical_analysis)
+        validate_exam_contract(metadata['cleaned_tex'], metadata['rubrics'], blueprint=blueprint)
         raw_tex = self._sanitize_latex(full.strip())
 
         raw_tex = raw_tex.replace("{{EXAM_ID}}", exam_id)
@@ -605,191 +538,6 @@ class ExamGeneratorAgent:
             logger.error('Failed to extract complete rubric metadata: %s', type(e).__name__)
             raise ValueError('Generated exam grading metadata is invalid or incomplete') from e
 
-    @staticmethod
-    def _tutorial_brief(tutorial_insights: list = None, tutorial_texts: list = None,
-                        max_problems: int = 10) -> str:
-        """Compact text block describing tutorial practice problems (topics +
-        problem ideas + methods) — shared by summary/flashcard generation."""
-        parts = []
-        for t in (tutorial_insights or []):
-            topics_str = _join_texts(t.get("topics"), ", ", 15)
-            block = f"Topics practiced: {topics_str}" if topics_str else ""
-            lines = []
-            for p in t.get("problems", []):
-                concept = (p.get("concept") or "").strip()
-                statement = (p.get("statement") or "").strip()
-                method = (p.get("method") or "").strip()
-                line = "• " + (f"{concept}: " if concept else "") + statement
-                if method:
-                    line += f" (method: {method})"
-                lines.append(line.strip())
-            if lines:
-                block += "\nPractice problems & how to solve them:\n" + "\n".join(lines)
-            elif t.get("workedExamples"):
-                block += "\nExercises: " + _join_texts(t.get("workedExamples"), ", ", 8)
-            if block.strip():
-                parts.append(block)
-        if tutorial_texts:
-            combined = source_texts(tutorial_texts, 8000)
-            if combined.strip():
-                parts.append("Raw tutorial problems:\n" + combined)
-        return budget_sources([(f"analysis {i + 1}", part) for i, part in enumerate(parts)], 12000)[0]
-
-    def generate_summary(self, academic_data: dict, topics: list,
-                         document_insights: list = None, audio_insights: list = None,
-                         historical_analysis: list = None, document_texts: list = None,
-                         historical_texts: list = None,
-                         tutorial_insights: list = None, tutorial_texts: list = None,
-                         instructions: str = "") -> dict:
-        """Generate a structured study summary from the course intelligence.
-        Returns {title, overview, sections[], keyTerms[], examFocus[]}."""
-        document_insights = normalize_insights(document_insights)
-        audio_insights = normalize_insights(audio_insights)
-        historical_analysis = normalize_insights(historical_analysis)
-        tutorial_insights = normalize_insights(tutorial_insights)
-        logger.info("Generating study summary from course intelligence...")
-
-        from src.utils.topic_scope import retag_topic_weights
-
-        # Past-exam topics are re-scoped against the documents the student
-        # SELECTED for this summary (their stored inScope flags were decided
-        # against the whole course at upload time). Without this, selecting one
-        # chapter still produced a whole-course summary, because the past exams
-        # cover every chapter and the prompt tells the model to cover them.
-        historical_analysis = retag_topic_weights(historical_analysis, document_insights)
-
-        sections = []
-
-        # HARD SCOPE: only the selected documents' topics may appear.
-        course_topics = _course_topic_list(document_insights)
-        if course_topics:
-            sections.append(
-                "--- SELECTED SCOPE (HARD LIMIT — the summary must cover ONLY these "
-                "topics, from the lecture documents the student selected. Any topic "
-                "outside this list is OUT OF SCOPE and gets NO section, keyPoint, "
-                "keyTerm, or examFocus entry — even if the past exams cover it "
-                "heavily) ---\n" + ", ".join(course_topics)
-            )
-
-        if document_texts:
-            combined = source_texts(document_texts, 12000)
-            sections.append(f"--- LECTURE CONTENT (primary source) ---\n{combined}")
-        if document_insights:
-            parts = []
-            for doc in document_insights:
-                topics_str = _join_texts(doc.get("topics"), ", ", 20)
-                defs = doc.get("definitions", [])
-                defs_str = "; ".join([f"{d['term']}: {as_text(d.get('definition'))}" for d in defs if 'term' in d])
-                formulas_str = _join_texts(doc.get("formulas"), ", ", 10)
-                parts.append(f"Topics: {topics_str}\nDefinitions: {defs_str}\nFormulas: {formulas_str}")
-            sections.append("--- DOCUMENT ANALYSIS ---\n" + budget_sources([(f"analysis {i + 1}", part) for i, part in enumerate(parts)], 12000)[0])
-        if audio_insights:
-            parts = []
-            for a in audio_insights:
-                emph = a.get("keyEmphasis", [])
-                emph_str = "\n".join([f"- [{e.get('emphasisLevel','low')}] {e.get('topic','')}" for e in emph])
-                summ = a.get("summary", "")
-                block = (f"Lecture summary: {summ}\n" if summ else "") + (f"Professor emphasis:\n{emph_str}" if emph_str else "")
-                if block:
-                    parts.append(block)
-            if parts:
-                sections.append("--- AUDIO INSIGHTS ---\n" + budget_sources([(f"analysis {i + 1}", part) for i, part in enumerate(parts)], 12000)[0])
-        if historical_analysis:
-            parts = []
-            for h in historical_analysis:
-                # Out-of-scope topics are dropped outright — they exist only to
-                # tell the model how the IN-SCOPE topics are weighted.
-                weights = [w for w in h.get("topicWeights", []) if w.get("inScope") is not False]
-                if not weights:
-                    continue
-                weights_str = "\n".join([f"- {w.get('topic','')}: {w.get('weight',0):.0%}" for w in weights])
-                parts.append(f"Exam topic weights (prioritize these):\n{weights_str}")
-            if parts:
-                sections.append("--- HISTORICAL EXAM PATTERNS (in-scope topics only) ---\n" + budget_sources([(f"analysis {i + 1}", part) for i, part in enumerate(parts)], 12000)[0])
-        # The actual past-exam questions: richest source of the specific concepts
-        # the student will be tested on — but only for the topics in scope.
-        if historical_texts:
-            combined_hist = source_texts(historical_texts, 12000)
-            if combined_hist.strip():
-                scope_note = (
-                    " Cover ONLY the questions whose topic is inside the SELECTED SCOPE above; "
-                    "skip every question about another chapter entirely."
-                    if course_topics else ""
-                )
-                sections.append(
-                    "--- PAST EXAM QUESTIONS (for the concepts these questions test, explain the "
-                    "topic behind the question and how to answer it, in depth." + scope_note
-                    + ") ---\n" + combined_hist
-                )
-
-        tut_brief = self._tutorial_brief(tutorial_insights, tutorial_texts)
-        if tut_brief:
-            sections.append(
-                "--- TUTORIALS (practice problems — cover their topics and the METHOD "
-                "for solving each problem type; these problem types often appear on exams) ---\n"
-                + tut_brief
-            )
-
-        topics_line = _join_texts(topics) if topics else "All key topics"
-        custom_block = ""
-        exclusion_reminder = ""
-        if (instructions or "").strip():
-            custom_block = (
-                "=== USER'S CUSTOM INSTRUCTIONS (HIGHEST PRIORITY — follow these EXACTLY; "
-                "they OVERRIDE every default rule below where they conflict) ===\n"
-                f"{instructions.strip()}\n"
-                "If these instructions EXCLUDE/omit/skip a topic, that topic must NOT appear "
-                "anywhere in the output (no section, heading, keyPoint, keyTerm, or examFocus) "
-                "even though the guidance below says to cover everything.\n"
-                "(Still return the same JSON schema.)\n\n"
-            )
-            exclusion_reminder = (
-                "\n- REMINDER: obey the user's custom instructions above. If they asked to "
-                "EXCLUDE a topic, leave it out ENTIRELY — do NOT create a section, keyPoint, "
-                "keyTerm, or examFocus for it, even though it appears in the materials/past exams."
-            )
-        scope_rule = (
-            "- SCOPE IS ABSOLUTE: the summary covers ONLY the topics in the SELECTED SCOPE "
-            "list below. The student picked specific lecture documents — a topic from any "
-            "other part of the course must NOT appear, no matter how heavily the past exams "
-            "test it. Do not add background sections for material outside the scope.\n"
-            if course_topics else ""
-        )
-        user_payload = (
-            custom_block
-            + f"Target topics: {topics_line}\n"
-            f"Write a DETAILED, comprehensive study summary from the materials below — this is "
-            f"a full revision document, so be thorough, not brief.\n"
-            + scope_rule
-            + f"- Make a SEPARATE, in-depth section for every major topic IN SCOPE (aim for 8-15 "
-            f"sections when the selected material supports it — fewer if the student selected "
-            f"only one chapter; never pad with out-of-scope topics to reach a count); each "
-            f"section must actually teach the concept with its definitions and formulas.\n"
-            f"- Go deep on the in-scope topics the PAST EXAMS test — pull out the specific "
-            f"concepts those questions cover and explain them fully. Past-exam questions about "
-            f"topics outside the selected scope are IGNORED.\n"
-            f"- For EVERY tutorial practice problem whose topic is in scope, explain the "
-            f"underlying concept AND the step-by-step method/formula for solving that problem "
-            f"type (these reappear on exams).\n"
-            f"- Produce a comprehensive keyTerms list drawn from the in-scope lectures, past "
-            f"exams, and tutorials (aim for 20-40 terms when the selected material supports it; "
-            f"a single chapter will yield fewer, and that is correct — do NOT reach outside the "
-            f"scope to pad the list)."
-            + exclusion_reminder
-            + "\n\n"
-            + "\n\n".join(sections)
-        )
-
-        def _call(reminder):
-            response = chat_with_retry(self.client, model=self.model_id,
-                messages=[{'role': 'system', 'content': prompts.SUMMARY_GEN_SYSTEM_PROMPT + reminder},
-                          {'role': 'user', 'content': user_payload}], temperature=0.3,
-                max_tokens=max(settings.OPENROUTER_MAX_TOKENS, 20000))
-            if getattr(response.choices[0], 'finish_reason', None) == 'length':
-                raise ValueError('Summary response was truncated')
-            return (response.choices[0].message.content or '').strip()
-        return parse_with_retry(_call, label='study summary', validator=validate_summary)
-
     def generate_flashcards(self, academic_data: dict, topics: list,
                             document_insights: list = None, audio_insights: list = None,
                             historical_analysis: list = None, document_texts: list = None,
@@ -879,7 +627,7 @@ class ExamGeneratorAgent:
             sections.append(f"--- LECTURE CONTENT ---\n{combined}")
 
         # 4) Tutorials — practice problems: make cards on how to solve each type.
-        tut_brief = self._tutorial_brief(tutorial_insights, tutorial_texts)
+        tut_brief = tutorial_brief(tutorial_insights, tutorial_texts)
         if tut_brief:
             sections.append(
                 "--- TUTORIALS (practice problems — make cards that test how to solve "

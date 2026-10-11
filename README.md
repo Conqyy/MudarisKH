@@ -3,16 +3,16 @@
 Mudaris is an AI-driven study platform for university students (built for Imam Mohammad
 Ibn Saud Islamic University). For each course it ingests the lecture documents, professor
 voice recordings, past exams, and **tutorials** (practice-problem sheets), then powers a
-suite of study tools: a course-grounded **AI tutor**, realistic **practice exams** (matched
-to the real exam's format, each with a full **model-answer key** to self-check against),
+suite of study tools: a course-grounded **AI tutor**, predicted **practice exams** (informed
+by all selected past papers, each with a full **model-answer key** to self-check against),
 **flashcards**, **summaries**, and a weekly **lecture calendar**.
 
 ---
 
 ## Agent architecture
 
-The backend has five Python agent modules, coordinated by FastAPI. They are components
-inside the same backend process, not five separate network services or necessarily five
+The backend has six Python agent modules, coordinated by FastAPI. They are components
+inside the same backend process, not six separate network services or necessarily six
 different LLMs. Analysis, generation, and tutoring use the configured OpenRouter model;
 transcription uses Groq separately.
 
@@ -21,13 +21,29 @@ through `FirebaseClient`; generation and tutor requests load the selected stored
 and pass it as context. Agents do not send messages directly to one another. Firestore is
 the shared source of truth for analyses and conversation history.
 
+Lecture documents are the mandatory foundation. Upload all intended documents, wait for
+every document to finish analysis, then select **I've uploaded all lecture documents**.
+Past exams, tutorials, recordings, and study tools display locks until that confirmation.
+The API enforces the same prerequisite, including direct requests and recovered audio jobs.
+Adding, deleting, or reanalyzing documents invalidates the confirmation and requires it again.
+Incomplete analyses offer retry controls; existing saved outputs and cleanup remain available.
+Confirmation is stored in backend-only `document_foundations` records, separate from course
+presentation metadata, and is included in course/account cleanup.
+
+Audio, historical-paper and tutorial analysis receive bounded lecture reference evidence.
+Generation requires at least one selected lecture document to define its chapter scope;
+the tutor receives foundation documents when no lecture resources are selected. Source
+material is evidence rather than system policy. Results record their foundation revision,
+and long requests check that it remains confirmed before saving completed intelligence.
+
 1. **Document Processor** — extracts topics, definitions, formulas, diagrams, code, and chapter structure from lecture PDF / PPTX / DOCX (reads page images too). It has a dedicated **tutorial mode** that instead captures each practice *problem* (statement, given data/tables, what it asks, the concept, and the solving method).
 2. **Audio Intelligence** — transcribes professor recordings (Groq-hosted **Whisper-large-v3**) and produces a full **lecture summary** ("what the professor said") plus exam hints, key emphasis, and chapter mapping. Accepts audio files, **video files (MP4/MOV — audio auto-extracted to MP3)**, and **video URLs** (YouTube/Vimeo via yt-dlp; direct media through a validated downloader); long files are chunked within the upload, duration, and processing limits. Transcripts are biased to the lecture's language(s) — tuned here for mixed **Arabic/English** — with stray foreign-script text filtered out, Whisper's silence hallucinations (prompt echo / subtitle credits) stripped, and bidirectional (RTL/LTR) text rendered correctly. The analysis is written in English, but the professor's **direct quotes stay verbatim in his own words** (Arabic stays Arabic), and an explicit mark statement ("this chapter is 8 marks") is treated as the strongest exam signal. The full analysis can be **downloaded as a PDF** (compiled with XeLaTeX so inline Arabic quotes render correctly).
-3. **Historical Exam Analyzer** — analyzes past exams for topic weights, question-type distribution, difficulty, and grading patterns. Accepts **PDFs or photos** of the exam (each photo is analyzed as its own exam; phone photos are auto-rotated and read by the vision model).
-4. **Generation agent** — produces exams (LaTeX → PDF), their **model-answer keys** (every question with the exact answer in red), flashcards, and summaries. The **first selected past exam** defines the required question types and counts (e.g. the same number of MCQs). Prompts use its format/layout as a reference; validators check question structure and printed marks, rather than pixel-identical layout. The requested mark total rescales the rubric and printed marks together; the header is branded **"Mudaris University of {your major}"**. Long generations use a bounded **auto-continuation loop**; incomplete output is rejected instead of saved as successful.
-5. **AI Tutor** — a chat tutor grounded in the course's documents, recordings, past exams, and tutorials, with its own saved chat history.
+3. **Historical Exam Analyzer** — detects individual papers inside merged PDFs, inspects every page in sequential batches, and analyzes each paper for topic weights, question types, difficulty, and grading patterns. It stores per-paper evidence plus normalized aggregate statistics; the typical question count is separate from the collection total. Phone photos are auto-rotated and analyzed individually. Unclear paper boundaries fail with guidance to split the file, rather than silently treating a collection as one paper.
+4. **Exam Generator** — produces a **predicted single exam** from all selected past papers, its **model-answer key**, and flashcards. Each paper contributes normalized evidence equally. Structure favors the requested Quiz/Midterm/Final type where known; typical question density or count and the requested marks determine the new blueprint. Upload order does not choose a reference paper. The blueprint and provenance are saved with the exam, and validators check its question mix, complete rubrics, and printed marks. The header is branded **"Mudaris University of {your major}"**. Long generations use a bounded continuation loop; incomplete output is rejected.
+5. **Summary Generator** — independently produces structured summaries with length determined by relevant content, complexity, importance, and student instructions, without fixed section/paragraph/term targets. It excludes course outlines/maps, textbook lists, and logistics by default while retaining substantive introductory concepts. Shared context-formatting helpers are neutral; its prompt, model call, and validation are separate from exams.
+6. **AI Tutor** — a chat tutor grounded in the course's documents, recordings, past exams, and tutorials, with its own saved chat history.
 
-> **Tutorials** are not a 6th model — they're analyzed by the Document Processor's tutorial
+> **Tutorials** are not another model — they're analyzed by the Document Processor's tutorial
 > mode and supplied as practice-problem context. They do not define an exam's question mix
 > or total marks. When selected, historical exams define the question mix; the student's
 > requested mark total defines the total.
@@ -37,11 +53,11 @@ the shared source of truth for analyses and conversation history.
 ## Features
 
 - **AI Tutor** — chat about the course; answers are grounded in the lectures, recordings, past exams, and tutorials you select (each item is individually selectable). Conversations are saved and can be resumed/deleted.
-- **Practice Exam** — pick which lecture documents, past exams, tutorials, and **lecture recordings** to use, choose total marks (auto-labeled **Quiz / Midterm / Final**), and generate an exam whose question types and counts match the **first selected past exam**, with its layout used as a prompt reference (the mark total only rescales the marks, never the question mix). You **solve it yourself**, then reveal a **model-answer key PDF** — every question followed by its exact answer in **red** (code answers shown as real code), so you self-check. Optionally **drag-and-drop your own solved exam** (photo, scanned PDF, or typed file) to view it side-by-side with the answers.
+- **Practice Exam** — select lecture documents, past papers, tutorials, and **lecture recordings**, choose total marks (auto-labeled **Quiz / Midterm / Final**), and generate a predicted paper based on recurring patterns across all selected papers. Merged PDFs are separated into individual papers; selected older uploads are rescanned from saved originals and cached before generation. Question counts are never summed across a collection. You **solve it yourself**, then reveal a **model-answer key PDF** with answers in **red**, including real code where required. Optionally upload your own solved paper for side-by-side comparison.
 - **Tutorials** — upload practice-problem / exercise sheets. They're analyzed for their problem types and methods, then selectable as a source for exam generation, flashcards, and summaries (they add *problem ideas only* — never marks or format).
 - **Flashcards** — up to 20 cards, prioritized by exam likelihood from past exams + professor hints, including how-to-solve cards from tutorials and points from selected **recordings**; 3-D flip study view.
-- **Summary** — detailed, comprehensive study summary (a section per major topic, with full explanations, key terms, and how-to-solve notes for the tutorial problem types). Sections follow the **course's own chapter order** (Chapter 1 before Chapter 2 — not sorted by exam weight). Each topic is tagged with an exam likelihood & weight that — when past exams are available — is **derived from the past exams' topic weights** (traceable, not an LLM guess); without past exams it falls back to the model's estimate.
-- **Selectable sources** — exam generation, summaries, flashcards, and the AI Tutor use the documents, past exams, tutorials, and **lecture recordings** you select. At the API, omitted/null ID lists include all of that type; `[]` excludes all. Explicit source order is preserved and duplicate IDs are removed. Generation rejects an empty effective selection. Later selected past papers add content and weighting signals; the first defines the exam structure.
+- **Summary** — content-sized study notes with important explanations, key terms, and tutorial-solving methods. Related ideas can share a section; no numeric size quota encourages padding. Course administration is omitted by default. Sections follow the **course's chapter order**. Exam weights are relative study signals derived from matching historical topic weights where available; otherwise model estimates remain. They are not calibrated probabilities of future exam coverage.
+- **Selectable sources** — exam generation, summaries, flashcards, and the AI Tutor use selected documents, past exams, tutorials, and **lecture recordings**. At the API, omitted/null ID lists include all of that type; `[]` excludes all. Exam/summary/flashcard generation requires a nonempty lecture selection. For tutoring, a confirmed document foundation remains required and is included when no documents are selected. Explicit source order is preserved and duplicate IDs are removed. Exam prediction combines all detected papers without giving the first upload special authority.
 - **Multi-file upload** — documents, past exams, tutorials, and **recordings** can be uploaded many at once (recordings also via **multiple video URLs**, past exams also as **photos**); each item is analyzed **one at a time** with a live "done / total" counter (sequential processing).
 - **Weekly calendar** — Sunday–Thursday lecture schedule with start/finish times, hall notes, and no double-booking; click a lecture to edit.
 - **Arabic (Najdi) + RTL** — the interface supports right-to-left layout and a one-tap **عربي ⇄ EN** toggle in the navbar (remembered per device). The copy uses a Najdi dialect and a first-person **"مُدرّس"** persona (e.g. on upload: *"مُدرّس بيقرأ مستندك ويحلّله…"*). Interface translations are available; some study-workflow labels still use English fallback. Your **course content stays in its own language** (an English curriculum's topic names, exam hints, and generated material are never translated).
@@ -195,7 +211,7 @@ MudarisKH/
     ├── tests/                        # API, lifecycle, AI, media and PDF regressions
     └── src/
         ├── api.py                    # all FastAPI endpoints
-        ├── agents/                   # five agent modules
+        ├── agents/                   # six agent modules
         ├── config/                   # settings + prompts
         ├── database/firebase_client.py
         └── utils/                    # validated storage, AI contracts, jobs, media and PDF helpers

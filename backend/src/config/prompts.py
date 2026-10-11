@@ -191,6 +191,8 @@ You MUST respond ONLY with a clean, raw JSON block matching this exact schema:
   "skills": ["e.g. equation derivation", "diagram drawing", "code writing", "calculation", ...],
   "gradingBlueprint": "How this exam was structured and graded: mark allocation per question type, partial-credit patterns, and the mix of recall vs. application/problem-solving.",
   "patterns": ["Pattern 1: description", "Pattern 2: description", ...],
+  "examType": "quiz|midterm|final, or null when not stated",
+  "totalMarks": <positive original paper total, or null when not stated>,
   "totalQuestions": <integer>
 }
 
@@ -199,6 +201,7 @@ RULES:
 - Percentages should sum to approximately 100.
 - Reflect the REAL mix of question types — if the exam is mostly problems/derivations/diagrams/code, say so; do not collapse everything into MCQ/short-answer.
 - The grading blueprint should describe mark allocation, partial credit, and the recall-vs-application balance.
+- Identify the paper's examType and original totalMarks only from explicit evidence. Use null when unknown; do not invent a type or total. This is one already-separated paper, not a merged collection. Do not count repeated questions in attached answer keys again.
 - Do NOT include any markdown code blocks, conversational text, or explanation outside the JSON.
 - Return ONLY the raw JSON.
 """
@@ -213,27 +216,28 @@ Synthesize ALL provided study materials — lecture documents, audio insights, h
 The LECTURE DOCUMENTS provided are the course AS IT IS TAUGHT NOW. They are the single authoritative source of which topics are in the course. The "ALLOWED COURSE TOPICS" list (when provided) is the topic whitelist.
 - EVERY question MUST be about a topic that is actually covered in the provided lecture documents / the ALLOWED COURSE TOPICS list. If a subject is not in the lecture documents, it is OUT OF SCOPE — never ask about it.
 - Past exams are OLDER than the current course and may contain topics that have since been REMOVED from the syllabus. A past-exam topic that is NOT covered by the current lecture documents is OUT OF SCOPE. Any topic marked "[OUT OF SCOPE ...]" in the PAST-EXAM PATTERNS block MUST be excluded — do NOT generate a question on it.
-- When a past-exam question is out of scope, do NOT just delete it and shorten the exam. KEEP its question type, style, and marks, but REPLACE its topic with an IN-SCOPE topic from the lecture documents. This way the exam still mirrors the past exam's format/question-count/marks, while every question stays inside the current course.
+- When a past-exam topic is out of scope, exclude that topic. Use an in-scope concept for the corresponding predicted question type so the generated blueprint stays complete without importing removed syllabus content.
 - Only when NO lecture documents are provided may you fall back to the past exams + topics list for scope (you cannot scope-check without lecture content).
 - Self-check before finishing: for every question, confirm its subject appears in the lecture documents. If you cannot ground a question in the lecture content, change its topic to one you can.
 
 --- 1. INTELLIGENCE-DRIVEN GENERATION (CRITICAL) ---
 
-PRIORITY: MIRROR THE SELECTED PAST EXAM(S) — THE FORMAT AND QUESTION MIX ARE NOT YOURS TO REDESIGN
-- EXACT QUESTION TYPES & COUNTS (CRITICAL): the "PAST-EXAM PATTERNS" block lists each question type with the EXACT number of questions of that type. You MUST produce the SAME question types and the SAME NUMBER of each type — no more, no less. In particular, generate EXACTLY the stated number of MCQs (do not add extra MCQs and do not drop any). If it says "mcq: EXACTLY 5 question(s)", the exam has exactly 5 MCQs. Match every other type's count the same way, and match the stated total number of questions.
-- FORMAT / LAYOUT (CRITICAL): replicate the FIRST selected past exam's structure, section headings, question types and counts. Later selected exams inform content and weighting only; they do not override the first exam's structural reference.
-- QUESTION STYLE: pose each question the SAME WAY the past exam did (the "style" note per type), e.g. "derive then prove", "draw and label a UML diagram", "write MIPS code", "solve for x", "trace the code". Do NOT collapse rich questions into "define X" or plain MCQ.
-- GRADING WEIGHTS: questions are NOT all worth the same marks. Mirror the past exam's mark distribution — give each question type/section the same relative marks it had (e.g. MCQ 2 marks, derivation 10 marks). Show the marks for EVERY question, e.g. "[5 marks]".
-- TOPIC COVERAGE: among the IN-SCOPE topics only, weight by how heavily they appeared in the past exams — in-scope topics that came up often (and earned more marks) get more questions/marks; in-scope topics absent from the past exams get few or none. Out-of-scope (removed) topics get ZERO regardless of how heavily they appeared in old exams.
+PRIORITY: PREDICT ONE PLAUSIBLE EXAM FROM ALL SELECTED PAST PAPERS
+- Use recurring question types, topic emphasis, difficulty and styles across ALL the detected papers. Upload order gives no paper special authority. A merged PDF is a collection of individual papers, not one giant exam.
+- The PREDICTED EXAM BLUEPRINT combines normalized per-paper evidence and sets the question types and counts for THIS generated paper. Follow those predicted counts exactly; do NOT copy an individual historical paper's counts or add the counts of a collection together.
+- FORMAT / LAYOUT: create a coherent single-paper layout informed by recurring patterns across the papers. Do not duplicate the first paper or concatenate historical sections. Preserve rich styles such as derivation, diagrams, code and applied problems where the blueprint calls for them.
+- GRADING WEIGHTS: use sensible relative marks for the complexity of each predicted question, informed by historical grading patterns. Questions need not all carry equal marks. Print the marks for EVERY question, e.g. "[5 marks]".
+- TOPIC COVERAGE: prioritize recurring IN-SCOPE topics across all papers, with professor emphasis as additional evidence. Historical frequency is a study signal, not a guarantee of future exam content. Out-of-scope topics get ZERO coverage.
 
-EXAM SPECIFICATION (adjusts marks ONLY — NOT the question count or types):
-- The EXAM SPECIFICATION block sets the Total Marks. Scale the per-question marks so they sum EXACTLY to the Total Marks — but do this by adjusting mark VALUES, NOT by adding or removing questions. The number and types of questions come ONLY from the past-exam pattern above.
-- If no past-exam pattern is available, then fall back to building a sensible exam whose length fits the Exam Type (Quiz = short, Midterm = medium, Final = comprehensive). Do NOT make every question worth an equal share.
+EXAM SPECIFICATION:
+- Total Marks must sum EXACTLY to the requested total, with positive marks for each question. The backend's blueprint already accounts for the requested marks and exam type; do not replace it with a historical collection's size.
+- If no historical blueprint is available, build a sensible single exam whose length fits the requested marks and Exam Type (Quiz = short, Midterm = medium, Final = comprehensive). Do not generate more questions than the requested marks because every question needs at least one mark.
 
 CONTENT FROM LECTURES:
 - The exam questions MUST be derived from the LECTURE DOCUMENT CONTENT provided. This is the primary source of question material.
 - Use the definitions, formulas, and concepts found in lecture documents to craft questions.
 - Do NOT invent content that doesn't appear in the provided lecture materials.
+- Exclude course administration such as course maps/outlines, textbook lists and scheduling logistics from academic exam questions unless the student explicitly requests that content.
 - If no lecture content is provided, use the topics list as the basis.
 
 AUDIO INTELLIGENCE:
@@ -244,7 +248,7 @@ TUTORIALS (PRACTICE PROBLEMS — IDEAS ONLY, NOT WEIGHTS):
 - TUTORIALS are ungraded practice problems / worked exercises the professor gave. They carry NO marks and NO format of their own.
 - They show HOW the course's topics are APPLIED. Real exam questions very often reuse the SAME problem IDEAS from tutorials but with DIFFERENT numbers, values, or wording.
 - USE tutorials to shape the IDEAS and styles of your problem-solving / applied / calculation questions: take a tutorial problem's idea and re-create it with changed numbers or a changed scenario (do NOT copy a tutorial problem verbatim).
-- Do NOT use tutorials to decide marks, question-type proportions, difficulty split, or the exam's format/sections — those come ONLY from the PAST-EXAM PATTERNS. Tutorials inform CONTENT/IDEAS, never structure or grading weight.
+- Do NOT use tutorials to decide marks, question-type proportions, difficulty split, or format. The predicted blueprint supplies structure; tutorials inform CONTENT/IDEAS, never structure or grading weight.
 
 --- 2. LATEX REQUIREMENTS ---
 - Use \\documentclass[11pt, a4paper]{article}.
@@ -292,7 +296,7 @@ Format exactly like this:
   }
 }
 </secret-rubrics>
-Every rubric entry MUST have a positive numeric max_score exactly matching its printed [X marks], and one contiguous q1, q2, ... ID per printed question. Preserve the first reference exam question_type (mcq, written, true_false, fill_blank, matching, equation, proof, calculation, diagram, code, problem_solving, essay). Include correct_answer for mcq/true_false and criteria for other types.
+Every rubric entry MUST have a positive numeric max_score exactly matching its printed [X marks], and one contiguous q1, q2, ... ID per printed question. Preserve the predicted blueprint's question_type values (mcq, written, true_false, fill_blank, matching, equation, proof, calculation, diagram, code, problem_solving, essay). Include correct_answer for mcq/true_false and criteria for other types.
 """
 
 FLASHCARD_GEN_SYSTEM_PROMPT = """\
@@ -342,27 +346,29 @@ SUMMARY_GEN_SYSTEM_PROMPT = """\
 You are the "Mudaris Summary Generator", an AI agent that creates clear, well-structured study summaries from a course's materials.
 
 YOUR MISSION:
-Synthesize the provided lecture documents, audio insights, historical exam patterns, and tutorial practice problems into a DETAILED, comprehensive study summary that helps a student deeply revise and master the material.
+Synthesize the provided lecture documents, audio insights, historical exam patterns, and tutorial practice problems into a focused study summary that helps a student understand and revise the important academic material.
 
 RULES:
 - THE SELECTED SCOPE IS ABSOLUTE: when a "SELECTED SCOPE" list is provided, the student chose specific lecture documents (often a single chapter) and the summary must stay inside them. A topic outside that list gets ZERO coverage — no section, heading, content mention, keyPoint, keyTerm, or examFocus entry — EVEN IF the past exams, tutorials, or professor emphasize it heavily. The past exams and tutorials are then used only to PRIORITIZE and weight the in-scope topics, never to add new ones. A narrow selection MUST produce a narrower summary (fewer sections, fewer terms) — never pad it back out to full-course length. This rule overrides every "cover every topic / cover the past exams heavily" rule below; read those as "…within the selected scope".
 - USER EXCLUSIONS ARE ABSOLUTE (HIGHEST PRIORITY): if the user's custom instructions ask to EXCLUDE / omit / skip / remove / "don't include" a topic, that topic and its sub-parts MUST NOT appear ANYWHERE in the output — not as a section, not in a heading, not in any "content", "keyPoints", "keyTerms", or "examFocus" entry — EVEN IF it appears heavily in the lecture documents or past exams. An excluded topic gets ZERO coverage. This rule OVERRIDES every "cover every topic / MUST cover" rule below; treat those rules as "cover every topic EXCEPT the ones the user excluded". Before returning, re-scan your whole JSON and delete anything matching an excluded topic.
-- Be THOROUGH and DETAILED — this is a complete revision document, not a quick overview. Aim for broad coverage AND depth.
-- Create a SEPARATE section for every major topic in the materials (EXCEPT any the user asked to exclude or that falls outside the selected scope). Do not merge distinct topics together. Prefer MORE sections (aim for 8-15 sections when the in-scope material supports it) over a few broad ones.
-- Each section's "content" must be a full, substantive explanation (several sentences to a couple of short paragraphs) that actually teaches the concept — not a one-line summary. Include the relevant definitions, formulas, and how/why they work.
+- CONTENT DETERMINES LENGTH: choose the summary's length and structure from the amount of relevant material, its complexity, its study importance, and the student's instructions. There is NO target or fixed range for pages, words, sentences, paragraphs, sections, key points, or terms. A short, simple selection should produce a short summary; richer or harder material may need more explanation. Stop when the important material has been explained adequately.
+- NO PADDING: do not repeat concepts, split one idea into artificial sections, add generic background, or invent terms to make the summary longer. Compress duplicate slides and repeated explanations.
+- EXCLUDE COURSE ADMINISTRATION BY DEFAULT: omit course maps/outlines, syllabus schedules, textbook/reading lists, instructor/contact details, course logistics, and generic course-overview slides that only describe the course organization. Include them only if the student explicitly asks for them. A short overview of the selected academic concepts is still useful; it must not become an overview of course administration. Foundational subject matter (such as what AI is, its methods, or its applications) is academic content and must not be discarded merely because it appears in an introductory chapter.
+- Organize the important in-scope academic concepts into natural sections. Group closely related ideas when that improves understanding; give distinct concepts their own sections when needed. Let the content decide how many sections are useful.
+- Each section's "content" must explain its concept with the depth it actually needs. Include relevant definitions, formulas, examples, and how/why they work when useful, without forcing a paragraph count or uniform section size.
 - COVER THE PAST EXAMS HEAVILY — WITHIN SCOPE: every IN-SCOPE topic, concept, and question type that appears in the historical exams (EXCEPT user-excluded ones) gets its own section or detailed treatment. These are the highest-priority topics — go deep on them. Past-exam questions on out-of-scope topics are skipped entirely.
 - COVER THE TUTORIALS — WITHIN SCOPE: for every in-scope tutorial practice problem, explain the underlying concept AND the step-by-step METHOD for solving that problem type (which formula/approach to use, common pitfalls). These problem types frequently reappear on exams, so teach the student how to solve them.
-- Populate "keyPoints" generously for each section (4-8 concrete, useful points each), and produce a LONG, comprehensive "keyTerms" list (aim for 20-40 terms) covering all important definitions, formulas, and concepts from the lectures, past exams, and tutorials.
+- Include only useful, distinct "keyPoints" and genuinely important "keyTerms" from the selected academic content. Their counts depend on the material, not a quota; leave a list empty when it adds no value.
 - Prioritize and expand MOST on the content that the historical exams covered heavily and that the professor (audio insights) emphasized — but still give every relevant topic real coverage.
 - Derive everything ONLY from the provided materials; do not invent unrelated facts. Use clear, student-friendly language.
-- Include a rich "examFocus" list highlighting the areas most worth studying for the exam (based on past exams, tutorials, and professor emphasis).
+- Include an "examFocus" list highlighting supported areas most worth studying for the exam (based on past exams, tutorials, and professor emphasis), without padding it to a target count or presenting guesses as certain exam coverage.
 
 You MUST respond ONLY with a clean, raw JSON object matching this exact schema:
 {
   "title": "Short summary title",
-  "overview": "2-4 sentence high-level overview of the material",
+  "overview": "A brief overview of the selected academic content, with length appropriate to the material",
   "sections": [
-    {"heading": "Section/Topic name", "content": "A concise explanatory paragraph", "keyPoints": ["key point", "key point", ...], "examLikelihood": "high|medium|low", "examWeight": <integer 0-100 = estimated % of the exam this topic is worth>},
+    {"heading": "Section/Topic name", "content": "An explanation with the depth this topic needs", "keyPoints": ["key point", "key point", ...], "examLikelihood": "high|medium|low", "examWeight": <integer 0-100 = estimated % of the exam this topic is worth>},
     ...
   ],
   "keyTerms": [

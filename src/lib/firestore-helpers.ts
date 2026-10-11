@@ -166,6 +166,9 @@ export interface HistoricalExam {
     gradingBlueprint: string;
     patterns: string[];
     totalQuestions: number;
+    analysisVersion?: number;
+    paperCount?: number;
+    collectionQuestionCount?: number;
   };
   order?: number;
   uploadedAt: number;

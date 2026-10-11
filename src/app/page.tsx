@@ -149,7 +149,7 @@ export default function Home() {
                 num: "03",
                 icon: "📝",
                 title: t("Practice Exams"),
-                desc: t("Generate full Quiz, Midterm, or Final practice papers that match the format of your real past exams. Download the PDF, solve it yourself, then reveal the model answer key in red."),
+                desc: t("Generate Quiz, Midterm, or Final practice papers predicted from all your selected past exams. Download the PDF, solve it yourself, then reveal the model answer key in red."),
               },
               {
                 num: "04",

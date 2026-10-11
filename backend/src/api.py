@@ -33,6 +33,7 @@ try:
     from src.auth import require_uid, require_recent_uid, assert_owner, owned_only
     from src.database.firebase_client import FirebaseClient, DataConflict, DataSizeConflict
     from src.agents.exam_generator import ExamGeneratorAgent
+    from src.agents.summary_generator import SummaryGeneratorAgent
 except ImportError as e:
     print("❌ Critical Project Dependencies or Internal Modules Missing!")
     print(f"Error Details: {e}")
@@ -48,6 +49,8 @@ logger = logging.getLogger("MudarisAPI")
 from src.utils.storage_paths import UPLOADS_ROOT, build_storage_path, resolve_storage_path
 from src.utils.ai_contracts import align_printed_marks, validate_exam_contract
 from src.utils.text_normalization import context_coverage
+from src.utils.exam_blueprint import build_exam_blueprint
+from src.utils.topic_scope import retag_topic_weights
 from src.utils.media_safety import FFMPEG_INPUT_OPTIONS
 from starlette.concurrency import run_in_threadpool
 
@@ -61,6 +64,32 @@ def _require_course(course_id: str, uid: str, allow_deleting: bool = False) -> d
     if not allow_deleting:
         db_client._assert_write_allowed(uid, course_id)
     return course
+
+
+def _load_document_foundation(course_id: str, uid: str) -> dict:
+    from src.utils.course_foundation import build_foundation_status
+    course = _require_course(course_id, uid)
+    documents = [row for row in owned_only(db_client.get_course_documents(course_id, user_id=uid), uid)
+                 if row.get('courseId') == course_id]
+    confirmation = db_client.get_document_foundation(uid, course_id)
+    confirmed_revision = confirmation.get('revision', '') if isinstance(confirmation, dict) else ''
+    status = build_foundation_status(documents, confirmed_revision)
+    return {**status, 'documents': documents, 'course': course,
+            'document_insights': [{**row.get('analysis', {}), 'documentTitle': row.get('title', '')}
+                                  for row in documents if isinstance(row.get('analysis'), dict)]}
+
+
+def _require_document_foundation(course_id: str, uid: str, expected_revision: str = None) -> dict:
+    foundation = _load_document_foundation(course_id, uid)
+    if not foundation['ready']:
+        raise HTTPException(status_code=409, detail=foundation['message'])
+    if expected_revision is not None and foundation['revision'] != expected_revision:
+        raise HTTPException(status_code=409, detail='Lecture documents changed during processing. Confirm all documents again and retry.')
+    return foundation
+
+
+def _public_foundation(foundation: dict) -> dict:
+    return {key: value for key, value in foundation.items() if key not in ('documents', 'course', 'document_insights')}
 
 
 def _require_lecture(lecture_id: str, course_id: str, uid: str) -> None:
@@ -113,7 +142,9 @@ def _source_summary(intelligence: dict) -> dict:
     }
 
 
-def _require_sources(intelligence: dict, supplemental_text: str = "") -> None:
+def _require_sources(intelligence: dict, supplemental_text: str = "", require_documents: bool = False) -> None:
+    if require_documents and not intelligence.get('document_analyses'):
+        raise HTTPException(status_code=422, detail='Select at least one analyzed lecture document for the study scope.')
     groups = ("document_analyses", "audio_insights", "historical_analyses", "tutorial_analyses",
               "document_texts", "historical_texts", "tutorial_texts")
     if not supplemental_text.strip() and not any(intelligence.get(key) for key in groups):
@@ -206,6 +237,27 @@ async def _unhandled_exception_handler(request, exc):
 # تهيئة عملاء الاتصال بقاعدة البيانات والذكاء الاصطناعي - نقوم هنا بتمرير كائن الإعدادات المورد من الـ Canvas
 db_client = FirebaseClient(settings)
 ai_agent = ExamGeneratorAgent()
+summary_agent = SummaryGeneratorAgent()
+
+
+@app.get('/api/courses/{course_id}/foundation')
+def get_course_foundation(course_id: str, uid: str = Depends(require_uid)):
+    return _public_foundation(_load_document_foundation(course_id, uid))
+
+
+class FoundationConfirmRequest(BaseModel):
+    revision: str = Field(min_length=1, max_length=128)
+
+
+@app.post('/api/courses/{course_id}/foundation/confirm')
+def confirm_course_foundation(course_id: str, payload: FoundationConfirmRequest, uid: str = Depends(require_uid)):
+    foundation = _load_document_foundation(course_id, uid)
+    if foundation['state'] not in ('confirmation_required', 'ready') or foundation['revision'] != payload.revision:
+        raise HTTPException(status_code=409, detail='Upload all lecture documents and finish their analysis before confirming. Refresh and retry if the documents changed.')
+    if db_client.confirm_document_foundation(uid, course_id, payload.revision) is False:
+        raise HTTPException(status_code=404, detail='Course not found')
+    confirmed = _require_document_foundation(course_id, uid, payload.revision)
+    return _public_foundation(confirmed)
 
 # تعريف هيكلية البيانات المتوقعة من صفحة الـ HTML عند إرسال الإجابات
 @app.get("/")
@@ -605,6 +657,62 @@ def serve_uploaded_file(path: str, uid: str = Depends(require_uid)):
 from src.agents.historical_exam_analyzer import HistoricalExamAnalyzer
 hist_analyzer = HistoricalExamAnalyzer()
 
+
+def _ensure_historical_paper_analysis(course_id: str, uid: str, selected_ids: list, document_insights: list,
+                                     foundation_revision: str = None) -> bool:
+    """Upgrade selected legacy files from their saved originals before predicting.
+
+    A flat legacy question count could describe a merged collection. It is never
+    silently used as one paper's format. Successful rescans are cached; failures
+    retain the old source and remain retryable.
+    """
+    if not selected_ids:
+        return False
+    from src.utils.ai_contracts import validate_analysis
+    from src.utils.pdf_extract import image_to_image_uri
+    rows = {row['id']: row for row in owned_only(db_client.get_course_historical_exams(course_id, user_id=uid), uid)
+            if row.get('courseId') == course_id}
+    changed = False
+    for source_id in dict.fromkeys(selected_ids):
+        row = assert_owner(rows.get(source_id), uid, 'Past exam')
+        analysis = row.get('analysis') or {}
+        if analysis.get('analysisVersion') == 2:
+            try:
+                validate_analysis('historical', analysis)
+                continue
+            except ValueError:
+                pass
+        if not row.get('storagePath'):
+            raise HTTPException(status_code=422, detail='A selected past exam needs its original file to identify individual papers. Re-upload that file before generating.')
+        _require_record_storage(row, uid, 'historical_exams')
+        course = _require_course(course_id, uid)
+        try:
+            path = db_client.download_file_from_storage(row['storagePath'], uid)
+            if path.stat().st_size > 100 * 1024 * 1024:
+                raise ValueError('Past-exam source exceeds the size limit')
+            file_bytes = path.read_bytes()
+            if row['storagePath'].lower().endswith('.pdf'):
+                analysis = hist_analyzer.analyze_pdf(file_bytes, course.get('title', course_id), document_insights=document_insights)
+            else:
+                analysis = hist_analyzer.analyze_exam('', course.get('title', course_id),
+                    image_uris=[image_to_image_uri(file_bytes)], document_insights=document_insights)
+            validate_analysis('historical', analysis)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=422, detail='A selected past-exam original is unavailable. Re-upload it to predict from its individual papers.') from exc
+        except (ValueError, RuntimeError) as exc:
+            logger.warning('Historical paper rescan failed: %s', type(exc).__name__)
+            raise HTTPException(status_code=422, detail='Individual papers could not be identified reliably. Retry, or upload the papers separately.') from exc
+        _require_course(course_id, uid)
+        if foundation_revision is not None:
+            _require_document_foundation(course_id, uid, foundation_revision)
+        latest = assert_owner(db_client.get_historical_exam(source_id), uid, 'Past exam')
+        if latest.get('courseId') != course_id or latest.get('storagePath') != row.get('storagePath'):
+            raise HTTPException(status_code=409, detail='A selected past exam changed during analysis. Select the sources again and retry.')
+        db_client.update_historical_exam(source_id, {'analysis': analysis, 'processedAt': int(_time.time() * 1000),
+                                                    'foundationRevision': foundation_revision})
+        changed = True
+    return changed
+
 @app.post("/api/historical-exams/upload")
 async def upload_historical_exam(
     file: UploadFile = File(...),
@@ -612,7 +720,8 @@ async def upload_historical_exam(
     course_id: str = Form(...),
     title: str = Form(""), uid: str = Depends(require_uid),):
     user_id = uid  # the token decides the owner, not the form field
-    course = _require_course(course_id, uid)
+    foundation = _require_document_foundation(course_id, uid)
+    course = foundation['course']
     import time as _time
 
     content_type = file.content_type or ""
@@ -650,10 +759,8 @@ async def upload_historical_exam(
 
         if is_pdf:
             extracted_text = await run_in_threadpool(hist_analyzer.extract_exam_text, file_bytes)
-            # Render the exam pages to images so the analyzer (vision model) can
-            # read equations, diagrams, figures, and code — not just the text.
-            from src.utils.pdf_extract import pdf_to_image_uris
-            page_images = await run_in_threadpool(pdf_to_image_uris, file_bytes)
+            # Paper detection and contiguous image rendering happen in analyze_pdf.
+            page_images = []  # analyze_pdf inspects contiguous pages, not a sparse global sample
         else:
             # A photo / image of the exam: there's no embedded text, so the
             # vision model reads the page straight from the (normalized) image.
@@ -663,19 +770,23 @@ async def upload_historical_exam(
 
         # Pass the course's CURRENT lecture-document analyses so the analyzer can
         # tag each past-exam topic as in/out of the course as it is taught now.
-        course_intel = db_client.get_course_intelligence(course_id, user_id=user_id)
-        document_insights = course_intel.get("document_analyses", [])
+        _require_document_foundation(course_id, uid, foundation['revision'])
+        document_insights = foundation['document_insights']
 
         db_client.update_historical_exam(exam_id, {"extractedText": extracted_text})
-        analysis = await run_in_threadpool(hist_analyzer.analyze_exam,
-            extracted_text, course_title, image_uris=page_images,
-            document_insights=document_insights,
-        )
+        if is_pdf:
+            analysis = await run_in_threadpool(hist_analyzer.analyze_pdf,
+                file_bytes, course_title, document_insights=document_insights)
+        else:
+            analysis = await run_in_threadpool(hist_analyzer.analyze_exam,
+                extracted_text, course_title, image_uris=page_images,
+                document_insights=document_insights)
 
-        _require_course(course_id, uid)
+        _require_document_foundation(course_id, uid, foundation['revision'])
         db_client.update_historical_exam(exam_id, {
             "extractedText": extracted_text,
             "analysis": analysis,
+            "foundationRevision": foundation['revision'],
             "status": "completed",
             "processedAt": int(_time.time() * 1000),
         })
@@ -692,6 +803,9 @@ async def upload_historical_exam(
         db_client.update_historical_exam(exam_id, {"status": "failed", "errorMessage": "This file is too large to save safely. Split it into smaller parts."})
         raise HTTPException(status_code=413, detail="This file is too large to save safely. Split it into smaller parts.") from exc
     except DataConflict:
+        raise
+    except HTTPException as exc:
+        db_client.update_historical_exam(exam_id, {'status': 'failed', 'errorMessage': str(exc.detail)})
         raise
     except Exception as e:
         logger.error(f"Historical exam analysis failed: {e}")
@@ -723,7 +837,8 @@ async def upload_tutorial(
     TOPICS and worked-problem IDEAS only — it never contributes grading weight
     or exam format (those come from past exams). Reuses the document analyzer."""
     user_id = uid  # the token decides the owner, not the form field
-    course = _require_course(course_id, uid)
+    foundation = _require_document_foundation(course_id, uid)
+    course = foundation['course']
     import time as _time
 
     content_type = file.content_type or ""
@@ -773,12 +888,15 @@ async def upload_tutorial(
 
         course_title = course.get("title", course_id)
 
-        analysis = await run_in_threadpool(doc_processor.analyze_tutorial, extracted_text, course_title, image_uris=page_images)
-        _require_course(course_id, uid)
+        _require_document_foundation(course_id, uid, foundation['revision'])
+        analysis = await run_in_threadpool(doc_processor.analyze_tutorial, extracted_text, course_title,
+            image_uris=page_images, document_insights=foundation['document_insights'])
+        _require_document_foundation(course_id, uid, foundation['revision'])
 
         db_client.update_tutorial(tut_id, {
             "extractedText": extracted_text,
             "analysis": analysis,
+            "foundationRevision": foundation['revision'],
             "status": "completed",
             "processedAt": int(_time.time() * 1000),
         })
@@ -791,7 +909,8 @@ async def upload_tutorial(
             "analysis": analysis,
         }
 
-    except HTTPException:
+    except HTTPException as exc:
+        db_client.update_tutorial(tut_id, {'status': 'failed', 'errorMessage': str(exc.detail)})
         raise
     except DataSizeConflict as exc:
         db_client.update_tutorial(tut_id, {"status": "failed", "errorMessage": "This file is too large to save safely. Split it into smaller parts."})
@@ -933,6 +1052,13 @@ def _run_audio_pipeline(rec_id, course_id, *, file_bytes=None, audio_ext=None,
     owner = record.get("userId") if record else None
     if not owner or not db_client.audio_job_exists(owner, rec_id):
         return False
+    try:
+        foundation = _require_document_foundation(course_id, owner, record.get('foundationRevision'))
+    except HTTPException:
+        if db_client.audio_job_exists(owner, rec_id):
+            db_client.update_audio_recording(rec_id, {'status': 'failed',
+                'errorMessage': 'Upload and confirm all lecture documents, then retry this recording.'})
+        return False
 
     def checkpoint(data):
         if not db_client.audio_job_exists(owner, rec_id):
@@ -943,6 +1069,7 @@ def _run_audio_pipeline(rec_id, course_id, *, file_bytes=None, audio_ext=None,
         return False
     workdir = None
     try:
+        _require_document_foundation(course_id, owner, foundation['revision'])
         workdir = tempfile.mkdtemp(prefix="mudaris-audio-")
         transcript = record.get("transcript", "")
         if not transcript:
@@ -972,8 +1099,12 @@ def _run_audio_pipeline(rec_id, course_id, *, file_bytes=None, audio_ext=None,
         else:
             checkpoint({"status": "analyzing"})
         text = _frame_notes(transcript) if record.get("sourceType") == "notes" else transcript
-        insights = audio_agent.analyze_transcript(text, _resolve_course_title(course_id, owner))
+        _require_document_foundation(course_id, owner, foundation['revision'])
+        insights = audio_agent.analyze_transcript(text, foundation['course'].get('title', course_id),
+                                                document_insights=foundation['document_insights'])
+        _require_document_foundation(course_id, owner, foundation['revision'])
         checkpoint({"transcript": transcript, "insights": insights, "status": "completed",
+                    "foundationRevision": foundation['revision'],
                     "errorMessage": "", "processedAt": int(_time.time() * 1000)})
         return True
     except FileNotFoundError:
@@ -1031,7 +1162,7 @@ async def upload_audio(
     #       uploader so it can analyze one recording at a time, like documents).
     background: str = Form("1"), uid: str = Depends(require_uid),):
     user_id = uid  # the token decides the owner, not the form field
-    _require_course(course_id, uid)
+    foundation = _require_document_foundation(course_id, uid)
     _require_lecture(lecture_id, course_id, uid)
     import time as _time
 
@@ -1054,6 +1185,7 @@ async def upload_audio(
         "storagePath": storage_path,
         "fileSize": file_size,
         "sourceType": "upload",
+        "foundationRevision": foundation['revision'],
         "audioExt": audio_ext,
         "hadTitle": bool(title.strip()),
         "status": "queued",
@@ -1100,7 +1232,7 @@ def upload_audio_from_url(payload: AudioUrlRequest, uid: str = Depends(require_u
     analyze. Runs in the background by default, or synchronously when the caller
     wants to process several URLs one at a time."""
     payload.user_id = uid  # ignore any client-supplied owner
-    _require_course(payload.course_id, uid)
+    foundation = _require_document_foundation(payload.course_id, uid)
     _require_lecture(payload.lecture_id, payload.course_id, uid)
     import time as _time
 
@@ -1117,6 +1249,7 @@ def upload_audio_from_url(payload: AudioUrlRequest, uid: str = Depends(require_u
         "storagePath": "",
         "sourceUrl": url,
         "sourceType": "url",
+        "foundationRevision": foundation['revision'],
         "hadTitle": bool(payload.title.strip()),
         "fileSize": 0,
         "status": "queued",
@@ -1166,7 +1299,7 @@ def upload_lecture_notes(payload: LectureNotesRequest, uid: str = Depends(requir
     transcription step — and the insights are saved exactly like a recording's,
     so exam generation, the intelligence view, and the tutor all use them."""
     payload.user_id = uid  # ignore any client-supplied owner
-    _require_course(payload.course_id, uid)
+    foundation = _require_document_foundation(payload.course_id, uid)
     _require_lecture(payload.lecture_id, payload.course_id, uid)
     import time as _time
 
@@ -1183,6 +1316,7 @@ def upload_lecture_notes(payload: LectureNotesRequest, uid: str = Depends(requir
         "fileUrl": "",
         "storagePath": "",
         "sourceType": "notes",
+        "foundationRevision": foundation['revision'],
         "fileSize": len(notes.encode("utf-8")),
         "status": "analyzing",
         # Store what the student typed BEFORE calling the AI. Unlike a recording
@@ -1202,13 +1336,17 @@ def upload_lecture_notes(payload: LectureNotesRequest, uid: str = Depends(requir
     # the midterm" should be treated as high-confidence exam signals.
     framed = _frame_notes(notes)
     try:
-        insights = audio_agent.analyze_transcript(framed, _resolve_course_title(payload.course_id, uid))
-        _require_course(payload.course_id, uid)
+        insights = audio_agent.analyze_transcript(framed, foundation['course'].get('title', payload.course_id),
+                                                document_insights=foundation['document_insights'])
+        _require_document_foundation(payload.course_id, uid, foundation['revision'])
         db_client.update_audio_recording(rec_id, {
             "insights": insights,
             "status": "completed",
             "processedAt": int(_time.time() * 1000),
         })
+    except HTTPException as exc:
+        db_client.update_audio_recording(rec_id, {'status': 'failed', 'errorMessage': str(exc.detail)})
+        raise
     except Exception as e:
         # The typed notes stay on the record (saved above), so nothing the
         # student wrote is lost — the entry can be re-analyzed instead.
@@ -1242,6 +1380,8 @@ def reanalyze_audio_recording(rec_id: str, uid: str = Depends(require_uid)):
     rec = db_client.get_audio_recording(rec_id)
     if not rec:
         raise HTTPException(status_code=404, detail="Recording not found")
+    foundation = _require_document_foundation(rec.get('courseId', ''), uid)
+    db_client.update_audio_recording(rec_id, {'foundationRevision': foundation['revision']})
 
     transcript = (rec.get("transcript") or "").strip()
     if len(transcript) < 20:
@@ -1265,18 +1405,23 @@ def reanalyze_audio_recording(rec_id: str, uid: str = Depends(require_uid)):
 
     try:
         insights = audio_agent.analyze_transcript(
-            text, _resolve_course_title(rec.get("courseId", ""), uid)
+            text, foundation['course'].get('title', rec.get('courseId', '')),
+            document_insights=foundation['document_insights']
         )
         assert_owner(db_client.get_audio_recording(rec_id), uid, "Recording")
-        _require_course(rec.get("courseId", ""), uid)
+        _require_document_foundation(rec.get('courseId', ''), uid, foundation['revision'])
         db_client.update_audio_recording(rec_id, {
             "insights": insights,
+            "foundationRevision": foundation['revision'],
             "status": "completed",
             "errorMessage": "",
             "processedAt": int(_time.time() * 1000),
         })
         logger.info(f"Audio/notes record {rec_id} re-analyzed successfully.")
         return {"status": "success", "recording_id": rec_id, "insights": insights}
+    except HTTPException as exc:
+        db_client.update_audio_recording(rec_id, {'status': 'failed', 'errorMessage': str(exc.detail)})
+        raise
     except Exception as e:
         logger.error(f"Re-analysis failed for {rec_id}: {e}")
         db_client.update_audio_recording(rec_id, {"status": "failed", "errorMessage": "Processing failed. Your saved material is available to retry."})
@@ -1441,7 +1586,7 @@ def _make_compilable_answer_key(exam: dict) -> str:
 @app.post("/api/exams/generate-enhanced")
 def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: str = Depends(require_uid)):
     payload.user_id = uid  # ignore any client-supplied owner
-    _require_course(payload.course_id, uid)
+    foundation = _require_document_foundation(payload.course_id, uid)
     import uuid
     import base64
     import time as _time
@@ -1458,7 +1603,23 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
         user_id=payload.user_id,
     )
 
-    _require_sources(intelligence, payload.transcripts)
+    _require_sources(intelligence, payload.transcripts, require_documents=True)
+
+    selected_past_ids = set(intelligence.get('source_ids', {}).get('historical_exam_ids', []))
+    if _ensure_historical_paper_analysis(payload.course_id, uid,
+            sorted(selected_past_ids),
+            foundation['document_insights'], foundation['revision']):
+        intelligence = db_client.get_course_intelligence(payload.course_id,
+            document_ids=payload.document_ids, historical_exam_ids=payload.historical_exam_ids,
+            tutorial_ids=payload.tutorial_ids, audio_ids=payload.audio_ids, user_id=uid)
+        refreshed_past_ids = set(intelligence.get('source_ids', {}).get('historical_exam_ids', []))
+        if not selected_past_ids.issubset(refreshed_past_ids):
+            raise HTTPException(status_code=409, detail='A selected past exam is no longer available. Select the sources again and retry.')
+        _require_sources(intelligence, payload.transcripts, require_documents=True)
+    historical = retag_topic_weights(intelligence.get('historical_analyses', []), intelligence.get('document_analyses', []))
+    exam_blueprint = build_exam_blueprint(historical, payload.total_marks, payload.exam_type)
+    if historical and not exam_blueprint:
+        raise HTTPException(status_code=422, detail='The selected past papers do not have enough reliable structure to predict an exam. Re-analyze or re-upload them.')
 
     # Brand the exam header as "Mudaris University of {the student's major}".
     try:
@@ -1491,6 +1652,7 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
         tutorial_texts=intelligence.get("tutorial_texts", []),
         total_marks=payload.total_marks,
         exam_type=payload.exam_type,
+        exam_blueprint=exam_blueprint,
     )
 
     extraction = ai_agent.extract_and_save_exam_metadata(
@@ -1508,16 +1670,16 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
 
     # Normalize per-question marks so the exam totals EXACTLY the requested marks
     try:
-        validate_exam_contract(cleaned_tex, rubrics, intelligence.get("historical_analyses", []))
+        validate_exam_contract(cleaned_tex, rubrics, blueprint=exam_blueprint)
         _normalize_marks(rubrics, payload.total_marks)
         cleaned_tex = align_printed_marks(cleaned_tex, rubrics)
-        validate_exam_contract(cleaned_tex, rubrics, intelligence.get("historical_analyses", []), payload.total_marks)
+        validate_exam_contract(cleaned_tex, rubrics, total_marks=payload.total_marks, blueprint=exam_blueprint)
         from src.utils.compile_pdf import validate_tex_source
         validate_tex_source(cleaned_tex)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
-    _require_course(payload.course_id, uid)
+    _require_document_foundation(payload.course_id, uid, foundation['revision'])
 
     questions_rubrics = rubrics.get("questions", {})
     question_structure = []
@@ -1545,7 +1707,7 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
             logger.warning(f"Exam {exam_id} failed first compile; attempting LaTeX repair.")
             repaired = ai_agent.repair_latex(cleaned_tex)
             if repaired and repaired.strip() != cleaned_tex.strip():
-                validate_exam_contract(repaired, rubrics, intelligence.get("historical_analyses", []), payload.total_marks)
+                validate_exam_contract(repaired, rubrics, total_marks=payload.total_marks, blueprint=exam_blueprint)
                 pdf_base64 = _try_compile(repaired)
                 if pdf_base64 is not None:
                     cleaned_tex = repaired
@@ -1553,7 +1715,7 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
     except Exception as e:
         logger.warning(f"PDF compilation skipped: {e}")
 
-    _require_course(payload.course_id, uid)
+    _require_document_foundation(payload.course_id, uid, foundation['revision'])
     db_client.save_secret_rubrics(payload.user_id, payload.course_id, exam_id, rubrics)
     doc_db_id = db_client.save_exam_flat(payload.user_id, payload.course_id, {
         "examId": exam_id,
@@ -1562,6 +1724,8 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
         "rubrics": rubrics,
         "totalMarks": payload.total_marks,
         "examType": payload.exam_type,
+        "examBlueprint": exam_blueprint,
+        "foundationRevision": foundation['revision'],
         "status": "generated",
         "pdfStatus": "ready" if pdf_base64 else "retry_required",
         "sourceSummary": _source_summary(intelligence),
@@ -1584,6 +1748,7 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
         "has_pdf": pdf_base64 is not None,
         "question_structure": question_structure,
         "intelligence_used": intelligence.get("counts", {}),
+        "exam_blueprint": exam_blueprint,
     }
 
 
@@ -1618,11 +1783,18 @@ def get_exam_detail(doc_id: str, uid: str = Depends(require_uid)):
     # Auto-rescue: older exams may have an empty questionStructure (rubrics were
     # truncated at generation time). Derive them from the stored LaTeX once.
     if not exam.get("questionStructure") and exam.get("texContent"):
+        try:
+            foundation = _require_document_foundation(exam.get('courseId', ''), uid)
+        except (HTTPException, DataConflict):
+            # Reading a saved artifact does not require invoking its AI rescue.
+            return {'status': 'success', 'exam': {key: value for key, value in exam.items()
+                                                 if key not in ('rubrics', 'pdfBase64')}}
         derived = ai_agent.generate_rubrics_from_tex(
             exam["texContent"], exam.get("examId", doc_id)
         )
         q = derived.get("questions", {}) if derived else {}
         if q:
+            _require_document_foundation(exam.get('courseId', ''), uid, foundation['revision'])
             structure = [
                 {"id": qid, "type": qd.get("question_type", "written")}
                 for qid, qd in sorted(q.items())
@@ -1655,10 +1827,12 @@ def get_exam_pdf(doc_id: str, uid: str = Depends(require_uid)):
     try:
         path = compile_temp_pdf(tex, exam_name)
         if not path:
+            foundation = _require_document_foundation(exam.get('courseId', ''), uid)
             repaired = ai_agent.repair_latex(tex)
+            _require_document_foundation(exam.get('courseId', ''), uid, foundation['revision'])
             if repaired and repaired.strip() != tex.strip():
                 if exam_question_numbers(tex):
-                    validate_exam_contract(repaired, exam.get("rubrics", {}), total_marks=exam.get("totalMarks"))
+                    validate_exam_contract(repaired, exam.get("rubrics", {}), total_marks=exam.get("totalMarks"), blueprint=exam.get('examBlueprint'))
                 path = compile_temp_pdf(repaired, exam_name)
                 if path:
                     assert_owner(db_client.get_exam(doc_id), uid, "Exam")
@@ -1698,7 +1872,9 @@ def get_exam_answer_key_pdf(doc_id: str, uid: str = Depends(require_uid)):
         if not path:
             if not exam.get("texContent"):
                 raise HTTPException(status_code=404, detail="No exam content to build answers from.")
+            foundation = _require_document_foundation(exam.get('courseId', ''), uid)
             answer_tex = _make_compilable_answer_key(exam)
+            _require_document_foundation(exam.get('courseId', ''), uid, foundation['revision'])
             path = _compile_answer_tex(answer_tex, exam_name)
             if path:
                 assert_owner(db_client.get_exam(doc_id), uid, "Exam")
@@ -1787,7 +1963,7 @@ class FlashcardGenerateRequest(SourceSelectionRequest):
 @app.post("/api/flashcards/generate")
 def generate_flashcards_endpoint(payload: FlashcardGenerateRequest, uid: str = Depends(require_uid)):
     payload.user_id = uid  # ignore any client-supplied owner
-    _require_course(payload.course_id, uid)
+    foundation = _require_document_foundation(payload.course_id, uid)
     import uuid
     import time as _time
 
@@ -1803,7 +1979,7 @@ def generate_flashcards_endpoint(payload: FlashcardGenerateRequest, uid: str = D
         user_id=payload.user_id,
     )
 
-    _require_sources(intelligence)
+    _require_sources(intelligence, require_documents=True)
 
     cards = ai_agent.generate_flashcards(
         academic_data={},
@@ -1822,11 +1998,12 @@ def generate_flashcards_endpoint(payload: FlashcardGenerateRequest, uid: str = D
         raise HTTPException(status_code=422, detail="Could not generate flashcards. Make sure documents are analyzed.")
 
     title = f"{len(cards)} cards · {_time.strftime('%b %d')}"
-    _require_course(payload.course_id, uid)
+    _require_document_foundation(payload.course_id, uid, foundation['revision'])
     doc_db_id = db_client.save_flashcard_set(payload.user_id, payload.course_id, {
         "setId": set_id,
         "title": title,
         "cards": cards,
+        "foundationRevision": foundation['revision'],
         "sourceSummary": _source_summary(intelligence),
         "contextCoverage": context_coverage(intelligence),
         "modelId": settings.OPENROUTER_MODEL,
@@ -2089,7 +2266,7 @@ def _apply_summary_scope(summary: dict, document_analyses: list) -> dict:
 @app.post("/api/summaries/generate")
 def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depends(require_uid)):
     payload.user_id = uid  # ignore any client-supplied owner
-    _require_course(payload.course_id, uid)
+    foundation = _require_document_foundation(payload.course_id, uid)
     import uuid
     import time as _time
 
@@ -2105,9 +2282,9 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depend
         user_id=payload.user_id,
     )
 
-    _require_sources(intelligence)
+    _require_sources(intelligence, require_documents=True)
 
-    summary = ai_agent.generate_summary(
+    summary = summary_agent.generate_summary(
         academic_data={},
         topics=payload.topics,
         document_insights=intelligence.get("document_analyses", []),
@@ -2159,7 +2336,7 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depend
     title = _compose_summary_title(doc_titles, summary.get("title"))
     summary["title"] = title
 
-    _require_course(payload.course_id, uid)
+    _require_document_foundation(payload.course_id, uid, foundation['revision'])
     doc_db_id = db_client.save_summary(payload.user_id, payload.course_id, {
         "summaryId": summary_id,
         "title": title,
@@ -2167,6 +2344,7 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depend
         "sections": summary.get("sections", []),
         "keyTerms": summary.get("keyTerms", []),
         "examFocus": summary.get("examFocus", []),
+        "foundationRevision": foundation['revision'],
         "sourceSummary": _source_summary(intelligence),
         "contextCoverage": context_coverage(intelligence),
         "modelId": settings.OPENROUTER_MODEL,
@@ -2608,7 +2786,7 @@ class TutorChatRequest(BaseModel):
 @app.post("/api/tutor/chat")
 def tutor_chat(payload: TutorChatRequest, uid: str = Depends(require_uid)):
     payload.user_id = uid  # ignore any client-supplied owner
-    _require_course(payload.course_id, uid)
+    foundation = _require_document_foundation(payload.course_id, uid)
     import time as _time
     if not payload.messages:
         raise HTTPException(status_code=400, detail="No messages provided.")
@@ -2635,6 +2813,9 @@ def tutor_chat(payload: TutorChatRequest, uid: str = Depends(require_uid)):
         tutorial_ids=payload.tutorial_ids,
         user_id=payload.user_id,
     )
+    if not resources.get('documents'):
+        resources['documents'] = foundation['documents']
+    resources['course'] = foundation['course']
 
     try:
         reply = tutor_agent.reply(resources, payload.messages)
@@ -2647,13 +2828,14 @@ def tutor_chat(payload: TutorChatRequest, uid: str = Depends(require_uid)):
 
     # Persist the conversation in its own tutor_chats table
     full_messages = list(payload.messages) + [{"role": "assistant", "content": reply}]
-    _require_course(payload.course_id, uid)
+    _require_document_foundation(payload.course_id, uid, foundation['revision'])
     now = int(_time.time() * 1000)
     if payload.chat_id:
         from src.database.firebase_client import DataConflict
         try:
             db_client.append_tutor_messages(uid, payload.course_id, payload.chat_id, saved_messages,
-                                           [payload.messages[-1], {"role": "assistant", "content": reply}], now)
+                                           [payload.messages[-1], {"role": "assistant", "content": reply}], now,
+                                           foundation_revision=foundation['revision'])
         except DataConflict as exc:
             raise HTTPException(status_code=409, detail="This conversation changed. Reopen it before sending again.") from exc
         chat_id = payload.chat_id
@@ -2663,6 +2845,7 @@ def tutor_chat(payload: TutorChatRequest, uid: str = Depends(require_uid)):
         chat_id = db_client.save_tutor_chat(payload.user_id, payload.course_id, {
             "title": title,
             "messages": full_messages,
+            "foundationRevision": foundation['revision'],
             "createdAt": now,
             "updatedAt": now,
         })

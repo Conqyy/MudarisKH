@@ -3,6 +3,34 @@
 // The "Mudaris" persona speaks in the first person ("مدرّس بيشوف… يحلّل…").
 
 export const AR: Record<string, string> = {
+  // ---- Lecture document foundation ----
+  "Lecture document foundation": "أساس مستندات المحاضرات",
+  "Lecture documents first": "مستندات المحاضرات أولًا",
+  "Lecture documents": "مستندات المحاضرات",
+  "Back to course": "ارجع للمادة",
+  "Checking your lecture document foundation…": "جاري التحقق من مستندات محاضراتك…",
+  "Upload all your lecture documents first. Every document needs a successful analysis before you can unlock supporting uploads and study tools.": "ارفع كل مستندات محاضراتك أولًا. لازم يكتمل تحليل كل مستند بنجاح عشان تفتح رفع المواد المساندة وأدوات المذاكرة.",
+  "Lecture documents are still being analyzed. Wait for every document to finish before confirming your uploads.": "مستندات المحاضرات لسه تحت التحليل. انتظر لين يكتمل تحليل كل المستندات قبل تأكيد رفعها.",
+  "Some lecture documents need attention. Retry failed or empty analyses below, or remove documents you no longer need.": "بعض مستندات المحاضرات تحتاج مراجعة. أعد محاولة التحليل الفاشل أو الفارغ من القائمة تحت، أو احذف المستندات اللي ما تحتاجها.",
+  "All current lecture documents are analyzed. Upload any remaining lecture documents, then confirm that you have uploaded them all.": "اكتمل تحليل مستندات المحاضرات الحالية. ارفع أي مستندات باقي، وبعدها أكّد إنك رفعتها كلها.",
+  "Your lecture documents are analyzed and confirmed. Supporting uploads and study tools are unlocked.": "اكتمل تحليل مستندات محاضراتك وتأكيدها. تقدر الحين ترفع المواد المساندة وتستخدم أدوات المذاكرة.",
+  "Could not check your lecture documents. Retry to unlock supporting uploads and study tools safely.": "تعذّر التحقق من مستندات محاضراتك. أعد المحاولة عشان تفتح المواد المساندة وأدوات المذاكرة.",
+  "Could not check your lecture documents. Please retry.": "تعذّر التحقق من مستندات محاضراتك. أعد المحاولة.",
+  "lecture documents analyzed": "مستندات محاضرات تم تحليلها",
+  "pending": "قيد الانتظار",
+  "need attention": "تحتاج مراجعة",
+  "Retry foundation check": "أعد التحقق من المستندات",
+  "Complete and confirm all lecture documents to unlock.": "أكمل تحليل كل مستندات المحاضرات وأكّد رفعها عشان تفتح هذه الأداة.",
+  "Upload every lecture document you intend to study before confirming. Adding, deleting, or reanalyzing a document will require confirmation again.": "ارفع كل مستندات المحاضرات اللي بتذاكرها قبل التأكيد. إضافة أي مستند أو حذفه أو إعادة تحليله تتطلب تأكيدك من جديد.",
+  "I've uploaded all lecture documents": "رفعت كل مستندات المحاضرات",
+  "Analysis needs attention": "التحليل يحتاج مراجعة",
+  "Analysis came back empty": "نتيجة التحليل فارغة",
+  "Upload all lecture documents and finish their analysis before confirming. Refresh and retry if the documents changed.": "ارفع كل مستندات المحاضرات وأكمل تحليلها قبل التأكيد. حدّث الحالة وأعد المحاولة إذا تغيّرت المستندات.",
+  "Lecture documents changed during processing. Confirm all documents again and retry.": "تغيّرت مستندات المحاضرات أثناء المعالجة. أكّد كل المستندات من جديد وأعد المحاولة.",
+  "Upload all lecture documents and let their analysis finish before using study tools.": "ارفع كل مستندات المحاضرات وانتظر لين يكتمل تحليلها قبل استخدام أدوات المذاكرة.",
+  "Some lecture documents failed or have incomplete analysis. Retry or replace them before confirming.": "بعض مستندات المحاضرات فشل تحليلها أو ما اكتمل. أعد المحاولة أو استبدلها قبل التأكيد.",
+  "All lecture documents are analyzed. Confirm that you've uploaded all lecture documents to unlock study tools.": "اكتمل تحليل مستندات المحاضرات. أكّد إنك رفعت كل مستندات المحاضرات عشان تفتح أدوات المذاكرة.",
+  "The lecture document foundation is confirmed. Study tools are ready.": "تم تأكيد مستندات المحاضرات. أدوات المذاكرة جاهزة.",
   // ---- Brand / persona ----
   "Mudaris": "مُدرّس",
   "AI Study Assistant": "مساعدك الذكي للمذاكرة",
@@ -232,6 +260,8 @@ export const AR: Record<string, string> = {
   "topics": "مواضيع",
   "chapters": "فصول",
   "questions": "أسئلة",
+  "papers": "اختبارات",
+  "questions per paper": "أسئلة لكل اختبار",
   "problems": "مسائل",
   "exam hints": "تلميحات اختبار",
 
@@ -355,8 +385,8 @@ export const AR: Record<string, string> = {
   "Structured Summaries": "ملخّصات منظّمة",
   "Your chapters become key concepts, definitions, and formulas — with each section tagged high / medium / low likelihood for the exam, based on your past papers.":
     "فصولك تصير مفاهيم وتعاريف ومعادلات — وكل قسم معلّم باحتمال عالي / متوسط / منخفض للاختبار، حسب اختباراتك السابقة.",
-  "Generate full Quiz, Midterm, or Final practice papers that match the format of your real past exams. Download the PDF, solve it yourself, then reveal the model answer key in red.":
-    "ولّد اختبارات كويز أو نصفي أو نهائي كاملة تطابق صيغة اختباراتك الحقيقية السابقة. نزّل الـPDF، وحلّه بنفسك، وبعدين اكشف نموذج الإجابة بالأحمر.",
+  "Generate Quiz, Midterm, or Final practice papers predicted from all your selected past exams. Download the PDF, solve it yourself, then reveal the model answer key in red.":
+    "ولّد اختبارات كويز أو نصفي أو نهائي بصيغة متوقعة من كل اختباراتك السابقة المختارة. نزّل الـPDF، وحلّه بنفسك، وبعدين اكشف نموذج الإجابة بالأحمر.",
   "Smart Flashcards": "بطاقات ذكية",
   "Cards auto-built from your documents — weighted toward the topics your past exams emphasize, so you study what's actually likely to show up.":
     "بطاقات تُبنى تلقائيًا من مستنداتك — موزونة نحو المواضيع اللي تركّز عليها اختباراتك السابقة، عشان تذاكر اللي فعلاً غالب يجي.",

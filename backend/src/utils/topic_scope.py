@@ -120,6 +120,8 @@ def retag_topic_weights(historical_analyses: list, document_insights: list) -> l
         h2['scopeChecked'] = bool(words)
         h2['scopeStatus'] = 'document_scope' if words else 'no_doc_scope'
         h2['outOfCourseTopics'] = [as_text(w.get('topic')) for w in weights if w['inScope'] is False]
+        if isinstance(h2.get('papers'), list):
+            h2['papers'] = retag_topic_weights(h2['papers'], document_insights)
         out.append(h2)
     return out
 
