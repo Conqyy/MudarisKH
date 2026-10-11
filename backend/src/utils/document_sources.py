@@ -6,6 +6,7 @@ import re
 import pymupdf
 from PIL import Image
 from docx import Document
+from docx.oxml import parse_xml
 from docx.oxml.ns import qn
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
@@ -139,13 +140,23 @@ def _pptx_units(raw):
     return units
 
 
+def _docx_structural_children(container, tags):
+    """Unwrap content controls/insertions without crossing nested boundaries."""
+    boundaries = {qn('w:p'), qn('w:tbl'), qn('w:tr'), qn('w:tc')}
+    for child in container:
+        if child.tag in tags:
+            yield child
+        elif child.tag not in boundaries:
+            yield from _docx_structural_children(child, tags)
+
+
 def _block_text(element):
     # Paragraph boundaries and cell boundaries are retained, including nested tables.
     if element.tag == qn('w:tbl'):
-        return '\n'.join('\t'.join('\n'.join(_block_text(child) for child in cell
-                                            if child.tag in (qn('w:p'), qn('w:tbl')))
-                                   for cell in row if cell.tag == qn('w:tc'))
-                         for row in element if row.tag == qn('w:tr'))
+        return '\n'.join('\t'.join('\n'.join(_block_text(child)
+                                            for child in _docx_structural_children(cell, {qn('w:p'), qn('w:tbl')}))
+                                   for cell in _docx_structural_children(row, {qn('w:tc')}))
+                         for row in _docx_structural_children(element, {qn('w:tr')}))
     if element.tag == qn('w:p'):
         pieces = []
         for node in element.iter():
@@ -172,6 +183,42 @@ def _docx_blocks(container):
                 yield element
 
 
+def _docx_note_stories(element, doc, cache):
+    """Resolve referenced embedded notes in first-reference source order."""
+    stories, warnings = [], []
+    for reference in element.iter():
+        if reference.tag not in (qn('w:footnoteReference'), qn('w:endnoteReference')):
+            continue
+        kind = 'footnote' if reference.tag == qn('w:footnoteReference') else 'endnote'
+        note_id = reference.get(qn('w:id'))
+        if kind not in cache:
+            try:
+                rels = [rel for rel in doc.part.rels.values() if rel.reltype == f'{R_NS}/{kind}s']
+                if len(rels) != 1 or rels[0].is_external:
+                    raise ValueError('Missing embedded note story')
+                part = rels[0].target_part
+                root = parse_xml(part.blob)
+                if root.tag != qn(f'w:{kind}s'):
+                    raise ValueError('Invalid note story')
+                notes = {}
+                for note in root:
+                    if note.tag == qn(f'w:{kind}'):
+                        identity = note.get(qn('w:id'))
+                        if identity in notes:
+                            raise ValueError('Duplicate note identity')
+                        notes[identity] = note
+                cache[kind] = (part, notes)
+            except Exception:
+                cache[kind] = None
+        story = cache[kind]
+        note = story[1].get(note_id) if story else None
+        if note is None or not list(_docx_blocks(note)):
+            warnings.append(f'Unresolved DOCX {kind} reference; convert the original to PDF to preserve content.')
+        else:
+            stories.append((note, story[0], f'{kind.title()} {note_id}'))
+    return stories, warnings
+
+
 def _docx_units(raw):
     doc = Document(BytesIO(raw))
     stories = [(doc.element.body, doc.part, 'Body')]
@@ -185,11 +232,18 @@ def _docx_units(raw):
                 continue
             seen.add(str(story.part.partname))
             stories.append((story._element, story.part, f'Section {section_no} {name.replace("_", " ")}'))
-    units = []
+    units, note_cache, seen_notes = [], {}, set()
     for container, part, story_name in stories:
         for block_no, element in enumerate(_docx_blocks(container), 1):
             position = len(units) + 1
             assets, warnings = _office_assets(element, part, f'b{position:04d}')
+            referenced, note_warnings = _docx_note_stories(element, doc, note_cache)
+            warnings.extend(note_warnings)
+            for note, note_part, note_label in referenced:
+                identity = (str(note_part.partname), note.get(qn('w:id')))
+                if identity not in seen_notes:
+                    seen_notes.add(identity)
+                    stories.append((note, note_part, note_label))
             if element.tag not in (qn('w:p'), qn('w:tbl')):
                 warnings.append('Unsupported DOCX block; convert the original to PDF to preserve content.')
             # Textboxes have their own paragraphs, not physical page coordinates.

@@ -1,6 +1,8 @@
 """Synthetic originals catch lost late units, text, and Office content."""
 import base64
+from copy import deepcopy
 from io import BytesIO
+from zipfile import ZipFile, ZIP_DEFLATED
 from lxml import etree
 
 import fitz
@@ -15,6 +17,7 @@ from pptx.enum.chart import XL_CHART_TYPE
 import pytest
 
 from src.utils import document_sources as sources
+from src.utils.source_contracts import build_source_manifest
 
 
 def png_bytes():
@@ -76,6 +79,149 @@ def docx_bytes():
     out = BytesIO()
     doc.save(out)
     return out.getvalue()
+
+
+def docx_with_note(story_type, missing=False):
+    """Package real note parts and their own embedded image relationship."""
+    doc = Document()
+    paragraph = doc.add_paragraph('MAIN_BODY')
+    run = OxmlElement('w:r')
+    reference = OxmlElement(f'w:{story_type}Reference')
+    reference.set(qn('w:id'), '1')
+    run.append(reference)
+    paragraph._p.append(run)
+    picture = doc.add_picture(BytesIO(png_bytes()))
+    picture_paragraph = picture._inline.getparent().getparent().getparent()
+    image_paragraph = deepcopy(picture_paragraph)
+    picture_paragraph.getparent().remove(picture_paragraph)
+    image_rid = picture._inline.xpath('.//a:blip')[0].get(qn('r:embed'))
+    image_target = doc.part.rels[image_rid].target_ref
+    base = BytesIO()
+    doc.save(base)
+    out = BytesIO()
+    with ZipFile(base) as package, ZipFile(out, 'w', ZIP_DEFLATED) as updated:
+        for entry in package.infolist():
+            data = package.read(entry.filename)
+            if entry.filename == 'word/_rels/document.xml.rels' and not missing:
+                rels = etree.fromstring(data)
+                etree.SubElement(rels, '{http://schemas.openxmlformats.org/package/2006/relationships}Relationship',
+                                 Id='rIdNoteStory', Type=f'{sources.R_NS}/{story_type}s', Target=f'{story_type}s.xml')
+                data = etree.tostring(rels)
+            elif entry.filename == '[Content_Types].xml' and not missing:
+                types = etree.fromstring(data)
+                etree.SubElement(types, '{http://schemas.openxmlformats.org/package/2006/content-types}Override',
+                                 PartName=f'/word/{story_type}s.xml',
+                                 ContentType=f'application/vnd.openxmlformats-officedocument.wordprocessingml.{story_type}s+xml')
+                data = etree.tostring(types)
+            updated.writestr(entry.filename, data)
+        if not missing:
+            root = OxmlElement(f'w:{story_type}s')
+            note = OxmlElement(f'w:{story_type}')
+            note.set(qn('w:id'), '1')
+            paragraph = OxmlElement('w:p')
+            run = OxmlElement('w:r')
+            text = OxmlElement('w:t')
+            text.text = f'{story_type.upper()}_FORMULA_SENTINEL x=3'
+            run.append(text)
+            paragraph.append(run)
+            note.append(paragraph)
+            note.append(image_paragraph)
+            root.append(note)
+            unused = OxmlElement(f'w:{story_type}')
+            unused.set(qn('w:id'), '2')
+            unused.append(deepcopy(paragraph))
+            unused[0][0][0].text = 'UNREFERENCED_NOTE'
+            root.append(unused)
+            updated.writestr(f'word/{story_type}s.xml', etree.tostring(root))
+            rels = etree.Element('{http://schemas.openxmlformats.org/package/2006/relationships}Relationships')
+            etree.SubElement(rels, '{http://schemas.openxmlformats.org/package/2006/relationships}Relationship',
+                             Id=image_rid, Type=f'{sources.R_NS}/image', Target=image_target)
+            updated.writestr(f'word/_rels/{story_type}s.xml.rels', etree.tostring(rels))
+    return out.getvalue()
+
+
+@pytest.mark.parametrize('story_type', ['footnote', 'endnote'])
+def test_docx_referenced_note_story_preserves_text_location_and_embedded_image(story_type):
+    raw = docx_with_note(story_type)
+    units = sources.extract_source_units(raw, 'docx')
+    assert [u['unitId'] for u in units] == ['b0001', 'b0002', 'b0003']
+    assert units[1]['text'] == f'{story_type.upper()}_FORMULA_SENTINEL x=3'
+    assert units[1]['label'] == f'{story_type.title()} 1 paragraph 1'
+    assert all('UNREFERENCED_NOTE' not in u['text'] for u in units)
+    pictured = units[2]
+    assert pictured['needsVisualRead'] and not pictured['blank']
+    rendered = sources.render_source_unit(raw, 'docx', pictured['unitId'])
+    image = Image.open(BytesIO(base64.b64decode(rendered[0].split(',', 1)[1])))
+    assert image.size == (30, 20) and image.getpixel((0, 0)) == (255, 0, 0)
+    source = build_source_manifest('note-source', 'a' * 64, 'docx', units)
+    assert source['coverage']['unresolvedUnitIds'] == ['b0003']
+
+
+@pytest.mark.parametrize('story_type', ['footnote', 'endnote'])
+def test_docx_missing_referenced_note_remains_unresolved(story_type):
+    units = sources.extract_source_units(docx_with_note(story_type, missing=True), 'docx')
+    assert units[0]['text'] == 'MAIN_BODY'
+    assert units[0]['visualReadStatus'] == 'unsupported'
+    assert 'PDF' in ' '.join(units[0]['warnings'])
+    assert build_source_manifest('note-source', 'a' * 64, 'docx', units)['coverage']['complete'] is False
+
+
+def wrap_docx_element(element, wrapper_type):
+    parent = element.getparent()
+    position = parent.index(element)
+    wrapper = OxmlElement(f'w:{wrapper_type}')
+    content = OxmlElement('w:sdtContent') if wrapper_type == 'sdt' else wrapper
+    if content is not wrapper:
+        wrapper.append(content)
+    content.append(element)
+    parent.insert(position, wrapper)
+
+
+@pytest.mark.parametrize('wrapper_type', ['sdt', 'ins'])
+@pytest.mark.parametrize('wrapped_level', ['paragraph', 'row', 'cell', 'nested_table'])
+def test_docx_table_wrappers_preserve_cell_row_and_nested_table_order(wrapper_type, wrapped_level):
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    first_cell = table.cell(0, 0)
+    first_cell.text = 'CELL_CONTROL_SENTINEL x=3'
+    table.cell(0, 1).text = 'SECOND_CELL'
+    table.cell(1, 0).text = 'NEXT_ROW_LEFT'
+    table.cell(1, 1).text = 'NEXT_ROW_RIGHT'
+    expected = 'CELL_CONTROL_SENTINEL x=3\tSECOND_CELL\nNEXT_ROW_LEFT\tNEXT_ROW_RIGHT'
+    if wrapped_level == 'nested_table':
+        nested = first_cell.add_table(rows=1, cols=2)
+        nested.cell(0, 0).text = 'NESTED_LEFT'
+        nested.cell(0, 1).text = 'NESTED_RIGHT'
+        first_cell._tc.remove(first_cell.paragraphs[-1]._p)
+        first_cell.add_paragraph('AFTER_NESTED')
+        target = nested._tbl
+        expected = 'CELL_CONTROL_SENTINEL x=3\nNESTED_LEFT\tNESTED_RIGHT\nAFTER_NESTED\tSECOND_CELL\nNEXT_ROW_LEFT\tNEXT_ROW_RIGHT'
+    elif wrapped_level == 'row':
+        target = table.rows[0]._tr
+    elif wrapped_level == 'cell':
+        target = first_cell._tc
+    else:
+        target = first_cell.paragraphs[0]._p
+    wrap_docx_element(target, wrapper_type)
+    out = BytesIO()
+    doc.save(out)
+    units = sources.extract_source_units(out.getvalue(), 'docx')
+    assert len(units) == 1
+    assert units[0]['text'] == expected
+    assert units[0]['blank'] is False
+    assert units[0]['warnings'] == []
+
+
+def test_docx_wrapped_only_table_content_cannot_be_classified_blank():
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = 'TABLE_CONTROL_SENTINEL x=3'
+    wrap_docx_element(table.cell(0, 0).paragraphs[0]._p, 'sdt')
+    out = BytesIO()
+    doc.save(out)
+    unit = sources.extract_source_units(out.getvalue(), 'docx')[0]
+    assert unit['text'] == 'TABLE_CONTROL_SENTINEL x=3'
+    assert not unit['blank']
 
 
 def test_pdf_keeps_all_late_blank_and_visual_pages():
