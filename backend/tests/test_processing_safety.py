@@ -4,6 +4,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from tests.foundation_fixtures import confirm_lecture_foundation
+from tests.test_atomic_data import database, cloud_database
+from tests.test_document_job_storage import job_db
+from tests.test_document_library import library, pdf_bytes
+from tests.test_document_pipeline import Processor, pipeline
 
 
 def test_audio_keeps_transcript_when_analysis_fails(api_module, monkeypatch):
@@ -36,20 +40,26 @@ def test_deleted_audio_job_never_calls_model(api_module, monkeypatch):
     db.update_audio_recording.assert_not_called()
 
 
-def test_reanalysis_recovers_image_only_document(api_module, monkeypatch):
-    db = MagicMock()
-    db.get_document.return_value = {"userId": "owner", "courseId": "course", "fileType": "pdf", "storagePath": "documents/owner/course/scan.pdf", "extractedText": ""}
-    db.get_owned_course.return_value = {"userId": "owner", "title": "Course"}
-    monkeypatch.setattr(api_module, "db_client", db)
-    monkeypatch.setattr("src.utils.pdf_extract.pdf_to_image_uris", lambda data: ["data:image/png;base64,synthetic"])
-    processor = MagicMock()
-    processor.analyze_document.return_value = {"topics": ["Limits"]}
-    monkeypatch.setattr(api_module, "doc_processor", processor)
-    fake_path = MagicMock()
-    fake_path.read_bytes.return_value = b"synthetic PDF"
-    db.download_file_from_storage.return_value = fake_path
-    assert api_module.reanalyze_document("scan", uid="owner")["status"] == "success"
-    assert processor.analyze_document.call_args.kwargs["image_uris"]
+def test_reanalysis_recovers_image_only_document(api_module, monkeypatch, library):
+    import pymupdf
+    with pymupdf.open(stream=pdf_bytes('Limits as a scanned lecture'), filetype='pdf') as source:
+        image = source[0].get_pixmap().tobytes('png')
+    with pymupdf.open() as scan:
+        page = scan.new_page()
+        page.insert_image(page.rect, stream=image)
+        raw = scan.tobytes()
+    db = library.database
+    path = 'documents/u/c/scan.pdf'
+    db.upload_file_to_storage(raw, path, 'u', require_remote=True)
+    doc = db.save_document('u', 'c', {'fileType': 'pdf', 'storagePath': path, 'extractedText': ''})
+    monkeypatch.setattr(api_module, 'db_client', db)
+    monkeypatch.setattr(api_module, '_spawn_document_job', lambda identity: False)
+    processor = Processor()
+    assert api_module.reanalyze_document(doc, uid='u')['status'] == 'accepted'
+    assert db.get_document(doc)['processingJob']['stage'] == 'queued'
+    assert pipeline(library, processor).run(doc)
+    assert processor.visual_calls == 1
+    assert db.get_document(doc)['guideStatus'] == 'completed'
 
 
 def test_audio_runner_bounds_and_recovers(monkeypatch):

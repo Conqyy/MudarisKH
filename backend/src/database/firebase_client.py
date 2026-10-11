@@ -970,7 +970,8 @@ class FirebaseClient:
             prepared = (force_guide and row.get('preparationStatus') == 'completed'
                         and version.get('originalDigest') == source_digest and version.get('coverageComplete') is True)
             row.update({'originalDigest': source_digest, 'processingJob': job, 'status': 'processing',
-                        'preparationStatus': 'completed' if prepared else 'pending', 'guideStatus': 'pending', 'error': None})
+                        'preparationStatus': 'completed' if prepared else 'pending', 'guideStatus': 'pending', 'error': None,
+                        'guideError': None, 'preparationError': None})
             return row, deepcopy(job)
         return self._document_atomic(user_id, course_id, doc_id, start, clear_confirmation=True)
 
@@ -1057,6 +1058,9 @@ class FirebaseClient:
                     raise ValueError('Guide compatibility metadata mismatch')
                 updates.update({'guide': guide, 'guideRevision': digest, 'analysis': analysis})
             row.update(updates)
+            for field in ('preparation', 'guide'):
+                if row.get(field + 'Status') in {'pending', 'processing', 'completed'}:
+                    row[field + 'Error'] = None
             if any(row.get(key) == 'failed' for key in ('status', 'preparationStatus', 'guideStatus')):
                 job_changes['stage'] = 'failed'
             version = row.get('sourceVersions', {}).get(row.get('sourceRevision'), {})
@@ -1077,7 +1081,9 @@ class FirebaseClient:
                 job_changes['stage'] = 'completed'
             if job_changes.get('stage') == 'failed':
                 row['status'] = 'failed'
-                row['guideStatus' if row.get('preparationStatus') == 'completed' else 'preparationStatus'] = 'failed'
+                failed_stage = 'guide' if row.get('preparationStatus') == 'completed' else 'preparation'
+                row[failed_stage + 'Status'] = 'failed'
+                row[failed_stage + 'Error'] = (row.get('error') or 'Processing failed. Retry this document.')[:1000]
             row['processingJob'].update({**job_changes, 'leaseUntil': now_ms + lease_ms})
             return row, True
         try:
@@ -1202,6 +1208,23 @@ class FirebaseClient:
                 return None
         except (ValueError, FileNotFoundError):
             return None
+        previous = deepcopy(current.get('sourceVersions', {}).get(source_revision))
+        restore = False
+        identity_fields = ('originalDigest', 'fileType', 'manifestDigest', 'unitCount', 'coverageComplete')
+        if previous:
+            if any(previous.get(key) != version[key] for key in identity_fields):
+                raise DataConflict('Immutable source revision conflict')
+            # Detect only definite artifact loss/corruption; transport failures
+            # do not authorize replacement. Unknown publication outcomes retain
+            # attempt assets through the library's existing receipt protocol.
+            for key, digest_key in (('manifestPath', 'manifestDigest'), ('originalPath', 'originalDigest')):
+                self.validate_document_storage_path(user_id, course_id, previous[key], doc_id=doc_id)
+                try:
+                    retained_body = self.download_file_from_storage(previous[key], user_id).read_bytes()
+                    if hashlib.sha256(retained_body).hexdigest() != previous[digest_key]:
+                        restore = True
+                except FileNotFoundError:
+                    restore = True
         def publish(row):
             if not self._live_document_claim(row, job_id, claim_token, now_ms):
                 return None, None
@@ -1211,9 +1234,15 @@ class FirebaseClient:
             existing = versions.get(source_revision)
             if existing and any(existing.get(k) != version[k] for k in ('originalDigest', 'fileType', 'manifestDigest', 'unitCount', 'coverageComplete')):
                 raise DataConflict('Immutable source revision conflict')
-            versions.setdefault(source_revision, deepcopy(version))
+            if restore:
+                if existing != previous:
+                    return None, None
+                versions[source_revision] = deepcopy(version)
+            else:
+                versions.setdefault(source_revision, deepcopy(version))
             row.update({'sourceRevision': source_revision, 'sourceManifestPath': versions[source_revision]['manifestPath'],
                         'sourceManifestDigest': versions[source_revision]['manifestDigest'],
+                        'unitCount': version['unitCount'], 'preparationError': None, 'extractedText': '',
                         'preparationStatus': 'completed' if version['coverageComplete'] else 'processing',
                         'pendingArtifactPaths': [p for p in row.get('pendingArtifactPaths', []) if p not in paths]})
             return row, deepcopy(versions[source_revision])

@@ -2,6 +2,7 @@
 from copy import deepcopy
 
 import pytest
+from tests.foundation_fixtures import lecture_document
 
 
 def academic_analysis():
@@ -15,9 +16,7 @@ def academic_analysis():
 
 
 def document(identity='doc-1', **changes):
-    return {'id': identity, 'status': 'completed', 'title': 'Lecture 3',
-            'extractedText': 'Decision trees choose splits by information gain.',
-            'analysis': academic_analysis(), 'processedAt': 1000, **changes}
+    return lecture_document(identity, topic='Decision Trees', **changes)
 
 
 def status(documents, confirmed_revision=''):
@@ -63,17 +62,16 @@ def test_any_incomplete_document_keeps_a_confirmed_course_processing(pending_sta
     assert (result['completedCount'], result['pendingCount'], result['failedCount']) == (1, 1, 0)
 
 
-@pytest.mark.parametrize('bad_analysis', [None, {}, [], {'topics': ['Trees']},
-    {'topics': [], 'definitions': [], 'formulas': [], 'chapterMapping': [], 'keyConceptCount': 0},
-    {'topics': ['!!!'], 'definitions': [], 'formulas': [], 'chapterMapping': [], 'keyConceptCount': 1},
-    {'topics': [123], 'definitions': [], 'formulas': [], 'chapterMapping': [], 'keyConceptCount': 1},
-    {'topics': ['Trees'], 'definitions': [{'term': 'x'}], 'formulas': [], 'chapterMapping': [], 'keyConceptCount': 1},
-])
-def test_completed_but_unusable_analysis_is_a_failed_foundation_document(bad_analysis):
-    result = status([document(), document('doc-2', analysis=bad_analysis)])
+@pytest.mark.parametrize('bad_guide', [None, {}, [], {'concepts': ['Trees']}])
+def test_completed_but_unusable_guide_is_failed(bad_guide):
+    result = status([document(), document('doc-2', guide=bad_guide)])
     assert result['state'] == 'failed'
-    assert result['ready'] is False
     assert (result['completedCount'], result['pendingCount'], result['failedCount']) == (1, 0, 1)
+
+
+def test_legacy_analysis_requires_explicit_preparation():
+    result = status([{'id': 'legacy', 'status': 'completed', 'analysis': academic_analysis()}])
+    assert result['failedStages']['legacy']['stage'] == 'upgrade_required'
 
 
 def test_failure_is_visible_even_when_another_document_is_processing():
@@ -97,19 +95,22 @@ def test_document_and_dictionary_order_do_not_change_the_confirmation_revision()
     assert status([second, reordered], revision)['ready'] is True
 
 
-@pytest.mark.parametrize('field,new_value', [
-    ('id', 'replacement'), ('status', 'processing'), ('title', 'Renamed lecture'),
-    ('extractedText', 'Corrected lecture source'), ('processedAt', 2000),
-    ('reanalyzedAt', 2000), ('updatedAt', 2000),
-    ('analysis', {**academic_analysis(), 'topics': ['Random Forests']}),
-])
-def test_source_or_analysis_changes_invalidate_previous_confirmation(field, new_value):
-    docs = [document()]
-    revision = status(docs)['revision']
-    changed = document(**{field: new_value})
-    result = status([changed], revision)
-    assert result['revision'] != revision
-    assert result['ready'] is False
+@pytest.mark.parametrize('field,new_value', [('id', 'replacement'), ('sourceRevision', 'b'*64),
+    ('guideRevision', 'b'*64), ('originalDigest', 'b'*64), ('processingJob', {'id': 'new'})])
+def test_material_identity_changes_invalidate_previous_confirmation(field, new_value):
+    row = document()
+    revision = status([row])['revision']
+    changed = {**row, field: new_value}
+    assert status([changed], revision)['revision'] != revision
+    assert status([changed], revision)['ready'] is False
+
+
+@pytest.mark.parametrize('changes', [{'processedAt': 2000}, {'updatedAt': 2000}, {'reanalyzedAt': 2000},
+    {'title': 'Renamed'}, {'processingJob': {'id': 'a'*32, 'leaseUntil': 9000, 'cursor': 1, 'claimToken': 'rotated'}}])
+def test_polling_metadata_does_not_change_revision(changes):
+    row = document()
+    revision = status([row])['revision']
+    assert status([{**row, **changes}], revision)['ready'] is True
 
 
 def test_adding_or_deleting_a_document_invalidates_confirmation():
@@ -156,3 +157,8 @@ def test_reference_is_bounded_balanced_and_order_independent():
 def test_empty_reference_does_not_claim_course_evidence_exists():
     assert context([]) == ''
     assert context([None, {}]) == ''
+
+def test_malformed_job_metadata_fails_closed():
+    result = status([document(processingJob='corrupt')])
+    assert result['ready'] is False
+    assert result['failedCount'] == 1

@@ -7,12 +7,7 @@ from src.utils.ai_contracts import validate_analysis
 from src.utils.text_normalization import budget_sources
 
 
-_REVISION_FIELDS = (
-    'id', 'status', 'title', 'documentTitle', 'extractedText', 'analysis',
-    'storagePath', 'fileUrl', 'fileSize', 'fileType', 'uploadedAt',
-    'processedAt', 'updatedAt', 'analyzedAt', 'reanalyzedAt',
-    'analysisUpdatedAt', 'analysisStartedAt', 'reanalysisStartedAt', 'analysisVersion',
-)
+_REVISION_FIELDS = ('id', 'userId', 'courseId', 'originalDigest', 'sourceRevision', 'guideRevision')
 _REFERENCE_FIELDS = (
     'topics', 'definitions', 'formulas', 'chapterMapping',
     'workedExamples', 'diagrams', 'codeSnippets',
@@ -54,52 +49,111 @@ def _usable_analysis(value):
     return analysis
 
 
+def hydrate_document_source(database, document: dict) -> dict:
+    """Validate owned artifacts before giving the pure status builder evidence."""
+    from src.services.document_library import DocumentLibrary
+    result = {**document, '_sourceArtifactsValid': False}
+    result.pop('_sourceManifest', None)
+    if document.get('preparationStatus') != 'completed':
+        return result
+    try:
+        uid, course_id, doc_id = document['userId'], document['courseId'], document['id']
+        library = DocumentLibrary(database)
+        manifest = library.load_manifest(uid, course_id, doc_id)
+        row = database.get_owned_document(uid, course_id, doc_id)
+        if any(row.get(key) != document.get(key) for key in _REVISION_FIELDS):
+            return result
+        if (row.get('processingJob') or {}).get('id') != (document.get('processingJob') or {}).get('id'):
+            return result
+        version = row['sourceVersions'][manifest['sourceRevision']]
+        for path in (row.get('storagePath'), version['originalPath']):
+            database.validate_document_storage_path(uid, course_id, path,
+                                                    **({'doc_id': doc_id} if path == version['originalPath'] else {}))
+            raw = database.download_file_from_storage(path, uid).read_bytes()
+            if hashlib.sha256(raw).hexdigest() != manifest['originalDigest']:
+                return result
+        latest = database.get_owned_document(uid, course_id, doc_id)
+        if any(latest.get(key) != document.get(key) for key in
+               (*_REVISION_FIELDS, 'status', 'preparationStatus', 'guideStatus', 'storagePath')):
+            return result
+        if (latest.get('processingJob') or {}).get('id') != (document.get('processingJob') or {}).get('id'):
+            return result
+        result.update({'_sourceManifest': manifest, '_sourceArtifactsValid': True})
+    except Exception:
+        # Storage/network/corrupt/missing artifacts fail closed without leaking bodies.
+        pass
+    return result
+
+
 def build_foundation_status(documents: list, confirmed_revision: str = '') -> dict:
-    """Require every current document plus confirmation of this exact revision."""
+    """Both validated stages and confirmation of the material retry identity."""
+    from src.utils.source_contracts import validate_manifest, validate_guide, guide_digest
     documents = documents or []
     completed = pending = failed = 0
-    failed_ids = []
-    sources = []
+    failed_ids, failed_stages, sources = [], {}, []
     for document in documents:
         if not isinstance(document, dict):
             failed += 1
             sources.append(_stable_json({'malformedDocument': document}))
             continue
-        sources.append(_stable_json({field: document.get(field) for field in _REVISION_FIELDS}))
-        if document.get('status') == 'failed':
-            failed += 1
-            if isinstance(document.get('id'), str): failed_ids.append(document['id'])
-        elif document.get('status') != 'completed':
+        identity = {field: document.get(field) for field in _REVISION_FIELDS}
+        job = document.get('processingJob')
+        identity['jobId'] = job.get('id') if isinstance(job, dict) else None
+        sources.append(_stable_json(identity))
+        stage, error = None, None
+        if job is not None and not isinstance(job, dict):
+            stage, error = 'preparation', 'Invalid document job metadata. Prepare this document again.'
+        elif not document.get('preparationStatus') or not document.get('guideStatus'):
+            stage, error = 'upgrade_required', 'Prepare the saved original to upgrade this legacy document.'
+        elif document.get('preparationStatus') == 'failed':
+            stage, error = 'preparation', document.get('preparationError')
+        elif document.get('guideStatus') == 'failed':
+            stage, error = 'guide', document.get('guideError')
+        elif document.get('status') == 'failed':
+            stage = 'guide' if document.get('preparationStatus') == 'completed' else 'preparation'
+        elif (document.get('status') != 'completed' or document.get('preparationStatus') != 'completed'
+              or document.get('guideStatus') != 'completed'):
             pending += 1
-        elif _usable_analysis(document.get('analysis')) is None:
+            continue
+        else:
+            try:
+                manifest = validate_manifest(document.get('_sourceManifest'))
+                if (document.get('_sourceArtifactsValid') is not True or not manifest['coverage']['complete']
+                        or manifest['documentId'] != document.get('id')
+                        or manifest['originalDigest'] != document.get('originalDigest')
+                        or manifest['sourceRevision'] != document.get('sourceRevision')):
+                    raise ValueError('Source unavailable')
+            except (ValueError, TypeError, AttributeError):
+                stage, error = 'preparation', 'The exact source artifacts are unavailable or invalid. Prepare or replace this document.'
+            if stage is None:
+                try:
+                    guide = validate_guide(document.get('guide'), manifest)
+                    if guide_digest(guide) != document.get('guideRevision'):
+                        raise ValueError('Guide mismatch')
+                except (ValueError, TypeError, AttributeError):
+                    stage, error = 'guide', 'The guide does not match the complete source. Retry this document.'
+        if stage:
             failed += 1
-            if isinstance(document.get('id'), str): failed_ids.append(document['id'])
+            if isinstance(document.get('id'), str):
+                failed_ids.append(document['id'])
+                failed_stages[document['id']] = {'stage': stage, 'error': error or 'Processing failed. Retry this document.'}
         else:
             completed += 1
-
     revision = hashlib.sha256(_stable_json(sorted(sources)).encode('utf-8')).hexdigest()
     ready = bool(documents) and not pending and not failed and confirmed_revision == revision
     if not documents:
-        state = 'missing'
-        message = 'Upload all lecture documents and let their analysis finish before using study tools.'
+        state, message = 'missing', 'Upload all lecture documents and let preparation and guide creation finish before using study tools.'
     elif failed:
-        state = 'failed'
-        message = 'Some lecture documents failed or have incomplete analysis. Retry or replace them before confirming.'
+        state, message = 'failed', 'Some lecture documents need preparation or guide recovery. Retry or replace them before confirming.'
     elif pending:
-        state = 'processing'
-        message = 'Lecture documents are still being analyzed. Wait for every document to finish before confirming.'
+        state, message = 'processing', 'Lecture documents are still being prepared. Wait for both stages before confirming.'
     elif not ready:
-        state = 'confirmation_required'
-        message = "All lecture documents are analyzed. Confirm that you've uploaded all lecture documents to unlock study tools."
+        state, message = 'confirmation_required', "All lecture sources and guides are ready. Confirm that you uploaded all lecture documents to unlock study tools."
     else:
-        state = 'ready'
-        message = 'The lecture document foundation is confirmed. Study tools are ready.'
-    return {
-        'ready': ready, 'state': state, 'revision': revision,
-        'documentCount': len(documents), 'completedCount': completed,
-        'pendingCount': pending, 'failedCount': failed, 'message': message,
-        'failedDocumentIds': sorted(set(failed_ids)),
-    }
+        state, message = 'ready', 'The lecture document foundation is confirmed. Study tools are ready.'
+    return {'ready': ready, 'state': state, 'revision': revision, 'documentCount': len(documents),
+            'completedCount': completed, 'pendingCount': pending, 'failedCount': failed, 'message': message,
+            'failedDocumentIds': sorted(set(failed_ids)), 'failedStages': failed_stages}
 
 
 def build_foundation_context(document_insights: list) -> str:

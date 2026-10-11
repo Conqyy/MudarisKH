@@ -5,6 +5,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from tests.foundation_fixtures import confirm_lecture_foundation, lecture_document
+from tests.test_atomic_data import database, cloud_database
+from tests.test_document_job_storage import job_db
+from tests.test_document_library import library
+from tests.test_document_pipeline import Processor, queued, pipeline
 
 
 def owned_db(monkeypatch, api):
@@ -19,17 +23,19 @@ def owned_db(monkeypatch, api):
     return db
 
 
-def test_document_reanalysis_persists_success(monkeypatch, api_module):
+def test_document_reanalysis_persists_success(monkeypatch, api_module, library):
     api = api_module
-    db = owned_db(monkeypatch, api)
-    db.get_document.return_value = {
-        "id": "doc", "userId": "owner", "courseId": "course",
-        "extractedText": "Limits and derivatives of mathematical functions.",
-    }
-    monkeypatch.setattr(api, "doc_processor", SimpleNamespace(analyze_document=lambda *a, **k: {"topics": ["Limits"]}))
-    assert api.reanalyze_document("doc", uid="owner")["status"] == "success"
-    assert db.update_document.call_args.args[1]["status"] == "completed"
-    assert isinstance(db.update_document.call_args.args[1]["processedAt"], int)
+    doc = queued(library)
+    assert pipeline(library, Processor()).run(doc)
+    old_job = library.database.get_document(doc)['processingJob']['id']
+    monkeypatch.setattr(api, 'db_client', library.database)
+    monkeypatch.setattr(api, '_spawn_document_job', lambda identity: False)
+    assert api.reanalyze_document(doc, uid='u')['status'] == 'accepted'
+    row = library.database.get_document(doc)
+    assert row['processingJob']['id'] != old_job
+    assert row['processingJob']['stage'] == 'queued'
+    assert pipeline(library, Processor()).run(doc)
+    assert library.database.get_document(doc)['status'] == 'completed'
 
 
 @pytest.mark.parametrize("tool", ["flashcards", "summary", "exam"])

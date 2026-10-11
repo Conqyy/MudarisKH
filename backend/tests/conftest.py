@@ -20,6 +20,7 @@ def isolated_temp_directory(monkeypatch, tmp_path):
 def api_module():
     fake_db = MagicMock()
     fake_db.get_pending_audio_jobs.return_value = []
+    fake_db.get_pending_document_jobs.return_value = []
     with patch("dotenv.load_dotenv", return_value=False), \
          patch("src.database.firebase_client.FirebaseClient", return_value=fake_db), \
          patch("openai.OpenAI", return_value=MagicMock()):

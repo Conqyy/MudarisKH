@@ -1,4 +1,7 @@
 import os
+import asyncio
+import hashlib
+import uuid
 import sys
 import re
 import logging
@@ -67,12 +70,13 @@ def _require_course(course_id: str, uid: str, allow_deleting: bool = False) -> d
 
 
 def _load_document_foundation(course_id: str, uid: str) -> dict:
-    from src.utils.course_foundation import build_foundation_status
+    from src.utils.course_foundation import build_foundation_status, hydrate_document_source
     course = _require_course(course_id, uid)
     documents = [row for row in owned_only(db_client.get_course_documents(course_id, user_id=uid), uid)
                  if row.get('courseId') == course_id]
     confirmation = db_client.get_document_foundation(uid, course_id)
     confirmed_revision = confirmation.get('revision', '') if isinstance(confirmation, dict) else ''
+    documents = [hydrate_document_source(db_client, row) for row in documents]
     status = build_foundation_status(documents, confirmed_revision)
     return {**status, 'documents': documents, 'course': course,
             'document_insights': [{**row.get('analysis', {}), 'documentTitle': row.get('title', '')}
@@ -89,7 +93,8 @@ def _require_document_foundation(course_id: str, uid: str, expected_revision: st
 
 
 def _public_foundation(foundation: dict) -> dict:
-    return {key: value for key, value in foundation.items() if key not in ('documents', 'course', 'document_insights')}
+    return {key: foundation[key] for key in ('ready', 'state', 'revision', 'documentCount',
+            'completedCount', 'pendingCount', 'failedCount', 'message', 'failedDocumentIds', 'failedStages')}
 
 
 def _require_lecture(lecture_id: str, course_id: str, uid: str) -> None:
@@ -178,9 +183,21 @@ def _upload_path(uid: str, course_id: str, category: str, filename: str) -> str:
 @asynccontextmanager
 async def _lifespan(application):
     await run_in_threadpool(_recover_audio_jobs)
+    await run_in_threadpool(_recover_document_jobs)
+    async def recover_documents():
+        while True:
+            await asyncio.sleep(10)
+            await run_in_threadpool(_recover_document_jobs)
+    recovery = asyncio.create_task(recover_documents())
     try:
         yield
     finally:
+        recovery.cancel()
+        try:
+            await recovery
+        except asyncio.CancelledError:
+            pass
+        await run_in_threadpool(_close_document_jobs)
         await run_in_threadpool(_close_audio_jobs)
 
 
@@ -343,7 +360,7 @@ def _recheck_past_exam_scope(course_id: str, user_id: str = None):
         logger.warning(f"Past-exam scope re-check failed for course {course_id}: {e}")
 
 
-@app.post("/api/documents/upload")
+@app.post("/api/documents/upload", status_code=202)
 async def upload_document(
     file: UploadFile = File(...),
     user_id: str = Form(...),
@@ -376,7 +393,7 @@ async def upload_document(
             )
 
     storage_path = _upload_path(uid, course_id, "documents", file.filename)
-    file_url = db_client.upload_file_to_storage(file_bytes, storage_path, user_id=uid)
+    file_url = db_client.upload_file_to_storage(file_bytes, storage_path, user_id=uid, require_remote=True)
 
     doc_data = {
         "title": doc_title,
@@ -385,175 +402,177 @@ async def upload_document(
         "storagePath": storage_path,
         "fileSize": file_size,
         "status": "processing",
+        "preparationStatus": "pending", "guideStatus": "pending",
+        "originalDigest": hashlib.sha256(file_bytes).hexdigest(),
         "uploadedAt": int(_time.time() * 1000),
     }
     if lecture_id:
         doc_data["lectureId"] = lecture_id
 
+    doc_data['processingJob'] = {
+        'id': uuid.uuid4().hex, 'kind': 'prepare', 'sourceDigest': doc_data['originalDigest'],
+        'claimToken': None, 'leaseUntil': 0, 'stage': 'queued', 'cursor': None,
+    }
+    doc_data.update({'preparationError': None, 'guideError': None})
     doc_id = _save_uploaded_record(db_client.save_document, user_id, course_id, doc_data)
-    logger.info(f"Document {doc_id} saved, starting processing...")
-
     try:
-        extracted_text = await run_in_threadpool(doc_processor.extract_text, file_bytes, file_type)
-
-        db_client.update_document(doc_id, {"extractedText": extracted_text})
-        page_images = []
-        if file_type == "pdf":
-            from src.utils.pdf_extract import pdf_to_image_uris
-            page_images = await run_in_threadpool(pdf_to_image_uris, file_bytes)
-
-        # If we couldn't read any text, fail clearly instead of saving an empty
-        # "completed" doc with 0 topics / 0 chapters.
-        from src.utils.pdf_extract import is_meaningful_text
-        if not is_meaningful_text(extracted_text) and not page_images:
-            msg = (
-                "Couldn't read text from this file. If it's a scanned or "
-                "image-only PDF, its pages could not be read."
-            )
-            db_client.update_document(doc_id, {
-                "status": "failed",
-                "errorMessage": msg,
-            })
-            raise HTTPException(status_code=422, detail=msg)
-
-        course_title = course.get("title", course_id)
-
-        # For PDFs, also give the analyzer the page images so it can read
-        # equations, diagrams, figures, and code (not just extracted text).
-        analysis = await run_in_threadpool(doc_processor.analyze_document, extracted_text, course_title, image_uris=page_images)
-
-        _require_course(course_id, uid)
-
-        db_client.update_document(doc_id, {
-            "extractedText": extracted_text,
-            "analysis": analysis,
-            "status": "completed",
-            "processedAt": int(_time.time() * 1000),
-        })
-        logger.info(f"Document {doc_id} processed successfully.")
-
-        # A new document changes the course scope — refresh the in/out-of-course
-        # tags on this course's already-analyzed past exams.
-        _recheck_past_exam_scope(course_id, user_id)
-
-        return {
-            "status": "success",
-            "document_id": doc_id,
-            "title": doc_title,
-            "file_type": file_type,
-            "analysis": analysis,
-        }
-
-    except HTTPException:
-        # Already handled (e.g. unreadable file) — keep the clean status/message.
-        raise
-    except DataSizeConflict as exc:
-        db_client.update_document(doc_id, {"status": "failed", "errorMessage": "This file is too large to save safely. Split it into smaller parts."})
-        raise HTTPException(status_code=413, detail="This file is too large to save safely. Split it into smaller parts.") from exc
-    except DataConflict:
-        raise
-    except Exception as e:
-        logger.error(f"Document processing failed: {e}")
-        db_client.update_document(doc_id, {
-            "status": "failed",
-            "errorMessage": "Processing failed. Your saved material is available to retry.",
-        })
-        raise HTTPException(status_code=500, detail="Processing could not finish. Please retry or check backend configuration.")
+        _spawn_document_job(doc_id)
+    except Exception:
+        logger.warning('Document scheduling deferred to durable recovery')
+    return {'status': 'accepted', 'document_id': doc_id, 'title': doc_title, 'file_type': file_type,
+            'preparationStatus': 'pending', 'guideStatus': 'pending'}
 
 
-@app.get("/api/documents/{course_id}")
+def _public_document(row):
+    fields = ('id', 'userId', 'courseId', 'lectureId', 'title', 'fileType', 'fileSize',
+              'status', 'uploadedAt', 'processedAt', 'preparationStatus', 'guideStatus',
+              'preparationError', 'guideError', 'unitCount', 'sourceRevision', 'guideRevision', 'guide', 'analysis')
+    result = {key: row[key] for key in fields if key in row}
+    job = row.get('processingJob')
+    result['processingStage'] = job.get('stage') if isinstance(job, dict) else None
+    return result
+
+
+def _owned_source_document(doc_id, uid):
+    row = assert_owner(db_client.get_document(doc_id), uid, 'Document')
+    _require_course(row.get('courseId'), uid)
+    return row
+
+
+@app.get('/api/documents/{course_id}')
 def get_course_documents(course_id: str, uid: str = Depends(require_uid)):
     _require_course(course_id, uid)
     docs = owned_only(db_client.get_course_documents(course_id, user_id=uid), uid)
-    return {"status": "success", "documents": docs}
+    return {'status': 'success', 'documents': [_public_document(row) for row in docs if row.get('courseId') == course_id]}
 
 
-@app.get("/api/documents/detail/{doc_id}")
+@app.get('/api/documents/detail/{doc_id}')
 def get_document_detail(doc_id: str, uid: str = Depends(require_uid)):
-    assert_owner(db_client.get_document(doc_id), uid, "Document")
-    doc = db_client.get_document(doc_id)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-    return {"status": "success", "document": doc}
+    return {'status': 'success', 'document': _public_document(_owned_source_document(doc_id, uid))}
 
 
-@app.post("/api/documents/{doc_id}/reanalyze")
-def reanalyze_document(doc_id: str, uid: str = Depends(require_uid)):
-    """Re-run the AI analysis on a document using its already-extracted text.
-
-    Lets the user retry when the first analysis failed or came back empty
-    (without having to re-upload the file).
-    """
-    assert_owner(db_client.get_document(doc_id), uid, "Document")
-    doc = db_client.get_document(doc_id)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    text = doc.get("extractedText", "")
-    images = []
-    if doc.get("fileType") == "pdf" and doc.get("storagePath"):
+def _queue_document_preparation(doc_id, uid):
+    doc = _owned_source_document(doc_id, uid)
+    digest = doc.get('originalDigest')
+    if not digest:
+        # Legacy migration is explicit. Only digest discovery precedes the claim;
+        # all extraction and provider work is performed by the claimed worker.
+        _require_record_storage(doc, uid, 'documents')
         try:
-            from src.utils.pdf_extract import pdf_to_image_uris
-            path = db_client.download_file_from_storage(doc["storagePath"], uid)
-            images = pdf_to_image_uris(path.read_bytes())
-        except FileNotFoundError:
-            pass
-    if (not text or len(text.strip()) < 20) and not images:
-        raise HTTPException(
-            status_code=422,
-            detail="No extracted text is available for this document — please re-upload it.",
-        )
-
-    db_client.update_document(doc_id, {"status": "processing", "errorMessage": ""})
-
+            source = db_client.download_file_from_storage(doc.get('storagePath'), uid)
+            digest_state, size = hashlib.sha256(), 0
+            with source.open('rb') as stream:
+                while chunk := stream.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > 100 * 1024 * 1024:
+                        raise HTTPException(status_code=413, detail='This original exceeds the upload limit. Split it and upload again.')
+                    digest_state.update(chunk)
+            if not size:
+                raise HTTPException(status_code=422, detail='The saved original is empty. Upload it again.')
+        except (ValueError, FileNotFoundError):
+            raise HTTPException(status_code=422, detail='The saved original is unavailable. Upload it again.')
+        current = _owned_source_document(doc_id, uid)
+        _require_record_storage(current, uid, 'documents')
+        if any(current.get(key) != doc.get(key) for key in ('courseId', 'storagePath', 'fileType', 'originalDigest')):
+            raise HTTPException(status_code=409, detail='The original changed during preparation. Reload and retry.')
+        if current.get('status') == 'deleting':
+            raise HTTPException(status_code=409, detail='This document is being deleted.')
+        digest = digest_state.hexdigest()
+    db_client.start_document_job(uid, doc['courseId'], doc_id, source_digest=digest, force_guide=True)
     try:
-        course_id = doc.get("courseId", "")
-        course_title = _require_course(course_id, uid).get("title", course_id)
-
-        analysis = doc_processor.analyze_document(text, course_title, image_uris=images)
-
-        db_client.update_document(doc_id, {
-            "analysis": analysis,
-            "status": "completed",
-            "errorMessage": "",
-            "processedAt": int(_time.time() * 1000),
-        })
-        logger.info(f"Document {doc_id} re-analyzed successfully.")
-        _recheck_past_exam_scope(course_id, uid)
-        return {"status": "success", "document_id": doc_id, "analysis": analysis}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Re-analysis failed for {doc_id}: {e}")
-        db_client.update_document(doc_id, {
-            "status": "failed",
-            "errorMessage": "Processing failed. Your saved material is available to retry.",
-        })
-        raise HTTPException(
-            status_code=500,
-            detail="Processing could not finish. Please retry or check backend configuration.",
-        )
+        _spawn_document_job(doc_id)
+    except Exception:
+        logger.warning('Document scheduling deferred to durable recovery')
+    return {'status': 'accepted', 'document_id': doc_id}
 
 
-@app.delete("/api/documents/{doc_id}")
+@app.post('/api/documents/{doc_id}/prepare', status_code=202)
+def prepare_document(doc_id: str, uid: str = Depends(require_uid)):
+    return _queue_document_preparation(doc_id, uid)
+
+
+@app.post('/api/documents/{doc_id}/reanalyze', status_code=202)
+def reanalyze_document(doc_id: str, uid: str = Depends(require_uid)):
+    return _queue_document_preparation(doc_id, uid)
+
+
+@app.get('/api/documents/{doc_id}/original')
+def get_document_original(doc_id: str, uid: str = Depends(require_uid)):
+    from fastapi.responses import Response
+    row = _owned_source_document(doc_id, uid)
+    if row.get('status') == 'deleting':
+        raise HTTPException(status_code=409, detail='This document is being deleted.')
+    _require_record_storage(row, uid, 'documents')
+    media_types = {'pdf': 'application/pdf',
+                   'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                   'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation'}
+    file_type = row.get('fileType')
+    if file_type not in media_types or not row.get('storagePath'):
+        raise HTTPException(status_code=404, detail='The saved original is unavailable.')
+    try:
+        path = db_client.download_file_from_storage(row['storagePath'], uid)
+        with path.open('rb') as stream:
+            original = stream.read(100 * 1024 * 1024 + 1)
+    except (ValueError, FileNotFoundError):
+        raise HTTPException(status_code=404, detail='The saved original is unavailable.')
+    if len(original) > 100 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail='This original exceeds the supported file size.')
+    current = _owned_source_document(doc_id, uid)
+    _require_record_storage(current, uid, 'documents')
+    if (current.get('status') == 'deleting' or any(current.get(key) != row.get(key)
+            for key in ('courseId', 'storagePath', 'fileType', 'originalDigest'))):
+        raise HTTPException(status_code=409, detail='The original changed. Reload and retry.')
+    if row.get('originalDigest') and hashlib.sha256(original).hexdigest() != row['originalDigest']:
+        raise HTTPException(status_code=409, detail='The saved original is corrupt. Restore or replace it.')
+    return Response(content=original, media_type=media_types[file_type], headers={
+        'Content-Disposition': f'inline; filename="document.{file_type}"',
+        'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'})
+
+
+@app.get('/api/documents/{doc_id}/sources')
+def get_document_sources(doc_id: str, uid: str = Depends(require_uid)):
+    from src.utils.course_foundation import hydrate_document_source
+    row = _owned_source_document(doc_id, uid)
+    hydrated = hydrate_document_source(db_client, row)
+    result = _public_document(row)
+    manifest = hydrated.get('_sourceManifest')
+    result['available'] = hydrated['_sourceArtifactsValid']
+    if manifest:
+        result.update({'coverage': manifest['coverage'], 'warnings': manifest['warnings'],
+                       'units': [{key: unit[key] for key in ('unitId', 'kind', 'position', 'label', 'blank', 'warnings')}
+                                 for unit in manifest['units']]})
+    return {'status': 'success', 'source': result}
+
+
+@app.get('/api/documents/{doc_id}/sources/{unit_id}')
+def get_document_source_unit(doc_id: str, unit_id: str, source_revision: str, uid: str = Depends(require_uid)):
+    from src.services.document_library import DocumentLibrary
+    row = _owned_source_document(doc_id, uid)
+    library = DocumentLibrary(db_client)
+    ref = {'documentId': doc_id, 'sourceRevision': source_revision, 'unitId': unit_id}
+    try:
+        unit = library.load_units(uid, row['courseId'], [ref])[0]
+        images = library.render_reference(uid, row['courseId'], ref)
+    except (ValueError, FileNotFoundError):
+        raise HTTPException(status_code=404, detail='That exact source location is unavailable.')
+    public = {key: unit[key] for key in ('documentId', 'sourceRevision', 'unitId', 'kind', 'position',
+              'label', 'text', 'blank', 'warnings')}
+    public['visualText'] = unit.get('visualText', '')
+    return {'status': 'success', 'unit': public, 'images': images}
+
+
+@app.delete('/api/documents/{doc_id}')
 def delete_document_endpoint(doc_id: str, uid: str = Depends(require_uid)):
-    assert_owner(db_client.get_document(doc_id), uid, "Document")
-    doc = db_client.get_document(doc_id)
-    if not doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-    _require_record_storage(doc, uid, "documents")
-    storage_path = doc.get("storagePath")
-    if storage_path:
-        try:
-            db_client.delete_file_from_storage(storage_path, user_id=uid)
-        except Exception as e:
-            logger.warning(f"Could not delete file from storage: {e}")
-            raise HTTPException(status_code=503, detail="File cleanup failed. Please retry.")
-    db_client.delete_document(doc_id)
-    _recheck_past_exam_scope(doc.get("courseId", ""), uid)
-    logger.info(f"Document {doc_id} deleted.")
-    return {"status": "success", "deleted": doc_id}
+    doc = _owned_source_document(doc_id, uid)
+    _require_record_storage(doc, uid, 'documents')
+    try:
+        db_client.delete_document_data(uid, doc_id)
+    except (DataConflict, DataSizeConflict):
+        raise
+    except Exception:
+        raise HTTPException(status_code=503, detail='File cleanup failed. Please retry.')
+    _recheck_past_exam_scope(doc.get('courseId', ''), uid)
+    return {'status': 'success', 'deleted': doc_id}
 
 
 @app.delete("/api/audio/{rec_id}")
@@ -1130,6 +1149,36 @@ def _run_saved_audio_job(rec_id):
 
 from src.utils.job_runner import AudioJobRunner
 _audio_runner = AudioJobRunner(lambda: db_client, _run_saved_audio_job)
+
+
+def _run_document_pipeline(doc_id):
+    from src.services.document_library import DocumentLibrary
+    from src.services.document_pipeline import DocumentPipeline
+    if DocumentPipeline(db_client, DocumentLibrary(db_client), doc_processor).run(doc_id):
+        row = db_client.get_document(doc_id)
+        if row:
+            _recheck_past_exam_scope(row['courseId'], row['userId'])
+        return True
+    return False
+
+
+from src.utils.document_job_runner import DocumentJobRunner
+_document_job_runner = DocumentJobRunner(lambda: db_client, _run_document_pipeline)
+
+
+def _spawn_document_job(doc_id):
+    return _document_job_runner.submit(doc_id)
+
+
+def _recover_document_jobs():
+    global _document_job_runner
+    if _document_job_runner._closed:
+        _document_job_runner = DocumentJobRunner(lambda: db_client, _run_document_pipeline)
+    _document_job_runner.recover()
+
+
+def _close_document_jobs():
+    _document_job_runner.close()
 
 
 def _spawn_audio_job(**kwargs):

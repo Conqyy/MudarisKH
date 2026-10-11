@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import UploadFile
 from io import BytesIO
+from tests.foundation_fixtures import lecture_document, install_source_artifacts
 
 
 ANALYSIS = {'topics': ['AI'], 'definitions': [], 'formulas': [], 'chapterMapping': [],
@@ -74,9 +75,8 @@ def test_blocked_workflows_reject_before_upload_model_or_save(api_module, founda
 
 
 def ready_documents(db):
-    docs = [{'id': 'doc', 'userId': 'owner', 'courseId': 'course', 'status': 'completed',
-             'title': 'Introduction to AI', 'analysis': ANALYSIS, 'extractedText': 'AI is the study of intelligent agents.'}]
-    db.get_course_documents.return_value = docs
+    docs = [lecture_document(topic='AI', title='Introduction to AI', analysis=ANALYSIS)]
+    install_source_artifacts(db, docs)
     return docs
 
 
@@ -94,7 +94,7 @@ def test_confirmation_requires_all_documents_and_current_revision(api_module, fo
     docs.pop()
     confirmed = api.confirm_course_foundation('course', api.FoundationConfirmRequest(revision=initial['revision']), uid='owner')
     assert confirmed['ready'] is True
-    docs[0]['analysis'] = {**ANALYSIS, 'topics': ['Search algorithms']}
+    docs[0]['guideRevision'] = 'b' * 64
     assert api.get_course_foundation('course', uid='owner')['ready'] is False
 
 
@@ -186,7 +186,7 @@ def test_saved_exam_detail_remains_readable_without_triggering_ai_rescue(api_mod
 def test_foundation_failure_identifies_the_document_that_can_be_retried(api_module, foundation_db):
     api, db = api_module, foundation_db
     docs = ready_documents(db)
-    docs[0]['analysis'] = {'topics': ['AI']}
+    docs[0]['guide'] = {'concepts': ['AI']}
     status = api.get_course_foundation('course', uid='owner')
     assert status['state'] == 'failed'
     assert status['failedDocumentIds'] == ['doc']
