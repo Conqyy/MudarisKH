@@ -118,3 +118,58 @@ def test_guide_cannot_claim_academic_support_from_only_a_blank_unit():
     data['sections'][0]['unitIds'] = ['p0002']
     with pytest.raises(ValueError):
         contracts.validate_guide(data, manifest())
+
+
+def visual_result(**changes):
+    return {'text': '', 'visualDescription': '', 'readability': 'blank', 'warnings': [], **changes}
+
+
+def test_verified_blank_visual_retains_assets_and_structural_blanks_still_validate():
+    original = unit(text='', needsVisualRead=True, visualReadStatus='pending', visualAssets=[
+        {'assetId': 'page1', 'kind': 'page', 'mimeType': 'image/png', 'unitId': 'p0001'}])
+    prepared = contracts.apply_source_visual_result(original, visual_result())
+    assert prepared['blank'] is True
+    assert prepared['visualReadStatus'] == 'blank'
+    assert prepared['needsVisualRead'] is True
+    assert prepared['visualAssets'] == original['visualAssets']
+    assert original['visualReadStatus'] == 'pending'
+    source = contracts.build_source_manifest('doc', 'a' * 64, 'pdf', [prepared, unit(2, text='', blank=True)])
+    assert source['coverage']['blankUnitIds'] == ['p0001', 'p0002']
+    assert source['coverage']['complete'] is True
+
+
+def test_blank_office_image_keeps_native_text_and_pdf_conflict_is_unresolved():
+    office = unit(unitId='s0001', kind='slide', needsVisualRead=True, visualReadStatus='pending',
+                  visualAssets=[{'assetId': 'image1', 'kind': 'image', 'mimeType': 'image/png', 'relationshipId': 'rId1'}])
+    prepared = contracts.apply_source_visual_result(office, visual_result())
+    assert prepared['text'] == 'Actual lecture content'
+    assert prepared['blank'] is False
+    assert prepared['visualReadStatus'] == 'blank'
+    assert contracts.build_source_manifest('doc', 'a' * 64, 'pptx', [prepared])['coverage']['complete'] is True
+    pdf = unit(needsVisualRead=True, visualReadStatus='pending', visualAssets=[
+        {'assetId': 'page1', 'kind': 'page', 'mimeType': 'image/png', 'unitId': 'p0001'}])
+    conflict = contracts.apply_source_visual_result(pdf, visual_result())
+    assert conflict['text'] == pdf['text']
+    assert conflict['visualReadStatus'] == 'uncertain'
+    assert contracts.source_coverage([conflict])['complete'] is False
+
+
+def test_readable_visual_description_is_evidence_and_unsupported_warnings_survive():
+    original = unit(text='Native equation', needsVisualRead=True, visualReadStatus='pending')
+    prepared = contracts.apply_source_visual_result(original, visual_result(readability='readable', visualDescription='Two graph nodes'))
+    assert prepared['text'] == 'Native equation'
+    assert prepared['visualText'] == 'Two graph nodes'
+    assert prepared['visualReadStatus'] == 'readable'
+    unsupported = {**original, 'visualReadStatus': 'unsupported', 'warnings': ['Unsupported chart']}
+    prepared = contracts.apply_source_visual_result(unsupported, visual_result(readability='readable', text='Visible text'))
+    assert prepared['warnings'] == ['Unsupported chart']
+    assert prepared['visualReadStatus'] == 'unsupported'
+    assert contracts.source_coverage([prepared])['complete'] is False
+
+
+def test_uncertain_visual_and_blank_with_warnings_cannot_resolve_unit():
+    for result in [visual_result(readability='uncertain', text='Partial'), visual_result(warnings=['Blurred'])]:
+        prepared = contracts.apply_source_visual_result(unit(text='', needsVisualRead=True), result)
+        assert prepared['blank'] is False
+        assert prepared['visualReadStatus'] == 'uncertain'
+        assert contracts.source_coverage([prepared])['complete'] is False

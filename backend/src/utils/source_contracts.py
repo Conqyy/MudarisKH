@@ -10,7 +10,7 @@ PREPARATION_VERSION = 1
 MAX_SOURCE_UNITS = 160
 MAX_SOURCE_CHARACTERS = 600_000
 FILE_TYPES = {'pdf': ('p', 'page'), 'pptx': ('s', 'slide'), 'docx': ('b', 'block')}
-VISUAL_READ_STATUSES = frozenset({'not_required', 'pending', 'readable', 'uncertain', 'unsupported'})
+VISUAL_READ_STATUSES = frozenset({'not_required', 'pending', 'readable', 'blank', 'uncertain', 'unsupported'})
 
 
 def _canonical(value):
@@ -75,8 +75,13 @@ def _units(units, file_type):
         status = unit.get('visualReadStatus', 'pending' if unit['needsVisualRead'] else 'not_required')
         if status not in VISUAL_READ_STATUSES:
             raise ValueError('Invalid visual read status')
-        if unit['blank'] and (unit['text'].strip() or unit.get('visualText', '').strip() or assets or unit['needsVisualRead'] or unit['warnings']):
+        verified_blank = status == 'blank' and unit['needsVisualRead']
+        if unit['blank'] and (unit['text'].strip() or unit.get('visualText', '').strip()
+                              or unit['warnings'] or ((assets or unit['needsVisualRead']) and not verified_blank)):
             raise ValueError('Content cannot be claimed blank')
+        if status == 'blank' and (not unit['needsVisualRead'] or unit.get('visualText', '').strip()
+                                  or unit['warnings'] or (file_type == 'pdf' and unit['text'].strip())):
+            raise ValueError('Blank visual contradicts source evidence')
         if unit['needsVisualRead'] and status == 'not_required':
             raise ValueError('Required visual content cannot be skipped')
         if status == 'readable' and not unit.get('visualText', '').strip():
@@ -85,6 +90,50 @@ def _units(units, file_type):
         raise ValueError('Split the file: maximum 600,000 extracted characters per source')
     _canonical(units)
     return units
+
+
+def validate_source_visual_result(result):
+    """Validate extraction only: a blank read never contains visual evidence."""
+    if not isinstance(result, dict) or set(result) != {'text', 'visualDescription', 'readability', 'warnings'}:
+        raise ValueError('Invalid source visual extraction fields')
+    text = _string(result['text'], 'visual transcription', False)
+    description = _string(result['visualDescription'], 'visual description', False)
+    _strings(result['warnings'], 'visual warnings')
+    if result['readability'] not in ('readable', 'blank', 'uncertain'):
+        raise ValueError('Invalid visual readability')
+    evidence = bool(text.strip() or description.strip())
+    if result['readability'] == 'readable' and not evidence:
+        raise ValueError('Readable visual requires transcription or description')
+    if result['readability'] == 'blank' and evidence:
+        raise ValueError('Blank visual contains evidence')
+    _canonical(result)
+    return deepcopy(result)
+
+
+def apply_source_visual_result(unit, result):
+    """Preserve the original while resolving a complete extraction-only read."""
+    result = validate_source_visual_result(result)
+    if not isinstance(unit, dict) or unit.get('needsVisualRead') is not True:
+        raise ValueError('Visual extraction requires a visual source unit')
+    native = _string(unit.get('text'), 'unit text', False)
+    previous = _string(unit.get('visualText', ''), 'visual text', False)
+    warnings = _strings(unit.get('warnings'), 'unit warnings')
+    prepared = deepcopy(unit)
+    prepared['warnings'] = list(dict.fromkeys(warnings + result['warnings']))
+    prepared['visualText'] = '\n\n'.join(dict.fromkeys(
+        value for value in (previous, result['text'], result['visualDescription']) if value.strip()))
+    status = result['readability']
+    # Unsupported source parts were never supplied as readable assets.
+    if unit.get('visualReadStatus') == 'unsupported' or warnings:
+        status = 'unsupported'
+    elif status == 'blank' and (previous.strip() or result['warnings']
+                              or (unit.get('kind') == 'page' and native.strip())):
+        status = 'uncertain'
+        if native.strip() and unit.get('kind') == 'page':
+            prepared['warnings'].append('Blank full-page visual conflicts with native text; retry preparation.')
+    prepared['visualReadStatus'] = status
+    prepared['blank'] = status == 'blank' and not (native.strip() or prepared['visualText'].strip() or prepared['warnings'])
+    return prepared
 
 
 def source_coverage(units):
