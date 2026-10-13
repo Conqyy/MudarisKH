@@ -232,6 +232,40 @@ def test_late_diagram_is_read_and_reread_for_final_claim_verification(monkeypatc
     assert any('Verify the target' in p for p in visual_calls)
 
 
+@pytest.mark.parametrize('valid', [True, False])
+def test_exam_shared_diagram_refs_are_reread_for_question_interpretation(monkeypatch, valid):
+    from src.services.source_evidence import SourceEvidence
+    scope = source_scope(['Compute the tree depth.', 'The diagram shows a tree of depth two.'], visual='last')
+    reader = SourceEvidence(scope, Library(scope), 'u', 'c', object(), 'model')
+    observed = []
+    def provider(client, **kwargs):
+        parts = kwargs['messages'][1]['content']; data = json.loads(parts[0]['text'])
+        if 'supportedSpans' not in kwargs['messages'][0]['content']:
+            return response({'facts': [{'text': 'Tree', 'sourceRefs': scope['allowedRefs']}], 'administrativeRefs': []})
+        task = data['task']; observed.append((task, parts, data))
+        assert data['guide']
+        # Both the standalone shared claim and its use by the question require
+        # the actual cited diagram, not merely the shared generated description.
+        images = [p for p in parts if p['type'] == 'image_url']
+        target = task['text']
+        return response({'supportedSpans': [{'start': 0, 'end': len(target), 'text': target,
+            'reason': 'Depth two is visible in the original diagram.'}] if valid and images else []})
+    monkeypatch.setattr('src.services.source_evidence.chat_with_retry', provider)
+    reader.prepare('exam')
+    tex = (r'\begin{document}The shared tree has depth two.'
+           r'\textbf{Question 1} [5 marks] Give the shared tree depth.\end{document}')
+    rubrics = {'sharedSourceRefs': [scope['allowedRefs'][-1]], 'questions': {'q1': {
+        'question_type': 'written', 'max_score': 5, 'criteria': 'Two.', 'sourceRefs': [scope['allowedRefs'][0]]}}}
+    if valid:
+        reader.verify_exam(tex, rubrics)
+        assert rubrics['questions']['q1']['sourceRefs'] == scope['allowedRefs']
+        assert any('question' in task['row'] for task, _, _ in observed)
+    else:
+        with pytest.raises(ValueError, match='verified'):
+            reader.verify_exam(tex, rubrics)
+    assert all(any(p['type'] == 'image_url' for p in parts) for _, parts, _ in observed)
+
+
 def test_merged_analysis_keeps_one_compact_scope_snapshot_for_all_papers():
     from src.services.source_evidence import SourceEvidence
     scope = source_scope(['Original course material.'])

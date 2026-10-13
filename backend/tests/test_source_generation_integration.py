@@ -323,3 +323,74 @@ def test_generation_repair_cannot_change_shared_semantics(source_api, monkeypatc
     assert saved['texContent'] == (repaired if change == 'harmless' else tex)
     assert saved['questionIdentity']['texRevision'] == sha256(saved['texContent'].encode()).hexdigest()
     assert len(compiled) == (2 if change == 'harmless' else 1)
+
+
+@pytest.mark.parametrize('case', ['preface', 'macro', 'shared_data', 'macro_rubric_mismatch', 'valid', 'layout_only'])
+def test_exam_shared_context_is_verified_before_publication(source_api, monkeypatch, case):
+    """Semantic stub sees only actual provider inputs; omitted shared text used to pass."""
+    import json
+    from fastapi import HTTPException
+    from tests.test_source_agent_integration import response
+    api, db, docs, scope, calls = source_api
+    shared = {
+        'preface': 'Recall: the sum is n^2.',
+        'macro': r'\newcommand{\formula}{n^2}',
+        'shared_data': 'For every question use sum = n^2.',
+        'macro_rubric_mismatch': 'Recall: the sum is n(n+1)/2.',
+        'valid': 'Recall: the sum is n(n+1)/2.',
+        'layout_only': r'\begin{center}Practice Exam --- Student: Example Name\end{center}',
+    }[case]
+    macro = shared if case == 'macro' else r'\newcommand{\formula}{n(n+1)/2}'
+    preface = '' if case == 'macro' else shared
+    tex = ('\\documentclass{article}\n\\usepackage{amsmath}\n' + macro +
+           '\n\\begin{document}\n' + preface +
+           '\n\\textbf{Question 1} [5 marks] State the sum represented by $\\formula$.\n\\end{document}')
+    if case == 'macro_rubric_mismatch':
+        tex = tex.replace('State the sum', 'State twice the sum')
+    refs = scope['allowedRefs']
+    rubrics = {'questions': {'q1': {'question_type': 'written', 'max_score': 5,
+                                   'criteria': 'n(n+1)/2', 'sourceRefs': refs}}}
+    api.ai_agent.compile_enhanced_exam.return_value = tex
+    api.ai_agent.extract_and_save_exam_metadata.return_value = {'cleaned_tex': tex, 'rubrics': rubrics}
+    api.ai_agent.repair_latex.return_value = tex
+    monkeypatch.setattr('src.utils.pdf_response.compile_temp_pdf', lambda *a, **kw: None)
+    judgments = []
+    def provider(client, **kwargs):
+        data = json.loads(kwargs['messages'][1]['content'][0]['text'])
+        if 'supportedSpans' not in kwargs['messages'][0]['content']:
+            return response({'facts': [{'text': 'n(n+1)/2', 'sourceRefs': refs}], 'administrativeRefs': []})
+        task = data['task']; judgments.append(task)
+        target = task['text']
+        # The actual original teaches the sum formula, never n^2. A macro's value
+        # must also reach the question check so its rubric can be interpreted.
+        if 'n^2' in target or 'n^2' in task.get('sharedContext', ''):
+            return response({'contradicted': True, 'supportedSpans': []})
+        if 'State twice the sum' in target and 'n(n+1)/2' in task.get('sharedContext', ''):
+            # Shared definition itself is true; the answer is wrong only after
+            # resolving the macro and the task together.
+            return response({'contradicted': True, 'supportedSpans': []})
+        return response({'supportedSpans': [{'start': 0, 'end': len(target), 'text': target,
+                                             'reason': 'Original sum formula; header/layout is nonacademic.'}]})
+    monkeypatch.setattr('src.services.source_evidence.chat_with_retry', provider)
+    request = api.EnhancedExamGenerateRequest(course_id='course', user_id='owner', total_marks=5)
+    if case in ('preface', 'macro', 'shared_data', 'macro_rubric_mismatch'):
+        with pytest.raises(HTTPException) as error:
+            api.generate_enhanced_exam_endpoint(request, uid='owner')
+        assert error.value.status_code == 422
+        db.save_exam_flat.assert_not_called()
+        db.save_secret_rubrics.assert_not_called()
+        if case == 'macro_rubric_mismatch':
+            assert any('question' in j['row'] for j in judgments)
+    else:
+        api.generate_enhanced_exam_endpoint(request, uid='owner')
+        question_checks = [j for j in judgments if 'question' in j['row']]
+        shared_checks = [j for j in judgments if 'sharedContext' in j['row']]
+        assert question_checks and shared_checks
+        assert all(macro in '\n'.join(json.loads(j['sharedContext'])) and
+                   preface in '\n'.join(json.loads(j['sharedContext'])) for j in question_checks)
+        assert shared in '\n'.join(json.loads(shared_checks[0]['text']))
+        saved = db.save_exam_flat.call_args.args[2]
+        assert saved['sharedSourceRefs'] == refs
+        assert saved['rubrics']['sharedSourceRefs'] == refs
+        assert saved['questionIdentity']['sharedContext']['sourceRefs'] == refs
+        assert saved['questionIdentity']['sharedContext']['revision']

@@ -1788,10 +1788,10 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
     _require_document_foundation(payload.course_id, uid, foundation['revision'])
 
     from src.services.source_evidence import saved_question_identity, validate_exam_repair
-    identity = saved_question_identity(cleaned_tex, rubrics)
-    checked = _source_verify(reader, [{**rubrics['questions'][q['id']], 'question': q['text']} for q in identity['questions']])
-    for question, verified in zip(identity['questions'], checked):
-        rubrics['questions'][question['id']]['sourceRefs'] = verified['sourceRefs']
+    try:
+        reader.verify_exam(cleaned_tex, rubrics)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     identity = saved_question_identity(cleaned_tex, rubrics)
     question_structure = identity['questions']
 
@@ -1830,6 +1830,7 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
         "texContent": cleaned_tex,
         "questionStructure": question_structure,
         "questionIdentity": identity,
+        "sharedSourceRefs": rubrics['sharedSourceRefs'],
         "rubrics": rubrics,
         "totalMarks": payload.total_marks,
         "examType": payload.exam_type,
