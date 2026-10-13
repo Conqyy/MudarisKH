@@ -34,6 +34,16 @@ class DataSizeConflict(ValueError):
 MAX_RECORD_BYTES = 750000
 
 
+def saved_exam_revision(exam: dict) -> str:
+    """Authoritative saved inputs, independent of mutable caches and current courses."""
+    keys = ('userId', 'courseId', 'examId', 'texContent', 'rubrics', 'questionStructure',
+            'questionIdentity', 'sharedSourceRefs', 'sourceScope', 'totalMarks',
+            'examBlueprint', 'foundationRevision')
+    body = json.dumps({key: exam.get(key) for key in keys}, ensure_ascii=False,
+                      sort_keys=True, separators=(',', ':'), allow_nan=False)
+    return hashlib.sha256(body.encode('utf-8')).hexdigest()
+
+
 def validate_record_size(data: dict):
     estimated = len(json.dumps(data, ensure_ascii=False, default=str, separators=(',', ':'), allow_nan=False).encode('utf-8'))
     if estimated > MAX_RECORD_BYTES:
@@ -228,9 +238,15 @@ class FirebaseClient:
         return save(self.db.transaction())
 
     @local_locked
-    def _flat_update(self, collection_name: str, doc_id: str, data: dict, *, expected_foundation_revision=None):
+    def _flat_update(self, collection_name: str, doc_id: str, data: dict, *, expected_foundation_revision=None,
+                     expected_exam_revision=None):
+        def check_exam(current):
+            if expected_exam_revision is not None and (collection_name != 'exams' or not current
+                    or saved_exam_revision(current) != expected_exam_revision):
+                raise DataConflict('The saved exam changed during processing. Reload it and retry.')
         if self.use_local:
             local = self._read_local_db()
+            check_exam(local.get(collection_name, {}).get(doc_id))
             if collection_name in local and doc_id in local[collection_name]:
                 current = local[collection_name][doc_id]
                 if collection_name == 'documents' and current.get('status') == 'deleting':
@@ -248,6 +264,7 @@ class FirebaseClient:
         @firestore.transactional
         def update(transaction):
             snapshot = reference.get(transaction=transaction)
+            check_exam(snapshot.to_dict() if snapshot.exists else None)
             if not snapshot.exists:
                 return False
             current = snapshot.to_dict() or {}
@@ -453,8 +470,9 @@ class FirebaseClient:
         data.update({"userId": user_id, "courseId": course_id})
         return self._flat_save("exams", data, expected_foundation_revision=expected_foundation_revision)
 
-    def update_exam(self, doc_id: str, data: dict, *, expected_foundation_revision=None):
-        self._flat_update("exams", doc_id, data, expected_foundation_revision=expected_foundation_revision)
+    def update_exam(self, doc_id: str, data: dict, *, expected_foundation_revision=None, expected_exam_revision=None):
+        return self._flat_update("exams", doc_id, data, expected_foundation_revision=expected_foundation_revision,
+                                 expected_exam_revision=expected_exam_revision)
 
     def get_exam(self, doc_id: str) -> dict:
         return self._flat_get("exams", doc_id)

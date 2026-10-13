@@ -888,6 +888,16 @@ Respond ONLY with raw JSON (no markdown, no commentary) in this exact shape:
             "PLAIN TEXT only: no markdown, no LaTeX commands. Normal symbols like $ (e.g. $t0) are fine. "
             "For code answers, put each instruction on its own line."
         )
+        if lecture_evidence is not None and lecture_evidence.get('savedQuestions'):
+            system += (
+                '\nFor saved exams, savedQuestions and authoritativeRubrics are fixed inputs. '
+                'Return questionId matching each saved row in order. Copy question exactly from '
+                'savedQuestions.text, including its literal TeX. Copy answer exactly from the '
+                'official correct_answer for MCQ/true_false or criteria for every other type. '
+                'Only explanation is newly written; ground it in the original evidence and '
+                'interpret the full shared exam context and macros. Include exact sourceRefs. '
+                'The exact-copy rule overrides plain-text formatting for question and answer.'
+            )
 
         def _call(reminder: str) -> str:
             response = chat_with_retry(
@@ -921,7 +931,7 @@ Respond ONLY with raw JSON (no markdown, no commentary) in this exact shape:
             raise RuntimeError('Could not generate a complete answer key. Please retry.') from e
 
     @staticmethod
-    def _answers_to_latex(items: list, exam_id: str) -> str:
+    def _answers_to_latex(items: list, exam_id: str, *, shared_context: str = '') -> str:
         """Render {question, answer, explanation} items into a SAFE, always-compilable,
         cleanly-formatted answer key — question heading, the exact answer in red,
         then a short explanation, with a thin separator between questions. Multi-line
@@ -964,6 +974,12 @@ Respond ONLY with raw JSON (no markdown, no commentary) in this exact shape:
             r"\begin{center}{\LARGE\bfseries Model Answers}\end{center}",
             r"\vspace{1em}",
         ]
+        if shared_context:
+            import json
+            parts.append(r'\section*{Shared exam context}')
+            for section in json.loads(shared_context):
+                if section.strip():
+                    parts.append(block(section) + r'\par\medskip')
         n = len(items)
         for i, it in enumerate(items, 1):
             ans = block(it.get("answer", ""))

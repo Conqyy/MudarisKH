@@ -8,6 +8,7 @@ import logging
 import time as _time
 import math
 import threading
+from copy import deepcopy
 from contextlib import asynccontextmanager
 from typing import Dict, Any, List, Optional
 from pathlib import Path
@@ -186,6 +187,50 @@ def _source_verify(reader, rows):
         return reader.verify_rows(rows)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+_SAVED_SOURCE_UNAVAILABLE = ('The saved exam\'s exact original sources or identity are unavailable. '
+                             'Restore the original source versions, or regenerate the exam from confirmed documents.')
+
+
+def _load_saved_exam_evidence(exam: dict, uid: str) -> dict:
+    """No provider work: restore original provenance, independently of today's foundation."""
+    from src.services.document_library import DocumentLibrary
+    from src.services.source_evidence import SourceEvidence, saved_question_identity
+    from src.database.firebase_client import saved_exam_revision
+    assert_owner(exam, uid, 'Exam')
+    _require_course(exam.get('courseId', ''), uid)
+    try:
+        library = DocumentLibrary(db_client)
+        scope = library.restore_scope(uid, exam['courseId'], exam.get('sourceScope'))
+        rubrics = deepcopy(exam.get('rubrics', {}))
+        validate_exam_contract(exam['texContent'], rubrics, total_marks=exam.get('totalMarks'), blueprint=exam.get('examBlueprint'))
+        identity = saved_question_identity(exam['texContent'], rubrics)
+        if (identity != exam.get('questionIdentity') or identity['questions'] != exam.get('questionStructure')
+                or rubrics.get('sharedSourceRefs') != exam.get('sharedSourceRefs')):
+            raise ValueError('Saved question or shared context identity changed')
+        for refs in [rubrics.get('sharedSourceRefs'), *[q['sourceRefs'] for q in identity['questions']]]:
+            if not isinstance(refs, list) or not refs or any(ref not in scope['allowedRefs'] for ref in refs):
+                raise ValueError('Saved citations are outside the saved scope')
+        reader = SourceEvidence(scope, library, uid, exam['courseId'], ai_agent.client, ai_agent.model_id)
+        return {'reader': reader, 'identity': identity, 'revision': saved_exam_revision(exam)}
+    except (ValueError, OSError, KeyError, TypeError, AttributeError) as exc:
+        raise HTTPException(status_code=409, detail=_SAVED_SOURCE_UNAVAILABLE) from exc
+
+
+def _verify_saved_exam(reader, exam):
+    rubrics = reader.verify_exam(exam['texContent'], deepcopy(exam['rubrics']))
+    if rubrics != exam['rubrics']:
+        raise ValueError('Verification cannot rewrite authoritative saved rubrics or shared references')
+
+
+def _publish_saved_exam(doc_id, exam, changes, uid, foundation_revision=None):
+    from src.database.firebase_client import saved_exam_revision
+    assert_owner(db_client.get_exam(doc_id), uid, 'Exam')
+    if foundation_revision is not None:
+        _require_document_foundation(exam['courseId'], uid, foundation_revision)
+    db_client.update_exam(doc_id, changes, expected_exam_revision=saved_exam_revision(exam),
+                          expected_foundation_revision=foundation_revision)
 
 
 async def _read_upload(file, limit: int = 100 * 1024 * 1024) -> bytes:
@@ -588,7 +633,10 @@ def get_document_source_unit(doc_id: str, unit_id: str, source_revision: str, ui
         unit = library.load_units(uid, row['courseId'], [ref])[0]
         images = library.render_reference(uid, row['courseId'], ref)
     except (ValueError, FileNotFoundError):
-        raise HTTPException(status_code=404, detail='That exact source location is unavailable.')
+        # Recheck ownership so an ownership/deletion race remains indistinguishable
+        # from an inaccessible document, rather than revealing historical versions.
+        _owned_source_document(doc_id, uid)
+        raise HTTPException(status_code=409, detail='That exact source version is unavailable. Restore the original version or regenerate the saved output.')
     public = {key: unit[key] for key in ('documentId', 'sourceRevision', 'unitId', 'kind', 'position',
               'label', 'text', 'blank', 'warnings')}
     public['visualText'] = unit.get('visualText', '')
@@ -1653,37 +1701,94 @@ def _rubric_answer_key_tex(exam: dict) -> str:
         tex = tex.replace('\\end{document}', block + '\\end{document}', 1)
     else:
         tex = tex + block + "\n\\end{document}"
-    return ai_agent._sanitize_latex(tex)
+    return tex if exam.get('sourceScope') else ai_agent._sanitize_latex(tex)
 
 
-def _make_compilable_answer_key(exam: dict) -> str:
-    """Choose only a complete answer document whose temporary compile is cleaned."""
+def _complete_saved_rubrics(exam):
+    """Legacy schemas may compile deterministically without restorable provenance."""
+    from src.utils.ai_contracts import validate_rubrics, exam_question_numbers
+    rubrics = deepcopy(exam.get('rubrics') or {})
+    if 'questions' not in rubrics:
+        rubrics = {'questions': {k: v for k, v in rubrics.items() if re.fullmatch(r'q[1-9]\d*', k)}}
+    try:
+        validate_rubrics(rubrics)
+        if exam.get('sourceScope'):
+            from src.services.source_evidence import saved_question_identity
+            if saved_question_identity(exam['texContent'], rubrics) != exam.get('questionIdentity'):
+                return None
+        ids = [f'q{i}' for i in range(1, len(rubrics['questions']) + 1)]
+        structure = exam.get('questionStructure') or []
+        if structure and [q.get('id') for q in structure] != ids:
+            return None
+        printed = exam_question_numbers(exam.get('texContent', ''))
+        if printed:
+            validate_exam_contract(exam['texContent'], rubrics, total_marks=exam.get('totalMarks'), blueprint=exam.get('examBlueprint'))
+        elif not structure:
+            return None
+        return rubrics
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
+def _answer_key_identity(exam, tex, mapping):
+    from src.database.firebase_client import saved_exam_revision
+    from src.utils.generation_context import source_bundle_text
+    return {'version': 1, 'inputRevision': saved_exam_revision(exam),
+            'texRevision': hashlib.sha256(tex.encode('utf-8')).hexdigest(),
+            'mappingRevision': hashlib.sha256(source_bundle_text(mapping).encode('utf-8')).hexdigest(),
+            'questionIds': [row['questionId'] for row in mapping], 'sourceRefs': mapping}
+
+
+def _cached_answer_key(exam, count):
+    tex, identity = exam.get('answerKeyTex', ''), exam.get('answerKeyIdentity')
+    if not isinstance(tex, str) or not tex or not count or exam.get('answerKeyQuestionCount') != count:
+        return ''
+    if identity is None:
+        # Only genuinely old outputs retain the historical count-based cache seam.
+        return tex if not exam.get('sourceScope') else ''
+    if not isinstance(identity, dict):
+        return ''
+    mapping = identity.get('sourceRefs')
+    if (not isinstance(mapping, list) or len(mapping) != count
+            or any(not isinstance(row, dict) or set(row) != {'questionId', 'sourceRefs'}
+                   or not isinstance(row['sourceRefs'], list) for row in mapping)
+            or [row['questionId'] for row in mapping] != [f'q{i+1}' for i in range(count)]):
+        return ''
+    if exam.get('sourceScope') and any(not row.get('sourceRefs') or any(
+            ref not in exam['sourceScope'].get('allowedRefs', []) for ref in row['sourceRefs']) for row in mapping):
+        return ''
+    return tex if identity == _answer_key_identity(exam, tex, mapping) else ''
+
+
+def _make_compilable_answer_key(exam: dict, *, reader, lecture_evidence) -> dict:
+    """New AI explanations must map exactly to saved questions and official answers."""
     from src.utils.pdf_response import check_tex_compiles
-    exam_tex = exam.get("texContent", "") or ""
-    exam_id = exam.get("examId", "exam")
-    need = len(exam.get("questionStructure", []) or []) or len((exam.get("rubrics", {}) or {}).get("questions", {}) or {})
-    if not need:
-        raise ValueError("The exam has no complete question structure. Reopen or regenerate it.")
-    try:
-        rich = ai_agent._sanitize_latex(ai_agent.generate_answer_key(exam_tex, exam_id))
-        if rich.count("Answer:") == need and check_tex_compiles(rich, exam_id + "-answers"):
-            return rich
-    except Exception:
-        logger.warning("Rich answer-key generation or compilation failed")
-    try:
-        items = ai_agent.generate_answer_pairs(exam_tex, exam_id)
-        if len(items) == need:
-            safe = ai_agent._sanitize_latex(ai_agent._answers_to_latex(items, exam_id))
-            if check_tex_compiles(safe, exam_id + "-answers"):
-                return safe
-    except Exception:
-        logger.warning("Structured answer-key generation or compilation failed")
-    rubrics = (exam.get("rubrics", {}) or {}).get("questions", {}) or {}
-    if len(rubrics) == need and all(q.get("correct_answer") or q.get("criteria") for q in rubrics.values()):
-        deterministic = _rubric_answer_key_tex(exam)
-        if deterministic and check_tex_compiles(deterministic, exam_id + "-answers"):
-            return deterministic
-    raise ValueError("A complete answer-key PDF could not be prepared. Please retry.")
+    from src.services.source_evidence import exam_shared_context
+    questions = exam['questionIdentity']['questions']
+    packet = {**lecture_evidence, 'savedQuestions': deepcopy(questions), 'authoritativeRubrics': deepcopy(exam['rubrics'])}
+    items = ai_agent.generate_answer_pairs(exam['texContent'], exam.get('examId', 'exam'), lecture_evidence=packet)
+    if not isinstance(items, list) or len(items) != len(questions):
+        raise ValueError('Answer count changed')
+    checked, mapping = [], []
+    for item, question in zip(items, questions):
+        rubric = exam['rubrics']['questions'][question['id']]
+        official = rubric.get('correct_answer') if rubric['question_type'] in ('mcq', 'true_false') else rubric.get('criteria')
+        if (not isinstance(item, dict) or item.get('questionId') != question['id']
+                or item.get('question') != question['text'] or item.get('answer') != official):
+            raise ValueError('Answer mapping or authoritative answer changed')
+        refs = reader.validate_refs(item.get('sourceRefs', []))
+        if not refs:
+            raise ValueError('Answer citations missing')
+        refs = reader.validate_refs(refs + exam['sharedSourceRefs'])
+        checked.append({'questionId': question['id'], 'question': question['text'], 'answer': official,
+                        'explanation': item.get('explanation', ''), 'sourceRefs': refs})
+        mapping.append({'questionId': question['id'], 'sourceRefs': refs})
+    shared = exam_shared_context(exam['texContent'])
+    reader.verify_rows(checked, shared_context=shared)
+    tex = ai_agent._answers_to_latex(checked, exam.get('examId', 'exam'), shared_context=shared)
+    if not check_tex_compiles(tex, exam.get('examId', 'exam') + '-answers'):
+        raise ValueError('Verified answer document cannot compile')
+    return {'tex': tex, 'mapping': mapping}
 
 
 @app.post("/api/exams/generate-enhanced")
@@ -1868,6 +1973,51 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
 # Exam management: list, detail, questions, submit
 # ──────────────────────────────────────────────────
 
+def _public_exam(exam):
+    """Project display metadata; never return caches, rubrics or storage pointers."""
+    fields = ('id', 'examId', 'userId', 'courseId', 'status', 'createdAt', 'totalMarks',
+              'examType', 'pdfStatus', 'foundationRevision', 'modelId', 'promptVersion',
+              'solutionName', 'solutionType', 'solutionUploadedAt', 'grade')
+    result = {key: exam[key] for key in fields if key in exam and not isinstance(exam[key], (dict, list))}
+    result['texContent'] = re.sub(r'<secret-rubrics>.*?</secret-rubrics>', '', exam.get('texContent', ''), flags=re.DOTALL)
+    solution = exam.get('solutionPath')
+    if isinstance(solution, str):
+        try:
+            resolve_storage_path(solution, exam['userId'], root=UPLOADS_ROOT)
+            parts = solution.split('/')
+            if len(parts) == 4 and parts[:3] == ['solutions', exam['userId'], exam['courseId']]:
+                result['solutionPath'] = solution
+        except (KeyError, ValueError):
+            pass
+
+    def refs(values):
+        return [{key: row[key] for key in ('documentId', 'sourceRevision', 'unitId')}
+                for row in values or [] if isinstance(row, dict)
+                and all(isinstance(row.get(key), str) for key in ('documentId', 'sourceRevision', 'unitId'))]
+
+    result['questionStructure'] = [{**{key: row[key] for key in ('id', 'type', 'text', 'marks', 'identity') if key in row},
+                                    'sourceRefs': refs(row.get('sourceRefs'))}
+                                   for row in exam.get('questionStructure', []) or [] if isinstance(row, dict)]
+    result['sharedSourceRefs'] = refs(exam.get('sharedSourceRefs'))
+    scope = exam.get('sourceScope')
+    if isinstance(scope, dict):
+        # Guides are private restoration input; display needs only versioned identities.
+        result['sourceScope'] = {key: scope.get(key) for key in ('version', 'scopeRevision')}
+        result['sourceScope']['allowedRefs'] = refs(scope.get('allowedRefs'))
+        result['sourceScope']['documents'] = [{key: row.get(key) for key in ('id', 'title', 'sourceRevision', 'guideRevision')}
+                                             for row in scope.get('documents', []) if isinstance(row, dict)]
+    for name in ('sourceCoverage', 'contextCoverage'):
+        value = exam.get(name)
+        if isinstance(value, dict):
+            result[name] = {key: value[key] for key in ('state', 'mode', 'complete', 'batchCount', 'successfulBatchCount') if key in value}
+            result[name].update({key: refs(value[key]) for key in ('processedRefs', 'includedRefs', 'excludedRefs', 'partialRefs', 'unavailableRefs') if key in value})
+    summary = exam.get('sourceSummary')
+    if isinstance(summary, dict):
+        result['sourceSummary'] = {key: [item for item in summary.get(key, []) if isinstance(item, str)]
+                                   for key in ('documentIds', 'audioIds', 'historicalExamIds', 'tutorialIds')}
+    return result
+
+
 @app.get("/api/exams/list/{course_id}")
 def list_course_exams(course_id: str, uid: str = Depends(require_uid)):
     _require_course(course_id, uid)
@@ -1887,39 +2037,9 @@ def list_course_exams(course_id: str, uid: str = Depends(require_uid)):
 
 @app.get("/api/exams/detail/{doc_id}")
 def get_exam_detail(doc_id: str, uid: str = Depends(require_uid)):
-    assert_owner(db_client.get_exam(doc_id), uid, "Exam")
-    exam = db_client.get_exam(doc_id)
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
-
-    # Auto-rescue: older exams may have an empty questionStructure (rubrics were
-    # truncated at generation time). Derive them from the stored LaTeX once.
-    if not exam.get("questionStructure") and exam.get("texContent"):
-        try:
-            foundation = _require_document_foundation(exam.get('courseId', ''), uid)
-        except (HTTPException, DataConflict):
-            # Reading a saved artifact does not require invoking its AI rescue.
-            return {'status': 'success', 'exam': {key: value for key, value in exam.items()
-                                                 if key not in ('rubrics', 'pdfBase64')}}
-        derived = ai_agent.generate_rubrics_from_tex(
-            exam["texContent"], exam.get("examId", doc_id)
-        )
-        q = derived.get("questions", {}) if derived else {}
-        if q:
-            _require_document_foundation(exam.get('courseId', ''), uid, foundation['revision'])
-            structure = [
-                {"id": qid, "type": qd.get("question_type", "written")}
-                for qid, qd in sorted(q.items())
-            ]
-            db_client.update_exam(doc_id, {
-                "rubrics": derived,
-                "questionStructure": structure,
-            })
-            exam["questionStructure"] = structure
-
-    # Strip rubrics (secret) and the heavy/legacy pdfBase64 field
-    safe = {k: v for k, v in exam.items() if k not in ("rubrics", "pdfBase64")}
-    return {"status": "success", "exam": safe}
+    # A detail read never starts a model rescue or changes authoritative answers.
+    exam = assert_owner(db_client.get_exam(doc_id), uid, 'Exam')
+    return {'status': 'success', 'exam': _public_exam(exam)}
 
 
 @app.get("/api/exams/{doc_id}/pdf")
@@ -1929,9 +2049,11 @@ def get_exam_pdf(doc_id: str, uid: str = Depends(require_uid)):
     saved before the sanitizer fix (conversational preamble / markdown fences)."""
     assert_owner(db_client.get_exam(doc_id), uid, "Exam")
     from src.utils.pdf_response import compile_temp_pdf, cleanup_temp_pdf, pdf_file_response
-    from src.utils.ai_contracts import exam_question_numbers
+    from src.services.source_evidence import validate_exam_repair, saved_question_identity
     exam = assert_owner(db_client.get_exam(doc_id), uid, "Exam")
-    tex = ai_agent._sanitize_latex(exam.get("texContent", ""))
+    tex = exam.get('texContent', '')
+    tex = (re.sub(r'<secret-rubrics>.*?</secret-rubrics>', '', tex, flags=re.DOTALL)
+           if exam.get('sourceScope') else ai_agent._sanitize_latex(tex))
     if not tex:
         raise HTTPException(status_code=404, detail="No LaTeX content for this exam")
     exam_name = exam.get("examId", doc_id)
@@ -1939,21 +2061,26 @@ def get_exam_pdf(doc_id: str, uid: str = Depends(require_uid)):
     try:
         path = compile_temp_pdf(tex, exam_name)
         if not path:
+            restored = _load_saved_exam_evidence(exam, uid)
             foundation = _require_document_foundation(exam.get('courseId', ''), uid)
-            repaired = ai_agent.repair_latex(tex)
-            _require_document_foundation(exam.get('courseId', ''), uid, foundation['revision'])
-            if repaired and repaired.strip() != tex.strip():
-                if exam_question_numbers(tex):
-                    validate_exam_contract(repaired, exam.get("rubrics", {}), total_marks=exam.get("totalMarks"), blueprint=exam.get('examBlueprint'))
+            reader = restored['reader']
+            evidence = _source_prepare(reader, 'exam')
+            _verify_saved_exam(reader, exam)
+            repaired = ai_agent.repair_latex(exam['texContent'], lecture_evidence=evidence)
+            if repaired and repaired.strip() != exam['texContent'].strip():
+                repaired = validate_exam_repair(exam['texContent'], repaired, exam['rubrics'])
+                validate_exam_contract(repaired, exam['rubrics'], total_marks=exam.get('totalMarks'), blueprint=exam.get('examBlueprint'))
                 path = compile_temp_pdf(repaired, exam_name)
                 if path:
-                    assert_owner(db_client.get_exam(doc_id), uid, "Exam")
-                    db_client.update_exam(doc_id, {"texContent": repaired, "pdfStatus": "ready"})
+                    _publish_saved_exam(doc_id, exam, {'texContent': repaired, 'pdfStatus': 'ready',
+                        'questionIdentity': saved_question_identity(repaired, exam['rubrics'])}, uid, foundation['revision'])
         if not path:
             raise HTTPException(status_code=503, detail="PDF compilation failed or the compiler is unavailable. Please retry.")
         response = pdf_file_response(path, exam_name)
         handed_to_response = True
         return response
+    except (DataConflict, DataSizeConflict):
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="The exam contains unsupported TeX or its repair changed the questions.") from exc
     finally:
@@ -1971,12 +2098,15 @@ def get_exam_answer_key_pdf(doc_id: str, uid: str = Depends(require_uid)):
     exam = assert_owner(db_client.get_exam(doc_id), uid, "Exam")
     exam_name = exam.get("examId", doc_id)
     num_q = len(exam.get("questionStructure", []) or []) or len((exam.get("rubrics", {}) or {}).get("questions", {}) or {})
-    answer_tex = exam.get("answerKeyTex", "") if exam.get("answerKeyQuestionCount") == num_q and num_q else ""
+    complete_rubrics = _complete_saved_rubrics(exam)
+    if complete_rubrics:
+        num_q = len(complete_rubrics['questions'])
+    answer_tex = _cached_answer_key(exam, num_q)
     path, handed_to_response = None, False
     try:
         if answer_tex:
             try:
-                path = _compile_answer_tex(ai_agent._sanitize_latex(answer_tex), exam_name)
+                path = _compile_answer_tex(answer_tex if exam.get('answerKeyIdentity') else ai_agent._sanitize_latex(answer_tex), exam_name)
             except ValueError:
                 # Legacy or unsupported cached keys must not poison every retry.
                 answer_tex = ""
@@ -1984,18 +2114,34 @@ def get_exam_answer_key_pdf(doc_id: str, uid: str = Depends(require_uid)):
         if not path:
             if not exam.get("texContent"):
                 raise HTTPException(status_code=404, detail="No exam content to build answers from.")
-            foundation = _require_document_foundation(exam.get('courseId', ''), uid)
-            answer_tex = _make_compilable_answer_key(exam)
-            _require_document_foundation(exam.get('courseId', ''), uid, foundation['revision'])
-            path = _compile_answer_tex(answer_tex, exam_name)
+            foundation_revision = None
+            if complete_rubrics:
+                answer_tex = _rubric_answer_key_tex({**exam, 'rubrics': complete_rubrics})
+                mapping = [{'questionId': f'q{i+1}', 'sourceRefs': complete_rubrics['questions'][f'q{i+1}'].get('sourceRefs', [])}
+                           for i in range(num_q)]
+                try:
+                    path = _compile_answer_tex(answer_tex, exam_name)
+                except ValueError:
+                    path = None
+            if not path:
+                restored = _load_saved_exam_evidence(exam, uid)
+                foundation_revision = _require_document_foundation(exam.get('courseId', ''), uid)['revision']
+                reader = restored['reader']
+                evidence = _source_prepare(reader, 'exam')
+                _verify_saved_exam(reader, exam)
+                generated = _make_compilable_answer_key(exam, reader=reader, lecture_evidence=evidence)
+                answer_tex, mapping = generated['tex'], generated['mapping']
+                path = _compile_answer_tex(answer_tex, exam_name)
             if path:
-                assert_owner(db_client.get_exam(doc_id), uid, "Exam")
-                db_client.update_exam(doc_id, {"answerKeyTex": answer_tex, "answerKeyQuestionCount": num_q})
+                _publish_saved_exam(doc_id, exam, {'answerKeyTex': answer_tex, 'answerKeyQuestionCount': num_q,
+                    'answerKeyIdentity': _answer_key_identity(exam, answer_tex, mapping)}, uid, foundation_revision)
         if not path:
             raise HTTPException(status_code=503, detail="Answer-key compilation failed or the compiler is unavailable. Please retry.")
         response = pdf_file_response(path, exam_name + "-answers")
         handed_to_response = True
         return response
+    except (DataConflict, DataSizeConflict):
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="A complete answer key could not be prepared. Please retry.") from exc
     finally:

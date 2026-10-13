@@ -8,7 +8,7 @@ import uuid
 
 from src.database.firebase_client import DataSizeConflict
 from src.utils.document_sources import render_source_unit
-from src.utils.source_contracts import validate_manifest, validate_source_reference
+from src.utils.source_contracts import validate_manifest, validate_source_reference, validate_guide, guide_digest
 from src.utils.storage_paths import build_document_artifact_path
 
 
@@ -121,15 +121,56 @@ class DocumentLibrary:
             result.append({**deepcopy(unit), **valid})
         return result
 
+    def restore_scope(self, user_id: str, course_id: str, snapshot: dict) -> dict:
+        """Restore only the saved full-document selection and exact saved guide."""
+        from src.utils.generation_context import source_bundle_text
+        if not isinstance(snapshot, dict) or type(snapshot.get('version')) is not int or snapshot['version'] != 1:
+            raise ValueError('Saved source scope is missing')
+        documents = deepcopy(snapshot.get('documents'))
+        if not isinstance(documents, list) or not documents:
+            raise ValueError('Saved source selection is missing')
+        manifests, refs, seen = [], [], set()
+        for document in documents:
+            if not isinstance(document, dict) or set(document) != {'id', 'title', 'sourceRevision', 'guideRevision', 'guide'}:
+                raise ValueError('Invalid saved source document')
+            if document['id'] in seen:
+                raise ValueError('Duplicate saved source document')
+            seen.add(document['id'])
+            manifest = self.load_manifest(user_id, course_id, document['id'], document['sourceRevision'])
+            guide = validate_guide(document['guide'], manifest)
+            if guide_digest(guide) != document['guideRevision']:
+                raise ValueError('Saved guide identity changed')
+            self._original_bytes(user_id, course_id, document['id'], document['sourceRevision'])
+            manifests.append(manifest)
+            refs.extend({'documentId': document['id'], 'sourceRevision': document['sourceRevision'], 'unitId': unit['unitId']}
+                        for unit in manifest['units'])
+        revision = hashlib.sha256(source_bundle_text([
+            {key: document[key] for key in ('id', 'sourceRevision', 'guideRevision')} for document in documents
+        ]).encode('utf-8')).hexdigest()
+        if refs != snapshot.get('allowedRefs') or revision != snapshot.get('scopeRevision'):
+            raise ValueError('Saved source scope identity changed')
+        return {'documents': documents, 'manifests': manifests, 'allowedRefs': refs, 'scopeRevision': revision}
+
+    def _original_bytes(self, user_id, course_id, doc_id, revision):
+        row = self._document(user_id, course_id, doc_id)
+        version = row.get('sourceVersions', {}).get(revision)
+        if not isinstance(version, dict):
+            raise ValueError('Exact original source version is unavailable')
+        path = version.get('originalPath')
+        self.database.validate_document_storage_path(user_id, course_id, path, doc_id=doc_id)
+        file = self.database.download_file_from_storage(path, user_id)
+        with file.open('rb') as stream:
+            original = stream.read(100 * 1024 * 1024 + 1)
+        if len(original) > 100 * 1024 * 1024 or hashlib.sha256(original).hexdigest() != version.get('originalDigest'):
+            raise ValueError('Exact original source version is corrupt or oversized')
+        current = self._document(user_id, course_id, doc_id)
+        if current.get('sourceVersions', {}).get(revision) != version:
+            raise ValueError('Exact source version changed during reading')
+        return original, version
+
     def render_reference(self, user_id: str, course_id: str, ref: dict) -> list[str]:
         units = self.load_units(user_id, course_id, [ref])
-        row = self._document(user_id, course_id, ref['documentId'])
-        version = row['sourceVersions'][ref['sourceRevision']]
-        path = version.get('originalPath')
-        self.database.validate_document_storage_path(user_id, course_id, path, doc_id=ref['documentId'])
-        original = self.database.download_file_from_storage(path, user_id).read_bytes()
-        if hashlib.sha256(original).hexdigest() != version.get('originalDigest'):
-            raise ValueError('Exact original source version is corrupt')
+        original, version = self._original_bytes(user_id, course_id, ref['documentId'], ref['sourceRevision'])
         rendered = render_source_unit(original, version['fileType'], units[0]['unitId'])
         self._document(user_id, course_id, ref['documentId'])
         return rendered
