@@ -7,6 +7,7 @@ const fake = vi.hoisted(() => ({
   foundation: { ready: false, state: "confirmation_required", revision: "revision-1", documentCount: 1, completedCount: 1, pendingCount: 0, failedCount: 0, failedDocumentIds: [] as string[], message: "Confirm all lecture documents." },
   foundationError: "", confirmError: "", confirmation: null as { revision: string } | null,
   documentRows: [] as any[],
+  mutations: [] as string[],
 }));
 vi.mock("next/navigation", () => ({ useParams: () => ({ id: "course-1" }), useSearchParams: () => new URLSearchParams(), useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("next/link", () => ({ default: ({ children, ...props }: any) => <a {...props}>{children}</a> }));
@@ -32,13 +33,18 @@ vi.mock("@/lib/api", () => ({
       return fake.foundation;
     }
     if (url.endsWith("/foundation")) { if (fake.foundationError) throw new Error(fake.foundationError); return fake.foundation; }
+    if (url.includes("/documents/detail/")) return { document: fake.documentRows[0] };
     if (url.includes("/documents/")) return { documents: fake.documentRows };
     return {};
   },
   apiFetch: async (url: string, init?: RequestInit) => {
     if (init?.method === "DELETE") { fake.documentRows = []; fake.foundation = { ...fake.foundation, ready: false, state: "missing", revision: "revision-2", documentCount: 0, completedCount: 0 }; }
-    if (url.endsWith("/reanalyze")) { fake.foundation = { ...fake.foundation, state: "confirmation_required", revision: "revision-2", failedCount: 0, failedDocumentIds: [], completedCount: 1 }; }
-    return { ok: true, status: 200, json: async () => url.endsWith("/reanalyze") ? { analysis: { topics: ["Sorting"], definitions: [], formulas: [], chapterMapping: [] } } : {} };
+    if (url.endsWith("/reanalyze") || url.endsWith("/prepare")) {
+      fake.mutations.push(url);
+      fake.documentRows[0] = { ...fake.documentRows[0], status: "completed", sourceRevision: "source-2", preparationStatus: "completed", guideStatus: "completed", guide: { version: 1, sourceRevision: "source-2", sections: [{ label: "Sorting", purpose: "Sort arrays", unitIds: ["page-1"] }], concepts: [], warnings: [] } };
+      fake.foundation = { ...fake.foundation, state: "confirmation_required", revision: "revision-2", failedCount: 0, failedDocumentIds: [], completedCount: 1 };
+    }
+    return { ok: true, status: 202, json: async () => ({ status: "accepted", document_id: "doc-1" }) };
   },
 }));
 
@@ -46,8 +52,9 @@ import CoursePage from "../../src/app/course/[id]/page";
 
 beforeEach(() => {
   fake.foundation = { ready: false, state: "confirmation_required", revision: "revision-1", documentCount: 1, completedCount: 1, pendingCount: 0, failedCount: 0, failedDocumentIds: [], message: "Confirm all lecture documents." };
+  fake.mutations = [];
   fake.foundationError = ""; fake.confirmError = ""; fake.confirmation = null;
-  fake.documentRows = [{ id: "doc-1", courseId: "course-1", userId: "student", title: "Lecture notes", fileType: "pdf", fileSize: 20, storagePath: "notes.pdf", status: "completed", uploadedAt: 1, analysis: { topics: ["Sorting"], definitions: [], formulas: [], chapterMapping: [] } }];
+  fake.documentRows = [{ id: "doc-1", courseId: "course-1", userId: "student", title: "Lecture notes", fileType: "pdf", fileSize: 20, storagePath: "notes.pdf", status: "completed", uploadedAt: 1, sourceRevision: "source-1", preparationStatus: "completed", guideStatus: "completed", analysis: { topics: ["Sorting"], definitions: [], formulas: [], chapterMapping: [] } }];
   vi.stubGlobal("confirm", () => true); vi.stubGlobal("alert", vi.fn());
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -133,11 +140,11 @@ describe("course document foundation", () => {
 
   it.each([undefined, { topics: [], definitions: [], formulas: [], chapterMapping: [] }])("offers document retry when a completed analysis is unusable (%j)", async (analysis) => {
     fake.foundation = { ...fake.foundation, ready: false, state: "failed", completedCount: 0, failedCount: 1 };
-    fake.documentRows[0] = { ...fake.documentRows[0], analysis };
+    fake.documentRows[0] = { ...fake.documentRows[0], analysis, sourceRevision: undefined, preparationStatus: undefined, guideStatus: undefined };
     render(<CoursePage />);
     await screen.findByText("Algorithms");
     const documents = screen.getByRole("heading", { name: "Documents" }).closest("section")!;
-    const retry = within(documents).getByRole("button", { name: "retry" }) as HTMLButtonElement;
+    const retry = within(documents).getByRole("button", { name: "Prepare document" }) as HTMLButtonElement;
     expect(retry.disabled).toBe(false);
     fireEvent.click(retry);
     await screen.findByRole("button", { name: /I've uploaded all lecture documents/ });
@@ -171,4 +178,39 @@ describe("course document foundation", () => {
     await screen.findByRole("button", { name: /I've uploaded all lecture documents/ });
     expect((screen.getByRole("button", { name: /Generate Exam/ }) as HTMLButtonElement).disabled).toBe(true);
   });
+});
+
+it('requires both document stages before the confirmation button can be used', async () => {
+  fake.documentRows[0] = { ...fake.documentRows[0], preparationStatus: 'completed', guideStatus: 'processing' };
+  render(<CoursePage />);
+  await screen.findByText('Algorithms');
+  const confirm = screen.getByRole('button', { name: /I've uploaded all lecture documents/ }) as HTMLButtonElement;
+  expect(confirm.disabled).toBe(true);
+  expect(screen.getByText(/Creating lightweight analysis/)).toBeTruthy();
+});
+it('retries only lightweight analysis after preparation and respects authoritative guide failure', async () => {
+  fake.foundation = { ...fake.foundation, state: 'failed', completedCount: 0, failedCount: 1, failedDocumentIds: ['doc-1'], failedStages: { 'doc-1': { stage: 'guide', error: 'Unsupported visual: provide a clearer PDF.' } } } as any;
+  fake.documentRows[0] = { ...fake.documentRows[0], status: 'failed', guideStatus: 'failed', guideError: 'Unsupported visual: provide a clearer PDF.', unitCount: 4 };
+  render(<CoursePage />);
+  await screen.findByText('Algorithms');
+  expect(screen.getByText('Unsupported visual: provide a clearer PDF.')).toBeTruthy();
+  fireEvent.click(screen.getByRole('button', { name: 'Retry lightweight analysis' }));
+  await waitFor(() => expect(fake.mutations[0]).toMatch(/\/reanalyze$/));
+});
+it('does not claim lightweight guides extracted zero definitions or formulas', async () => {
+  fake.documentRows[0] = { ...fake.documentRows[0], unitCount: 4, guide: { version: 1, sourceRevision: 'source-1', sections: [{ label: 'Arrays', purpose: 'Review arrays', unitIds: ['page-1'] }], concepts: [], warnings: [] }, analysis: { topics: [], definitions: [], formulas: [], chapterMapping: [], keyConceptCount: 0 } };
+  render(<CoursePage />);
+  await screen.findByText('Algorithms');
+  expect(screen.getByText(/4 source units · 1 guide sections/)).toBeTruthy();
+  expect(screen.queryByText('Empty')).toBeNull();
+  expect(screen.queryByText(/0 definitions|0 formulas/)).toBeNull();
+});
+
+it('offers preparation retry when preparation failed while the required guide remains pending', async () => {
+  fake.foundation = { ...fake.foundation, state: 'failed', failedDocumentIds: ['doc-1'], failedStages: { 'doc-1': { stage: 'preparation', error: 'Split this document into smaller files.' } } } as any;
+  fake.documentRows[0] = { ...fake.documentRows[0], status: 'failed', preparationStatus: 'failed', guideStatus: 'pending' };
+  render(<CoursePage />);
+  await screen.findByText('Algorithms');
+  fireEvent.click(screen.getByRole('button', { name: 'Retry preparation' }));
+  await waitFor(() => expect(fake.mutations[0]).toMatch(/\/prepare$/));
 });

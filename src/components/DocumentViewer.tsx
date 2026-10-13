@@ -2,6 +2,9 @@
 
 import { useState, useRef, useEffect } from "react";
 import { CourseDocument } from "@/lib/firestore-helpers";
+import SourceCitation from "@/components/SourceCitation";
+import { useAuth } from "@/lib/auth-context";
+import { useLang } from "@/lib/i18n";
 import BookmarkButton from "@/components/BookmarkButton";
 import { useTrackRecent } from "@/lib/activity";
 
@@ -24,6 +27,8 @@ export default function DocumentViewer({
   courseCode,
   courseColor,
 }: DocumentViewerProps) {
+  const { user } = useAuth();
+  const { t } = useLang();
   // Record this document as recently opened.
   const courseId = (doc as any).courseId as string | undefined;
   const bookmarkItem = {
@@ -36,8 +41,8 @@ export default function DocumentViewer({
   };
   useTrackRecent(bookmarkItem);
 
-  const [activeTab, setActiveTab] = useState<"content" | "analysis">(
-    doc.analysis ? "analysis" : "content"
+  const [activeTab, setActiveTab] = useState<"content" | "analysis" | "sources">(
+    doc.guide || doc.analysis ? "analysis" : "content"
   );
   const [activeChapter, setActiveChapter] = useState(0);
   const [extractedText, setExtractedText] = useState(doc.extractedText || "");
@@ -45,6 +50,27 @@ export default function DocumentViewer({
   const [textError, setTextError] = useState("");
   const [textAttempt, setTextAttempt] = useState(0);
   const dialogRef = useDialog(onClose);
+  const [sourceAttempt, setSourceAttempt] = useState(0);
+  const [sourceState, setSourceState] = useState<{ key: string; units: { unitId: string; label: string; kind: string }[]; warnings: string[]; error?: string } | null>(null);
+  const sourceKey = JSON.stringify([user?.uid, doc.courseId, doc.id, doc.sourceRevision]);
+  useEffect(() => {
+    setActiveTab(doc.guide || doc.analysis ? "analysis" : "content");
+    setActiveChapter(0);
+  }, [doc.id, user?.uid]);
+  useEffect(() => {
+    if (!doc.sourceRevision || !user?.uid) return;
+    const controller = new AbortController();
+    setSourceState(null);
+    apiJson(`${API_URL}/api/documents/${encodeURIComponent(doc.id)}/sources`, { signal: controller.signal })
+      .then(data => {
+        if (controller.signal.aborted) return;
+        if (!data.source?.available || data.source.sourceRevision !== doc.sourceRevision) throw new Error(t("This source version is unavailable."));
+        setSourceState({ key: sourceKey, units: data.source.units || [], warnings: data.source.warnings || [] });
+      })
+      .catch(error => { if (!controller.signal.aborted) setSourceState({ key: sourceKey, units: [], warnings: [], error: error.message || t("Could not load source. Retry.") }); });
+    return () => controller.abort();
+  }, [sourceKey, sourceAttempt, doc.sourceRevision, doc.id, user?.uid, t]);
+  const sources = sourceState?.key === sourceKey ? sourceState : null;
   const chapterRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   useEffect(() => {
@@ -59,7 +85,7 @@ export default function DocumentViewer({
       .catch(error => { if (!controller.signal.aborted) setTextError(error.message || "Could not load content."); })
       .finally(() => { if (!controller.signal.aborted) setLoadingText(false); });
     return () => controller.abort();
-  }, [doc.id, doc.fileType, doc.extractedText, textAttempt]);
+  }, [doc.id, doc.fileType, doc.extractedText, textAttempt, user?.uid]);
 
   const scrollToChapter = (idx: number) => {
     setActiveChapter(idx);
@@ -69,17 +95,17 @@ export default function DocumentViewer({
     });
   };
 
-  const chapters = doc.analysis?.chapterMapping || [];
-  const topics = doc.analysis?.topics || [];
-  const definitions = doc.analysis?.definitions || [];
-  const formulas = doc.analysis?.formulas || [];
+  const chapters = doc.guide ? doc.guide.sections.map(section => ({ chapter: section.label, content: section.purpose })) : doc.analysis?.chapterMapping || [];
+  const topics = doc.guide ? doc.guide.concepts.map(concept => concept.name) : doc.analysis?.topics || [];
+  const definitions = doc.guide ? [] : doc.analysis?.definitions || [];
+  const formulas = doc.guide ? [] : doc.analysis?.formulas || [];
 
-  const pdfStoragePath = doc.storagePath;
+  const pdfOriginalRoute = `${API_URL}/api/documents/${encodeURIComponent(doc.id)}/original`;
   const isPdf = doc.fileType === "pdf";
 
   // The PDF endpoint needs an Authorization header, which <iframe src> and
   // <a href> cannot send, so fetch the bytes and hand the browser a blob URL.
-  const pdf = useObjectUrl(isPdf ? pdfStoragePath : null, true);
+  const pdf = useObjectUrl(isPdf && user?.uid ? pdfOriginalRoute : null, false, `${user?.uid}:${doc.courseId}:${doc.id}`);
   const pdfUrl = pdf.url;
 
   return (
@@ -113,15 +139,16 @@ export default function DocumentViewer({
               <span>
                 {new Date(doc.uploadedAt).toLocaleDateString()}
               </span>
-              {doc.analysis && (
+              {!doc.guide && doc.analysis && <span className="text-sage">{doc.analysis.keyConceptCount} {t("concepts")}</span>}
+              {doc.guide && (
                 <span className="text-sage">
-                  {doc.analysis.keyConceptCount} concepts
+                  {doc.unitCount ?? "—"} {t("source units")} · {doc.guide.sections.length} {t("guide sections")}
                 </span>
               )}
             </div>
           </div>
           <BookmarkButton item={bookmarkItem} size="sm" />
-          {isPdf && pdfStoragePath && pdfUrl && (
+          {isPdf && pdfUrl && (
             <a
               href={pdfUrl}
               target="_blank"
@@ -135,7 +162,7 @@ export default function DocumentViewer({
 
         {/* Tabs */}
         <div className="border-b border-line px-6 flex gap-1 flex-shrink-0">
-          {doc.analysis && (
+          {(doc.guide || doc.analysis) && (
             <button
               onClick={() => setActiveTab("analysis")}
               className={`px-4 py-3 text-sm font-medium border-b-2 transition ${
@@ -144,7 +171,7 @@ export default function DocumentViewer({
                   : "border-transparent text-ink-mute hover:text-ink"
               }`}
             >
-              Analysis
+              {t(doc.guide ? "Lightweight analysis" : "Analysis")}
             </button>
           )}
           <button
@@ -155,19 +182,27 @@ export default function DocumentViewer({
                 : "border-transparent text-ink-mute hover:text-ink"
             }`}
           >
-            Content
+            {t("Content")}
           </button>
+          {doc.sourceRevision && <button onClick={() => setActiveTab("sources")} className={`px-4 py-3 text-sm font-medium border-b-2 ${activeTab === "sources" ? "border-accent text-accent" : "border-transparent text-ink-mute"}`}>{t("Source units")}</button>}
         </div>
 
         {/* Body */}
         <div className="flex-1 overflow-hidden flex">
-          {activeTab === "analysis" && doc.analysis ? (
+          {activeTab === "sources" ? (
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              {!sources ? <p>{t("Loading source…")}</p> : sources.error ? <div role="alert"><p>{sources.error}</p><button className="underline mt-2" onClick={() => setSourceAttempt(n => n + 1)}>{t("Retry source")}</button></div> : <>
+                {sources.warnings.map((warning, i) => <p key={i} className="text-gold">{warning}</p>)}
+                {sources.units.map(unit => <div key={unit.unitId} className="border border-line rounded-xl p-4"><SourceCitation courseId={doc.courseId} sourceRefs={[{ documentId: doc.id, sourceRevision: doc.sourceRevision, unitId: unit.unitId, label: unit.label }]} /></div>)}
+              </>}
+            </div>
+          ) : activeTab === "analysis" && (doc.guide || doc.analysis) ? (
             <>
               {/* Chapter Navigation Sidebar */}
               {chapters.length > 0 && (
                 <nav className="hidden sm:block w-56 border-r border-line overflow-y-auto flex-shrink-0 p-4">
                   <div className="text-xs font-mono text-ink-mute uppercase tracking-widest mb-3">
-                    Chapters
+                    {t(doc.guide ? "Guide sections" : "Chapters")}
                   </div>
                   <div className="space-y-1">
                     {chapters.map((ch, idx) => (
@@ -207,11 +242,12 @@ export default function DocumentViewer({
 
               {/* Analysis Content */}
               <div className="flex-1 overflow-y-auto p-6 space-y-8">
+                {doc.guide?.warnings.map((warning, i) => <p key={i} className="text-sm text-gold">{warning}</p>)}
                 {/* Chapters */}
                 {chapters.length > 0 && (
                   <section>
                     <h3 className="font-serif text-lg font-medium mb-4">
-                      Chapter Breakdown
+                      {t(doc.guide ? "Guide sections" : "Chapter Breakdown")}
                     </h3>
                     <div className="space-y-4">
                       {chapters.map((ch, idx) => (
@@ -229,12 +265,14 @@ export default function DocumentViewer({
                           <p className="text-sm text-ink-soft leading-relaxed">
                             {ch.content}
                           </p>
+                          {doc.guide && <SourceCitation courseId={doc.courseId} sourceRefs={doc.guide.sections[idx].unitIds.map(unitId => ({ documentId: doc.id, sourceRevision: doc.guide?.sourceRevision, unitId }))} />}
                         </div>
                       ))}
                     </div>
                   </section>
                 )}
 
+                {doc.guide && doc.guide.concepts.length > 0 && <section><h3 className="font-serif text-lg font-medium mb-4">{t("Guide concepts")}</h3><div className="space-y-3">{doc.guide.concepts.map((concept, i) => <div key={i} className="border border-line rounded-xl p-4"><p>{concept.name}</p><SourceCitation courseId={doc.courseId} sourceRefs={concept.unitIds.map(unitId => ({ documentId: doc.id, sourceRevision: doc.guide?.sourceRevision, unitId }))} /></div>)}</div></section>}
                 {/* Definitions */}
                 {definitions.length > 0 && (
                   <section>
@@ -293,7 +331,7 @@ export default function DocumentViewer({
                   />
                 ) : (
                   <div className="flex items-center justify-center h-full text-ink-mute text-sm">
-                    {!pdfStoragePath ? "PDF file is unavailable for this document." : pdf.error ? <div role="alert" className="text-center"><p>{pdf.error}</p><button onClick={pdf.retry} className="mt-3 underline">Retry PDF</button></div> : "Loading PDF..."}
+                    {pdf.error ? <div role="alert" className="text-center"><p>{pdf.error}</p><button onClick={pdf.retry} className="mt-3 underline">Retry PDF</button></div> : "Loading PDF..."}
                   </div>
                 )
               ) : loadingText ? (

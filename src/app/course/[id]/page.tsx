@@ -86,7 +86,13 @@ export default function CoursePage() {
   const [viewingAudio, setViewingAudio] = useState<AudioRecording | null>(null);
   const [documentChanging, setDocumentChanging] = useState(false);
   const documentPolls = useRef(0);
+  const documentMutation = useRef<AbortController | null>(null);
+  useEffect(() => {
+    setDocumentChanging(false);
+    return () => documentMutation.current?.abort();
+  }, [courseId, user?.uid]);
   const foundationReady = foundation?.ready === true && !foundationLoading && !foundationError && !showDocUpload && !documentChanging;
+  const stagesComplete = documents.length > 0 && documents.every(doc => doc.preparationStatus === "completed" && doc.guideStatus === "completed" && !foundation?.failedDocumentIds?.includes(doc.id));
   const lockReason = t("Complete and confirm all lecture documents to unlock.");
 
   useEffect(() => {
@@ -106,7 +112,7 @@ export default function CoursePage() {
   // A document upload may be processing when this page is opened elsewhere.
   // Stop after ten minutes; the foundation panel retains an explicit retry.
   useEffect(() => {
-    if (!user?.uid || !documents.some(d => d.status === "pending" || d.status === "processing")) { documentPolls.current = 0; return; }
+    if (!user?.uid || !documents.some(d => d.status !== "failed" && d.preparationStatus !== "failed" && d.guideStatus !== "failed" && (d.status === "pending" || d.status === "processing" || d.preparationStatus === "pending" || d.preparationStatus === "processing" || d.guideStatus === "pending" || d.guideStatus === "processing"))) { documentPolls.current = 0; return; }
     if (documentPolls.current >= 120) return;
     const controller = new AbortController();
     let inFlight = false;
@@ -362,54 +368,36 @@ export default function CoursePage() {
     );
   };
 
-  // ---- Re-analyze document (retry AI when analysis failed or came back empty) ----
+  // Explicit stage retries are accepted jobs; detail/list polling owns completion.
   const handleReanalyzeDocument = async (doc: CourseDocument) => {
-    if (
-      !confirm(
-        `Re-analyze "${doc.title}"? This will run the AI analysis again on the document.`
-      )
-    )
-      return;
-
-    // Optimistic: mark as processing
+    if (documentChanging) return;
+    const prepare = !doc.sourceRevision || doc.preparationStatus !== "completed" || (foundation?.failedStages?.[doc.id]?.stage === "upgrade_required" || foundation?.failedStages?.[doc.id]?.stage === "preparation");
+    if (!confirm(t(prepare ? "Prepare this document from its original? Both stages must finish before confirmation." : "Retry lightweight analysis? You will need to confirm your documents again."))) return;
+    documentMutation.current?.abort();
+    const controller = new AbortController();
+    documentMutation.current = controller;
     setDocumentChanging(true);
-    void refreshFoundation();
-    setDocuments((prev) =>
-      prev.map((d) =>
-        d.id === doc.id ? { ...d, status: "processing", errorMessage: "" } : d
-      )
-    );
-
+    setDocuments(prev => prev.map(d => d.id === doc.id ? { ...d, status: "processing", preparationStatus: prepare ? "pending" : d.preparationStatus, guideStatus: "pending", preparationError: "", guideError: "", errorMessage: "" } : d));
     try {
-      const res = await apiFetch(
-        `${API_URL}/api/documents/${doc.id}/reanalyze`,
-        { method: "POST" }
-      );
+      const res = await apiFetch(`${API_URL}/api/documents/${encodeURIComponent(doc.id)}/${prepare ? "prepare" : "reanalyze"}`, { method: "POST", signal: controller.signal });
       const data = await res.json().catch(() => null);
-      if (!res.ok) {
-        throw new Error(
-          data?.detail || `Re-analysis failed (${res.status}).`
-        );
-      }
-      setDocuments((prev) =>
-        prev.map((d) =>
-          d.id === doc.id
-            ? { ...d, status: "completed", analysis: data.analysis, errorMessage: "" }
-            : d
-        )
-      );
-    } catch (e: any) {
-      setDocuments((prev) =>
-        prev.map((d) =>
-          d.id === doc.id
-            ? { ...d, status: "failed", errorMessage: e.message || "" }
-            : d
-        )
-      );
-      alert(e.message || "Re-analysis failed. Try again in a moment.");
+      if (controller.signal.aborted) return;
+      if (!res.ok) throw new Error(data?.detail || t("Document retry failed."));
+      if (data?.document_id !== doc.id) throw new Error(t("Document is unavailable."));
+      const detail = await apiJson(`${API_URL}/api/documents/detail/${encodeURIComponent(doc.id)}`, { signal: controller.signal });
+      if (controller.signal.aborted) return;
+      if (detail.document?.id !== doc.id || (detail.document.courseId && detail.document.courseId !== courseId)) throw new Error(t("Document is unavailable."));
+      setDocuments(prev => prev.map(d => d.id === doc.id ? { ...detail.document, title: d.title } : d));
+    } catch (error: any) {
+      if (controller.signal.aborted) return;
+      // Reload authoritative stage state: a transport failure may follow acceptance.
+      void loadDataRef.current?.();
+      alert(error.message || t("Document retry failed."));
     } finally {
-      await refreshFoundation();
-      setDocumentChanging(false);
+      if (!controller.signal.aborted) {
+        await refreshFoundation();
+        if (!controller.signal.aborted) setDocumentChanging(false);
+      }
     }
   };
 
@@ -459,6 +447,7 @@ export default function CoursePage() {
   // True if a completed document has an essentially empty analysis.
   const isEmptyAnalysis = (doc: CourseDocument) => {
     if (doc.status !== "completed") return false;
+    if (doc.guide || doc.sourceRevision) return false;
     if (!doc.analysis) return true;
     const a = doc.analysis;
     return (
@@ -582,7 +571,7 @@ export default function CoursePage() {
           {foundation?.state === "confirmation_required" && !foundationLoading && !documentChanging && !showDocUpload && (
             <div className="mb-8 bg-paper border border-sage/30 rounded-2xl p-6">
               <p className="text-sm text-ink-soft mb-4">{t("Upload every lecture document you intend to study before confirming. Adding, deleting, or reanalyzing a document will require confirmation again.")}</p>
-              <button onClick={() => void confirmFoundation()} className="bg-sage text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition">{t("I've uploaded all lecture documents")}</button>
+              <button disabled={!stagesComplete} onClick={() => { if (stagesComplete) void confirmFoundation(); }} className="disabled:opacity-50 disabled:cursor-not-allowed bg-sage text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition">{t("I've uploaded all lecture documents")}</button>
             </div>
           )}
 
@@ -824,7 +813,7 @@ export default function CoursePage() {
                 onReorder={handleReorderDocuments}
                 onRename={handleRenameDocument}
                 onItemClick={(doc) => setViewingDoc(doc)}
-                canClick={(doc) => doc.status === "completed"}
+                canClick={() => true}
                 onDelete={(doc) =>
                   handleDeleteItem("documents", doc.id, doc.title)
                 }
@@ -836,58 +825,24 @@ export default function CoursePage() {
                 renderMeta={(doc) => (
                   <>
                     {new Date(doc.uploadedAt).toLocaleDateString()}
-                    {doc.analysis &&
-                      ` · ${doc.analysis.topics?.length || 0} ${t("topics")}`}
-                    {doc.analysis?.chapterMapping &&
-                      ` · ${doc.analysis.chapterMapping.length} ${t("chapters")}`}
+                    {doc.sourceRevision ? ` · ${doc.unitCount ?? "—"} ${t("source units")} · ${doc.guide?.sections.length ?? "—"} ${t("guide sections")}` : doc.analysis && ` · ${doc.analysis.topics?.length || 0} ${t("topics")}` }
                   </>
                 )}
                 renderStatus={(doc) => {
                   const empty = isEmptyAnalysis(doc);
                   const rejected = foundation?.failedDocumentIds?.includes(doc.id) === true;
-                  const needsRetry =
-                    doc.status === "failed" || empty || rejected;
-                  return (
-                    <span className="inline-flex items-center gap-2">
-                      {doc.status === "completed" && !empty && !rejected && (
-                        <span className="text-sage">● {t("Analyzed")}</span>
-                      )}
-                      {doc.status === "completed" && (empty || rejected) && (
-                        <span
-                          className="text-gold"
-                          title={t(rejected ? "Analysis needs attention" : "Analysis came back empty")}
-                        >
-                          ● {t(rejected ? "Failed" : "Empty")}
-                        </span>
-                      )}
-                      {doc.status === "processing" && (
-                        <span className="text-gold">● {t("Processing")}</span>
-                      )}
-                      {doc.status === "failed" && (
-                        <span
-                          className="text-accent"
-                          title={doc.errorMessage || "Analysis failed"}
-                        >
-                          ● {t("Failed")}
-                        </span>
-                      )}
-                      {doc.status === "pending" && (
-                        <span className="text-ink-mute">● {t("Pending")}</span>
-                      )}
-                      {needsRetry && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleReanalyzeDocument(doc);
-                          }}
-                          className="text-[10px] underline text-accent hover:text-ink"
-                          title="Run AI analysis again"
-                        >
-                          {t("retry")}
-                        </button>
-                      )}
-                    </span>
-                  );
+                  const failure = foundation?.failedStages?.[doc.id];
+                  const legacy = !doc.sourceRevision && doc.status === "completed";
+                  const stageFailure = doc.preparationStatus === "failed" || doc.guideStatus === "failed";
+                  const pending = !stageFailure && doc.status !== "failed" && (doc.preparationStatus === "pending" || doc.preparationStatus === "processing" || doc.guideStatus === "pending" || doc.guideStatus === "processing" || doc.status === "processing" || doc.status === "pending");
+                  const needsRetry = doc.status === "failed" || stageFailure || empty || rejected || legacy;
+                  const label = pending ? doc.preparationStatus === "completed" ? "Creating lightweight analysis" : "Preparing document" : legacy || failure?.stage === "upgrade_required" ? "Preparation required" : needsRetry ? "Failed" : "Analyzed";
+                  const retryLabel = legacy || failure?.stage === "upgrade_required" ? "Prepare document" : doc.preparationStatus === "failed" || failure?.stage === "preparation" ? "Retry preparation" : doc.guideStatus === "failed" || failure?.stage === "guide" ? "Retry lightweight analysis" : "retry";
+                  return <span className="inline-flex flex-wrap items-center gap-2">
+                    <span className={needsRetry ? "text-accent" : pending ? "text-gold" : "text-sage"}>● {t(label)}</span>
+                    {(failure?.error || doc.preparationError || doc.guideError || doc.errorMessage) && <span className="text-xs text-accent">{failure?.error || doc.preparationError || doc.guideError || doc.errorMessage}</span>}
+                    {needsRetry && !pending && <button disabled={documentChanging} onClick={e => { e.stopPropagation(); void handleReanalyzeDocument(doc); }} className="text-[10px] underline text-accent hover:text-ink disabled:opacity-50">{t(retryLabel)}</button>}
+                  </span>;
                 }}
               />
             )}

@@ -45,6 +45,9 @@ interface Props {
   /** Per-file processing steps (animated while each file is analyzed). */
   steps: Step[];
   footerNote?: string;
+  maxSizeMB?: number;
+  pollAccepted?: (result: unknown, signal: AbortSignal) => Promise<void>;
+  actualStep?: number;
 }
 
 type Phase = "select" | "processing" | "done";
@@ -70,6 +73,9 @@ export default function MultiUploadModal({
   fileNoun,
   steps,
   footerNote,
+  maxSizeMB = MAX_SIZE_MB,
+  pollAccepted,
+  actualStep,
 }: Props) {
   const dialogRef = useDialog(() => { if (phase !== "processing") onClose(); });
   const { user } = useAuth();
@@ -88,17 +94,34 @@ export default function MultiUploadModal({
   const [completed, setCompleted] = useState<Set<string>>(new Set());
 
   const cancelledRef = useRef(false);
+  const requestRef = useRef<AbortController | null>(null);
+  const completionRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const identity = `${user?.uid || ""}:${courseId}`;
+  const identityRef = useRef(identity);
+  identityRef.current = identity;
 
   useEffect(() => {
+    cancelledRef.current = false;
+    setPhase("select");
+    setItems([]);
     return () => {
       cancelledRef.current = true;
+      requestRef.current?.abort();
+      if (completionRef.current) clearTimeout(completionRef.current);
     };
-  }, []);
+  }, [identity]);
+
+  useEffect(() => {
+    if (pollAccepted && actualStep !== undefined) {
+      setCurrentStep(actualStep);
+      setCompleted(new Set(steps.slice(0, actualStep).map(s => s.id)));
+    }
+  }, [actualStep, pollAccepted, steps]);
 
   const validateFile = (f: File): string | null => {
     const sizeMB = f.size / 1024 / 1024;
-    if (sizeMB > MAX_SIZE_MB)
-      return `"${f.name}" is too large (${sizeMB.toFixed(1)}MB). Max is ${MAX_SIZE_MB}MB.`;
+    if (sizeMB > maxSizeMB)
+      return `"${f.name}" is too large (${sizeMB.toFixed(1)}MB). Max is ${maxSizeMB}MB.`;
     const ext = f.name.split(".").pop()?.toLowerCase();
     if (!ext || !acceptExts.includes(ext))
       return `"${f.name}" is not a supported type (${acceptExts
@@ -156,7 +179,7 @@ export default function MultiUploadModal({
     );
   };
 
-  const uploadOne = async (file: File) => {
+  const uploadOne = async (file: File, signal: AbortSignal) => {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("user_id", user!.uid);
@@ -166,6 +189,7 @@ export default function MultiUploadModal({
     const res = await apiFetch(`${API_URL}${endpoint}`, {
       method: "POST",
       body: formData,
+      signal,
     });
     if (!res.ok) {
       const e = await res.json().catch(() => null);
@@ -181,22 +205,30 @@ export default function MultiUploadModal({
     setCompleted(new Set());
 
     let finished = false;
-    const uploadPromise = uploadOne(file);
+    const controller = requestRef.current!;
+    const uploadPromise = uploadOne(file, controller.signal);
 
     // Cosmetic step animation (all but the last step, which holds until done)
-    (async () => {
+    if (!pollAccepted) (async () => {
       for (let i = 0; i < steps.length; i++) {
-        if (cancelledRef.current || finished) return;
+        if (cancelledRef.current || controller.signal.aborted || finished) return;
         setCurrentStep(i);
         if (i === steps.length - 1) return;
         await new Promise((r) => setTimeout(r, steps[i].duration));
-        if (cancelledRef.current || finished) return;
+        if (cancelledRef.current || controller.signal.aborted || finished) return;
         setCompleted((prev) => new Set(prev).add(steps[i].id));
       }
     })();
 
     try {
-      await uploadPromise;
+      const response = await uploadPromise;
+      controller.signal.throwIfAborted();
+      if (pollAccepted) {
+        const accepted = await response.json();
+        controller.signal.throwIfAborted();
+        await pollAccepted(accepted, controller.signal);
+        controller.signal.throwIfAborted();
+      }
       finished = true;
       if (!cancelledRef.current) {
         setCompleted(new Set(steps.map((s) => s.id)));
@@ -217,26 +249,30 @@ export default function MultiUploadModal({
     }
     setError("");
     cancelledRef.current = false;
+    const startedIdentity = identity;
+    requestRef.current?.abort();
+    requestRef.current = new AbortController();
+    const stale = () => cancelledRef.current || requestRef.current?.signal.aborted || identityRef.current !== startedIdentity;
     setPhase("processing");
 
     // Process strictly one at a time — never all at once.
     for (let idx = 0; idx < items.length; idx++) {
-      if (cancelledRef.current) return;
+      if (stale()) return;
       setCurrentIndex(idx);
       setItemStatus(idx, "processing");
 
       const result = await processOne(items[idx].file);
-      if (cancelledRef.current) return;
+      if (stale()) return;
 
       if (result.ok) setItemStatus(idx, "done");
       else setItemStatus(idx, "failed", result.error);
     }
 
-    if (cancelledRef.current) return;
+    if (stale()) return;
     setPhase("done");
     // Give the user a beat to read the final counter, then refresh + close.
-    setTimeout(() => {
-      if (cancelledRef.current) return;
+    completionRef.current = setTimeout(() => {
+      if (stale()) return;
       onSuccess();
       onClose();
     }, 1600);
@@ -331,7 +367,7 @@ export default function MultiUploadModal({
                   : t("Drop files or click to browse")}
               </div>
               <div className="text-xs text-ink-mute">
-                {acceptExts.join(", ").toUpperCase()} · {MAX_SIZE_MB}MB ·{" "}
+                {acceptExts.join(", ").toUpperCase()} · {maxSizeMB}MB ·{" "}
                 {t("select multiple")}
               </div>
 

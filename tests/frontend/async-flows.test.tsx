@@ -46,7 +46,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 describe("authenticated previews", () => {
   it("ignores and revokes a PDF result that completes after switching documents", async () => {
     const old = deferred<string>();
-    mocks.file.mockImplementation((path: string) => path === "old.pdf" ? old.promise : Promise.resolve("blob:new"));
+    mocks.object.mockImplementation((url: string) => url.includes("/d1/original") ? old.promise : Promise.resolve("blob:new"));
     const { rerender, unmount } = render(<DocumentViewer document={{ ...doc, fileType: "pdf", storagePath: "old.pdf" }} onClose={() => {}} />);
     rerender(<DocumentViewer document={{ ...doc, id: "d2", title: "New notes", fileType: "pdf", storagePath: "new.pdf" }} onClose={() => {}} />);
     await screen.findByTitle("New notes");
@@ -87,11 +87,11 @@ describe("authenticated previews", () => {
     await waitFor(() => expect(mocks.api).toHaveBeenCalledTimes(2));
   });
   it("shows a PDF failure and retries once", async () => {
-    mocks.file.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce("blob:doc");
+    mocks.object.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce("blob:doc");
     render(<DocumentViewer document={{ ...doc, fileType: "pdf", storagePath: "safe.pdf" }} onClose={() => {}} />);
     fireEvent.click(await screen.findByRole("button", { name: /retry pdf/i }));
     await screen.findByTitle("Notes");
-    expect(mocks.file).toHaveBeenCalledTimes(2);
+    expect(mocks.object).toHaveBeenCalledTimes(2);
     cleanup(); expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:doc");
   });
   it("offers a working retry after answer-key failure", async () => {
@@ -271,4 +271,77 @@ it("retains the persisted material order when saving a reorder fails", async () 
   const titles = Array.from(document.querySelectorAll('[draggable]')).map(row => row.textContent);
   expect(titles[0]).toContain("First notes");
   expect(titles[1]).toContain("Second notes");
+});
+
+const citation = { documentId: 'd1', sourceRevision: 'rev1', unitId: 'page-1', label: 'Lecture page 1' };
+describe('saved output source citations', () => {
+  it.each([['summary', SummaryPage], ['flashcards', FlashcardsPage]] as const)('preserves exact citations in a saved %s', async (kind, Page) => {
+    mocks.api.mockImplementation(async (url: string) => {
+      if (url.includes('/detail/')) return response(kind === 'summary' ? { summary: { title: 'Saved cited study', sections: [{ heading: 'Evidence section', content: 'Content', sourceRefs: [citation] }] } } : { set: { title: 'Saved cited study', cards: [{ front: 'Question', back: 'Answer', sourceRefs: [citation] }] } });
+      if (url.includes('/list/')) return response(kind === 'summary' ? { summaries: [{ id: 's1', title: 'Saved cited study', createdAt: 1, sectionCount: 1 }] } : { sets: [{ id: 's1', title: 'Saved cited study', createdAt: 1, cardCount: 1 }] });
+      return response({});
+    });
+    render(<Page />);
+    fireEvent.click(await screen.findByRole('button', { name: /saved cited study/i }));
+    await screen.findByRole('button', { name: 'Lecture page 1' });
+  });
+  it('renders saved exam question citations in the normal child route', async () => {
+    mocks.api.mockResolvedValue(response({ exam: { id: 'e1', courseId: 'c1', examId: 'Cited exam', questionStructure: [{ id: 'q1', type: 'short', sourceRefs: [citation] }], status: 'ready' } }));
+    render(<ExamPage />);
+    await screen.findByRole('button', { name: 'Lecture page 1' });
+  });
+  it('attaches saved tutor sourceTurns only to their assistant message and strips display metadata from POST', async () => {
+    let sent: any;
+    mocks.api.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes('/tutor/chats')) return response({ chats: [{ id: 'chat1', title: 'Saved chat' }] });
+      if (url.includes('/tutor/chat/chat1')) return response({ chat: { messages: [{ role: 'user', content: 'Saved question' }, { role: 'assistant', content: 'Saved reply' }], sourceTurns: [{ messageIndex: 1, sourceRefs: [citation] }, { messageIndex: 0, sourceRefs: [{ ...citation, label: 'Wrong user citation' }] }] } });
+      if (url.endsWith('/tutor/chat') && init?.method === 'POST') { sent = JSON.parse(init.body as string); return response({ reply: 'New cited reply', sourceRefs: [citation] }); }
+      return response({});
+    });
+    render(<TutorPage />);
+    fireEvent.click((await screen.findAllByRole('button', { name: /saved chat/i }))[0]);
+    await screen.findByRole('button', { name: 'Lecture page 1' });
+    expect(screen.queryByText('Wrong user citation')).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: 'Follow up' } });
+    fireEvent.keyDown(screen.getByPlaceholderText(/ask/i), { key: 'Enter' });
+    await screen.findByText('New cited reply');
+    expect(sent.messages[1]).toEqual({ role: 'assistant', content: 'Saved reply' });
+    expect(screen.getAllByRole('button', { name: 'Lecture page 1' })).toHaveLength(2);
+  });
+});
+
+it('revokes a late original PDF blob after changing signed-in account', async () => {
+  const pending = deferred<string>();
+  mocks.object.mockReturnValueOnce(pending.promise).mockResolvedValueOnce('blob:current-account');
+  const view = render(<DocumentViewer document={{ ...doc, fileType: 'pdf' }} onClose={() => {}} />);
+  mocks.user = { uid: 'u2' };
+  view.rerender(<DocumentViewer document={{ ...doc, fileType: 'pdf' }} onClose={() => {}} />);
+  await screen.findByTitle('Notes');
+  await act(async () => pending.resolve('blob:old-account'));
+  expect(screen.getByTitle('Notes').getAttribute('src')).toBe('blob:current-account');
+  expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:old-account');
+  expect(mocks.object.mock.calls[0][0]).toMatch(/\/api\/documents\/d1\/original$/);
+  mocks.user = { uid: 'u1' };
+});
+it('navigates prepared source units and guide sections without storage paths or invented rich counts', async () => {
+  const prepared = { ...doc, fileType: 'pdf', sourceRevision: 'rev1', unitCount: 2, preparationStatus: 'completed', guideStatus: 'completed', guide: { version: 1, sourceRevision: 'rev1', sections: [{ label: 'Arrays guide', purpose: 'Navigate array content', unitIds: ['page-1'] }], concepts: [], warnings: ['Read the original diagram.'] } };
+  mocks.api.mockImplementation(async (url: string) => {
+    if (url.endsWith('/sources')) return response({ source: { available: true, sourceRevision: 'rev1', units: [{ unitId: 'page-1', kind: 'pdf_page', label: 'Page 1' }], warnings: [] } });
+    return response({ unit: { documentId: 'd1', sourceRevision: 'rev1', unitId: 'page-1', text: 'Original arrays' }, images: [] });
+  });
+  render(<DocumentViewer document={prepared as any} onClose={() => {}} />);
+  expect(screen.getByRole('heading', { name: 'Guide sections' })).toBeTruthy();
+  expect(await screen.findByRole('button', { name: 'Arrays guide' })).toBeTruthy();
+  expect(screen.queryByText(/Definitions \(0\)|Formulas \(0\)/)).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Source units' }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Page 1' }));
+  await screen.findByText('Original arrays');
+});
+
+it('keeps guide references on their original revision while the current source changes', async () => {
+  const staleGuide = { ...doc, fileType: 'pdf', sourceRevision: 'replacement', guide: { version: 1, sourceRevision: 'guide-original', sections: [{ label: 'Retained guide', purpose: 'Older original', unitIds: ['page-1'] }], concepts: [], warnings: [] } };
+  mocks.api.mockResolvedValue(response({ source: { available: true, sourceRevision: 'replacement', units: [], warnings: [] } }));
+  render(<DocumentViewer document={staleGuide as any} onClose={() => {}} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'page-1' }));
+  await waitFor(() => expect(mocks.api.mock.calls.some(([url]) => url.includes('source_revision=guide-original'))).toBe(true));
 });

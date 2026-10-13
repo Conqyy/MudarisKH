@@ -5,6 +5,7 @@ import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import SourceCitation, { SourceRef, validatedSourceRefs } from "@/components/SourceCitation";
 import Navbar from "@/components/Navbar";
 import Sidebar from "@/components/Sidebar";
 import { CourseFoundationGate } from "@/components/CourseFoundationGate";
@@ -48,6 +49,7 @@ const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
 interface ChatMessage {
+  sourceRefs?: SourceRef[];
   role: "user" | "assistant";
   content: string;
 }
@@ -295,7 +297,9 @@ export default function TutorPage() {
     try {
       const data = await apiJson(API_URL + "/api/tutor/chat/" + id, { signal: controller.signal });
       if (version !== conversationVersion.current) return;
-      setMessages(data.chat?.messages || []);
+      const savedMessages = data.chat?.messages || [];
+      const turns = Array.isArray(data.chat?.sourceTurns) ? data.chat.sourceTurns : [];
+      setMessages(savedMessages.map((message: ChatMessage, index: number) => ({ role: message.role, content: message.content, ...(message.role === "assistant" ? { sourceRefs: validatedSourceRefs(turns.find((turn: any) => turn.messageIndex === index)?.sourceRefs) } : {}) })));
       activeChatId.current = id;
       setChatId(id);
     } catch {
@@ -340,7 +344,7 @@ export default function TutorPage() {
           user_id: user.uid,
           course_id: courseId,
           chat_id: chatId,
-          messages: next,
+          messages: next.map(({ role, content }) => ({ role, content })),
           document_ids: Array.from(selLectures),
           recording_ids: Array.from(selRecs),
           historical_exam_ids: Array.from(selExams),
@@ -363,7 +367,7 @@ export default function TutorPage() {
       }
       const data = await res.json();
       if (version !== conversationVersion.current || controller.signal.aborted || (!foundationReadyRef.current && !foundationUnknownRef.current)) return;
-      setMessages((prev) => [...prev, { role: "assistant", content: data.reply || "" }]);
+      setMessages((prev) => [...prev, { role: "assistant", content: data.reply || "", sourceRefs: validatedSourceRefs(data.sourceRefs) }]);
       if (data.chat_id) { activeChatId.current = data.chat_id; setChatId(data.chat_id); }
       loadChats();
     } catch (e: any) {
@@ -791,6 +795,7 @@ export default function TutorPage() {
                               {m.content}
                             </ReactMarkdown>
                           )}
+                          {m.role === "assistant" && <SourceCitation key={`${chatId}:${conversationVersion.current}:${i}`} courseId={courseId} sourceRefs={m.sourceRefs} />}
                         </div>
                       </div>
                     ))}

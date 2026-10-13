@@ -3,6 +3,7 @@
 import { useEffect, useState, useRef } from "react";
 import { useRouter, useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
+import SourceCitation, { SourceRef } from "@/components/SourceCitation";
 import Navbar from "@/components/Navbar";
 import Sidebar from "@/components/Sidebar";
 import { CourseFoundationGate } from "@/components/CourseFoundationGate";
@@ -19,6 +20,9 @@ const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
 interface DocItem {
+  sourceRevision?: string;
+  unitCount?: number;
+  guide?: { sections: { label: string }[] };
   id: string;
   title: string;
   fileType: string;
@@ -27,6 +31,7 @@ interface DocItem {
 }
 
 interface Flashcard {
+  sourceRefs?: SourceRef[];
   front: string;
   back: string;
   topic?: string;
@@ -485,7 +490,7 @@ export default function FlashcardsPage() {
                 <div className="flex-1 min-w-0">
                   <div className="font-medium truncate">{doc.title}</div>
                   <div className="text-xs text-ink-mute font-mono">
-                    {doc.analysis?.topics?.length || 0} topics
+                    {doc.sourceRevision ? `${doc.unitCount ?? "—"} ${t("source units")} · ${doc.guide?.sections.length ?? "—"} ${t("guide sections")}` : `${doc.analysis?.topics?.length || 0} ${t("topics")}`}
                   </div>
                 </div>
               </label>
@@ -804,6 +809,7 @@ export default function FlashcardsPage() {
           />
         </div>
 
+        <SourceCitation key={current} courseId={courseId} sourceRefs={card.sourceRefs} />
         {/* Card */}
         <div
           className="flashcard-scene h-80 mb-6 cursor-pointer"
