@@ -41,9 +41,8 @@ export default function DocumentViewer({
   };
   useTrackRecent(bookmarkItem);
 
-  const [activeTab, setActiveTab] = useState<"content" | "analysis" | "sources">(
-    doc.guide || doc.analysis ? "analysis" : "content"
-  );
+  const defaultTab = doc.guide || doc.analysis ? "analysis" : "content";
+  const [activeTab, setActiveTab] = useState<"content" | "analysis" | "sources">(defaultTab);
   const [activeChapter, setActiveChapter] = useState(0);
   const [extractedText, setExtractedText] = useState(doc.extractedText || "");
   const [loadingText, setLoadingText] = useState(false);
@@ -54,9 +53,9 @@ export default function DocumentViewer({
   const [sourceState, setSourceState] = useState<{ key: string; units: { unitId: string; label: string; kind: string }[]; warnings: string[]; error?: string } | null>(null);
   const sourceKey = JSON.stringify([user?.uid, doc.courseId, doc.id, doc.sourceRevision]);
   useEffect(() => {
-    setActiveTab(doc.guide || doc.analysis ? "analysis" : "content");
+    setActiveTab(defaultTab);
     setActiveChapter(0);
-  }, [doc.id, user?.uid]);
+  }, [defaultTab, doc.id, user?.uid]);
   useEffect(() => {
     if (!doc.sourceRevision || !user?.uid) return;
     const controller = new AbortController();

@@ -63,7 +63,10 @@ export default function SourceCitation({ sourceRefs, courseId }: { sourceRefs: u
       {!current ? <p>{t("Loading source…")}</p> : current.error ? <div role="alert"><p>{t(current.error)}</p>{<button type="button" className="underline mt-2" onClick={() => setAttempt(n => n + 1)}>{t("Retry source")}</button>}</div> : <>
         {current.text ? <pre className="whitespace-pre-wrap font-sans leading-relaxed">{current.text}</pre> : !current.images?.length && <p>{t("This source unit is blank.")}</p>}
         {current.warnings?.map((warning, i) => <p key={`warning-${i}`} className="text-gold mt-2">{warning}</p>)}
-        {current.images?.map((src, i) => <img key={i} src={src} alt={`${selected.label || selected.unitId} ${i + 1}`} className="max-w-full mt-3" />)}
+        {current.images?.map((src, i) => (
+          // eslint-disable-next-line @next/next/no-img-element -- Authenticated original data URIs need native image rendering.
+          <img key={i} src={src} alt={`${selected.label || selected.unitId} ${i + 1}`} className="max-w-full mt-3" />
+        ))}
       </>}
     </div>}
   </div>;
