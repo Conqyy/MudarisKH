@@ -1,3 +1,4 @@
+from src.services.source_evidence import evidence_content, SOURCE_POLICY
 from openai import OpenAI
 import json
 import re
@@ -33,7 +34,7 @@ class ExamGeneratorAgent:
                               document_texts: list = None, historical_texts: list = None,
                               tutorial_insights: list = None, tutorial_texts: list = None,
                               total_marks: int = 40, exam_type: str = "Final",
-                              exam_blueprint: dict = None) -> str:
+                              exam_blueprint: dict = None, *, lecture_evidence: dict | None = None) -> str:
         document_insights = normalize_insights(document_insights)
         audio_insights = normalize_insights(audio_insights)
         historical_analysis = normalize_insights(historical_analysis)
@@ -75,7 +76,7 @@ class ExamGeneratorAgent:
         # allow-list. Whether each PAST-EXAM topic is in/out of this scope is
         # decided by the Historical Exam Analyzer (stored as inScope per topic);
         # here we just present that decision to the model.
-        course_topics = _course_topic_list(document_insights)
+        course_topics = _course_topic_list(document_insights) if lecture_evidence is None else []
         scope_section = ""
         if course_topics:
             scope_section = (
@@ -102,7 +103,8 @@ class ExamGeneratorAgent:
         # student selected for THIS exam, so picking one chapter doesn't let the
         # past exam pull the whole course back in.
         from src.utils.topic_scope import retag_topic_weights
-        historical_analysis = retag_topic_weights(historical_analysis, document_insights)
+        if lecture_evidence is None:
+            historical_analysis = retag_topic_weights(historical_analysis, document_insights)
 
         blueprint = exam_blueprint or build_exam_blueprint(historical_analysis, total_marks, exam_type)
 
@@ -234,8 +236,8 @@ class ExamGeneratorAgent:
         if len(user_payload) > 120000:
             raise ValueError('Selected exam context exceeds the budget; select fewer sources')
         messages = [
-            {"role": "system", "content": prompts.ENHANCED_EXAM_GEN_SYSTEM_PROMPT},
-            {"role": "user", "content": user_payload},
+            {"role": "system", "content": prompts.ENHANCED_EXAM_GEN_SYSTEM_PROMPT + (SOURCE_POLICY if lecture_evidence is not None else "")},
+            {"role": "user", "content": evidence_content(user_payload, lecture_evidence)},
         ]
 
         full = ""
@@ -542,7 +544,7 @@ class ExamGeneratorAgent:
                             document_insights: list = None, audio_insights: list = None,
                             historical_analysis: list = None, document_texts: list = None,
                             historical_texts: list = None, count: int = 20,
-                            tutorial_insights: list = None, tutorial_texts: list = None) -> list:
+                            tutorial_insights: list = None, tutorial_texts: list = None, *, lecture_evidence: dict | None = None) -> list:
         """Generate study flashcards from the course intelligence. Returns a list
         of {front, back, topic} dicts, prioritizing exam-likely content."""
         document_insights = normalize_insights(document_insights)
@@ -555,12 +557,13 @@ class ExamGeneratorAgent:
 
         # Scope the past exams to the documents the student selected (see
         # generate_summary) so picking one chapter doesn't produce whole-course cards.
-        historical_analysis = retag_topic_weights(historical_analysis, document_insights)
+        if lecture_evidence is None:
+            historical_analysis = retag_topic_weights(historical_analysis, document_insights)
 
         sections = []
 
         # HARD SCOPE: only the selected documents' topics may become cards.
-        course_topics = _course_topic_list(document_insights)
+        course_topics = _course_topic_list(document_insights) if lecture_evidence is None else []
         if course_topics:
             sections.append(
                 "--- SELECTED SCOPE (HARD LIMIT — every card must be about one of these "
@@ -658,15 +661,15 @@ class ExamGeneratorAgent:
             raise ValueError('Card count must be between 1 and 200')
         def _call(reminder):
             response = chat_with_retry(self.client, model=self.model_id,
-                messages=[{'role': 'system', 'content': prompts.FLASHCARD_GEN_SYSTEM_PROMPT + reminder + f"\nReturn EXACTLY {count} distinct complete cards."},
-                          {'role': 'user', 'content': user_payload}], temperature=0.3,
+                messages=[{'role': 'system', 'content': prompts.FLASHCARD_GEN_SYSTEM_PROMPT + reminder + (SOURCE_POLICY if lecture_evidence is not None else "") + f"\nReturn EXACTLY {count} distinct complete cards."},
+                          {'role': 'user', 'content': evidence_content(user_payload, lecture_evidence)}], temperature=0.3,
                 max_tokens=max(settings.OPENROUTER_MAX_TOKENS, 20000))
             if getattr(response.choices[0], 'finish_reason', None) == 'length':
                 raise ValueError('Flashcard response was truncated')
             return (response.choices[0].message.content or '').strip()
         return parse_with_retry(_call, label='flashcards', validator=lambda data: validate_flashcards(data, count))['cards']
 
-    def repair_latex(self, tex_content: str, error_hint: str = "") -> str:
+    def repair_latex(self, tex_content: str, error_hint: str = "", *, lecture_evidence: dict | None = None) -> str:
         """Ask the model to fix a LaTeX document that fails to compile.
         Returns repaired, sanitized LaTeX (preserving any <secret-rubrics> block)."""
         logger.info("Repairing LaTeX that failed to compile...")
@@ -697,7 +700,7 @@ Return ONLY the corrected, complete LaTeX document (from \\documentclass to \\en
             response = chat_with_retry(
                 self.client,
                 model=self.model_id,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "system", "content": SOURCE_POLICY if lecture_evidence is not None else "Follow the requested output schema."}, {"role": "user", "content": evidence_content(prompt, lecture_evidence)}],
                 temperature=0.0,
                 max_tokens=16000,
             )
@@ -709,7 +712,7 @@ Return ONLY the corrected, complete LaTeX document (from \\documentclass to \\en
             logger.error(f"LaTeX repair failed: {e}")
             return tex_content
 
-    def generate_rubrics_from_tex(self, tex_content: str, exam_id: str) -> dict:
+    def generate_rubrics_from_tex(self, tex_content: str, exam_id: str, *, lecture_evidence: dict | None = None) -> dict:
         """Fallback: derive grading rubrics (question types + answer keys) by
         reading the already-generated exam LaTeX. Used when the inline
         <secret-rubrics> block is missing (e.g. the generation was truncated)."""
@@ -732,7 +735,7 @@ Respond ONLY with raw JSON (no markdown, no commentary) in this exact shape:
             response = chat_with_retry(
                 self.client,
                 model=self.model_id,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "system", "content": SOURCE_POLICY if lecture_evidence is not None else "Follow the requested output schema."}, {"role": "user", "content": evidence_content(prompt, lecture_evidence)}],
                 temperature=0.1,
                 max_tokens=max(settings.OPENROUTER_MAX_TOKENS, 20000),
             )
@@ -760,7 +763,7 @@ Respond ONLY with raw JSON (no markdown, no commentary) in this exact shape:
         "\\usepackage{parskip}\n"
     )
 
-    def generate_answer_key(self, exam_tex: str, exam_id: str) -> str:
+    def generate_answer_key(self, exam_tex: str, exam_id: str, *, lecture_evidence: dict | None = None) -> str:
         """Produce a COMPLETE model-answer (worked solutions) LaTeX document for an
         already-generated exam. The model writes ONLY the body (per-question
         content); we wrap it in a guaranteed-valid document skeleton so the
@@ -799,8 +802,8 @@ Respond ONLY with raw JSON (no markdown, no commentary) in this exact shape:
         user = f"Answer EVERY question in this exam.\n\n--- EXAM (LaTeX) ---\n{clean_exam}"
 
         messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "system", "content": system + (SOURCE_POLICY if lecture_evidence is not None else "")},
+            {"role": "user", "content": evidence_content(user, lecture_evidence)},
         ]
 
         full = ""
@@ -859,7 +862,7 @@ Respond ONLY with raw JSON (no markdown, no commentary) in this exact shape:
         )
         return self._sanitize_latex(doc)
 
-    def generate_answer_pairs(self, exam_tex: str, exam_id: str) -> list:
+    def generate_answer_pairs(self, exam_tex: str, exam_id: str, *, lecture_evidence: dict | None = None) -> list:
         """Reliable answer data: ask the model for the full question text + the
         full answer as PLAIN TEXT JSON, so we can render a guaranteed-compilable
         PDF ourselves. Retries on bad JSON. Returns [{question, answer}, ...]."""
@@ -891,8 +894,8 @@ Respond ONLY with raw JSON (no markdown, no commentary) in this exact shape:
                 self.client,
                 model=self.model_id,
                 messages=[
-                    {"role": "system", "content": system + reminder},
-                    {"role": "user", "content": f"--- EXAM ---\n{clean_exam}"},
+                    {"role": "system", "content": system + reminder + (SOURCE_POLICY if lecture_evidence is not None else "")},
+                    {"role": "user", "content": evidence_content(f"--- EXAM ---\n{clean_exam}", lecture_evidence)},
                 ],
                 temperature=0.1,
                 # Big budget so even long exams (many questions) fit in one JSON
@@ -909,6 +912,7 @@ Respond ONLY with raw JSON (no markdown, no commentary) in this exact shape:
                     "question": str(it.get("question", "")),
                     "answer": str(it.get("answer", "")),
                     "explanation": str(it.get("explanation", "")),
+                    **({"questionId": it.get("questionId"), "sourceRefs": it.get("sourceRefs", [])} if lecture_evidence is not None else {}),
                 }
                 for it in items if isinstance(it, dict) and (it.get("question") or it.get("answer"))
             ]

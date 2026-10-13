@@ -12,10 +12,10 @@ def source_scope(texts, visual=False):
     for i, text in enumerate(texts, 1):
         unit = {'unitId': f'p{i:04d}', 'kind': 'page', 'position': i, 'label': f'Page {i}',
                 'text': text, 'blank': not text, 'needsVisualRead': False, 'warnings': [], 'visualAssets': []}
-        if visual and i == 1:
+        if visual and i == (len(texts) if visual == 'last' else 1):
             unit.update(needsVisualRead=True, blank=False, visualReadStatus='readable',
                         visualText='رسم يوضح أَشجار البحث. Café search trees.',
-                        visualAssets=[{'assetId': 'page-1', 'unitId': 'p0001', 'kind': 'page', 'mimeType': 'image/png'}])
+                        visualAssets=[{'assetId': f'page-{i}', 'unitId': f'p{i:04d}', 'kind': 'page', 'mimeType': 'image/png'}])
         units.append(unit)
     manifest = build_source_manifest('selected', 'a'*64, 'pdf', units)
     guide = {'version': 1, 'sourceRevision': manifest['sourceRevision'],

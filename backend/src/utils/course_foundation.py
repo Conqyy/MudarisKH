@@ -85,6 +85,20 @@ def hydrate_document_source(database, document: dict, *, library=None) -> dict:
     return result
 
 
+def foundation_material_revision(documents: list) -> str:
+    """Pure retry-sensitive identity, shared by readiness and publication fences."""
+    identities = []
+    for document in documents:
+        if not isinstance(document, dict):
+            identities.append(_stable_json({'malformedDocument': document}))
+            continue
+        identity = {field: document.get(field) for field in _REVISION_FIELDS}
+        job = document.get('processingJob')
+        identity['jobId'] = job.get('id') if isinstance(job, dict) else None
+        identities.append(_stable_json(identity))
+    return hashlib.sha256(_stable_json(sorted(identities)).encode('utf-8')).hexdigest()
+
+
 def build_foundation_status(documents: list, confirmed_revision: str = '') -> dict:
     """Both validated stages and confirmation of the material retry identity."""
     from src.utils.source_contracts import validate_manifest, validate_guide, guide_digest
@@ -139,7 +153,7 @@ def build_foundation_status(documents: list, confirmed_revision: str = '') -> di
                 failed_stages[document['id']] = {'stage': stage, 'error': error or 'Processing failed. Retry this document.'}
         else:
             completed += 1
-    revision = hashlib.sha256(_stable_json(sorted(sources)).encode('utf-8')).hexdigest()
+    revision = foundation_material_revision(documents)
     ready = bool(documents) and not pending and not failed and confirmed_revision == revision
     if not documents:
         state, message = 'missing', 'Upload all lecture documents and let preparation and guide creation finish before using study tools.'

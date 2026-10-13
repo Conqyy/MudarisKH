@@ -89,3 +89,24 @@ class AITutorAgent:
         if not answer or getattr(response.choices[0], 'finish_reason', None) == 'length':
             raise RuntimeError('The tutor response was empty or incomplete. Please retry.')
         return answer
+
+    def reply_grounded(self, resources: dict, messages: list, *, lecture_evidence: dict) -> dict:
+        from src.services.source_evidence import evidence_content, SOURCE_POLICY
+        from src.utils.ai_contracts import response_text
+        from src.utils.json_parse import parse_with_retry
+        history = [{'role': m.get('role', 'user'), 'content': str(m.get('content', ''))}
+                   for m in messages[-12:] if m.get('content')]
+        context = self._build_context(resources)
+        def validate(value):
+            if (not isinstance(value.get('reply'), str) or not value['reply'].strip()
+                    or not isinstance(value.get('sourceRefs'), list)):
+                raise ValueError('Tutor reply and sourceRefs are required')
+            return {'reply': value['reply'], 'sourceRefs': value['sourceRefs']}
+        def call(reminder):
+            answer = chat_with_retry(self.client, model=self.model_id,
+                messages=[{'role': 'system', 'content': prompts.AI_TUTOR_SYSTEM_PROMPT + SOURCE_POLICY
+                           + '\nReturn JSON {"reply":"answer","sourceRefs":[exact refs]}. For a purely social response use empty refs.' + reminder},
+                          {'role': 'user', 'content': evidence_content(context, lecture_evidence)}, *history],
+                temperature=0.3, max_tokens=6000)
+            return response_text(answer)
+        return parse_with_retry(call, label='grounded tutor reply', validator=validate)

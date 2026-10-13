@@ -1,3 +1,4 @@
+from src.services.source_evidence import evidence_content, SOURCE_POLICY
 from openai import OpenAI
 import json
 import re
@@ -207,7 +208,7 @@ class AudioIntelligenceAgent:
         return allowed / len(letters) >= 0.5
 
     def analyze_transcript(self, transcript: str, course_title: str,
-                           document_insights: list = None) -> dict:
+                           document_insights: list = None, *, lecture_evidence: dict | None = None) -> dict:
         logger.info("Analyzing transcript")
 
         # Feed (almost) the whole transcript so the summary covers the ENTIRE
@@ -234,11 +235,11 @@ class AudioIntelligenceAgent:
                 messages=[
                     {
                         "role": "system",
-                        "content": prompts.AUDIO_INTELLIGENCE_SYSTEM_PROMPT + reminder,
+                        "content": prompts.AUDIO_INTELLIGENCE_SYSTEM_PROMPT + reminder + (SOURCE_POLICY if lecture_evidence is not None else ""),
                     },
                     {
                         "role": "user",
-                        "content": f"Course: {course_title}{grounding}\n\n---LECTURE TRANSCRIPT---\n{truncated}",
+                        "content": evidence_content(f"Course: {course_title}{grounding}\n\n---LECTURE TRANSCRIPT---\n{truncated}", lecture_evidence),
                     },
                 ],
                 temperature=0.1,

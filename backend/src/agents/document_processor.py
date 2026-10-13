@@ -1,3 +1,4 @@
+from src.services.source_evidence import evidence_content, SOURCE_POLICY
 from openai import OpenAI
 import json
 import io
@@ -384,7 +385,7 @@ class DocumentProcessorAgent:
         return result
 
     def analyze_tutorial(self, text: str, course_title: str, image_uris: list = None,
-                         document_insights: list = None) -> dict:
+                         document_insights: list = None, *, lecture_evidence: dict | None = None) -> dict:
         """Analyze a TUTORIAL / practice-problem sheet. Unlike a lecture document,
         a tutorial is a set of QUESTIONS the student solves — so we capture each
         problem (what it asks, the given data/tables, the concept, and the method)
@@ -427,9 +428,9 @@ class DocumentProcessorAgent:
                 messages=[
                     {
                         "role": "system",
-                        "content": prompts.TUTORIAL_SYSTEM_PROMPT + reminder,
+                        "content": prompts.TUTORIAL_SYSTEM_PROMPT + reminder + (SOURCE_POLICY if lecture_evidence is not None else ""),
                     },
-                    {"role": "user", "content": _user_content()},
+                    {"role": "user", "content": evidence_content(_user_content(), lecture_evidence)},
                 ],
                 temperature=0.1,
                 # Tutorials can have many problems + code; give the JSON room so

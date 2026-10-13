@@ -57,6 +57,8 @@ def test_readiness_validates_actual_artifacts_and_public_projection(source_api, 
     assert failed['failedDocumentIds'] == [doc]
 
 def test_identical_retry_reconfirmation_fences_inflight_generation(source_api, library, monkeypatch):
+    from tests.foundation_fixtures import stub_source_provider
+    stub_source_provider(monkeypatch)
     doc = complete(library)
     first = source_api.get_course_foundation('c', uid='u')
     source_api.confirm_course_foundation('c', source_api.FoundationConfirmRequest(revision=first['revision']), uid='u')

@@ -186,7 +186,7 @@ class FirebaseClient:
     # ──────────────────────────────────────────────────
 
     @local_locked
-    def _flat_save(self, collection_name: str, data: dict) -> str:
+    def _flat_save(self, collection_name: str, data: dict, *, expected_foundation_revision=None) -> str:
         validate_record_size(data)
         user_id = data.get('userId') or data.get('uid')
         course_id = data.get('courseId') or None
@@ -198,6 +198,7 @@ class FirebaseClient:
         if self.use_local:
             self._assert_write_allowed(user_id, course_id)
             local = self._read_local_db()
+            self._assert_foundation_current(user_id, course_id, expected_foundation_revision, local=local)
             local.setdefault(collection_name, {})
             doc_id = f"{collection_name}_{uuid.uuid4().hex}"
             if collection_name == 'courses':
@@ -214,6 +215,7 @@ class FirebaseClient:
         def save(transaction):
             self._assert_write_allowed(user_id, doc_ref.id if collection_name == 'courses' else course_id,
                                        transaction, parent_required=collection_name != 'courses')
+            self._assert_foundation_current(user_id, course_id, expected_foundation_revision, transaction=transaction)
             foundation_ref, foundation = None, None
             if collection_name == 'documents':
                 foundation_ref = self.db.collection('document_foundations').document(course_id)
@@ -226,7 +228,7 @@ class FirebaseClient:
         return save(self.db.transaction())
 
     @local_locked
-    def _flat_update(self, collection_name: str, doc_id: str, data: dict):
+    def _flat_update(self, collection_name: str, doc_id: str, data: dict, *, expected_foundation_revision=None):
         if self.use_local:
             local = self._read_local_db()
             if collection_name in local and doc_id in local[collection_name]:
@@ -235,6 +237,7 @@ class FirebaseClient:
                     raise DataDeletionConflict('Document cleanup is in progress; updates are disabled')
                 self._assert_update_owner(current, data)
                 self._assert_write_allowed(current.get('userId') or current.get('uid'), doc_id if collection_name == 'courses' else data.get('courseId', current.get('courseId')) or None)
+                self._assert_foundation_current(current.get('userId'), current.get('courseId'), expected_foundation_revision, local=local)
                 validate_record_size({**current, **data})
                 local[collection_name][doc_id].update(data)
                 self._write_local_db(local)
@@ -252,6 +255,7 @@ class FirebaseClient:
                 raise DataDeletionConflict('Document cleanup is in progress; updates are disabled')
             self._assert_update_owner(current, data)
             self._assert_write_allowed(current.get('userId') or current.get('uid'), doc_id if collection_name == 'courses' else data.get('courseId', current.get('courseId')) or None, transaction)
+            self._assert_foundation_current(current.get('userId'), current.get('courseId'), expected_foundation_revision, transaction=transaction)
             validate_record_size({**current, **data})
             transaction.update(reference, data)
             return True
@@ -397,8 +401,8 @@ class FirebaseClient:
         data.update({"userId": user_id, "courseId": course_id})
         return self._flat_save("audio_recordings", data)
 
-    def update_audio_recording(self, rec_id: str, data: dict):
-        self._flat_update("audio_recordings", rec_id, data)
+    def update_audio_recording(self, rec_id: str, data: dict, *, expected_foundation_revision=None):
+        self._flat_update("audio_recordings", rec_id, data, expected_foundation_revision=expected_foundation_revision)
 
     def get_audio_recording(self, rec_id: str) -> dict:
         return self._flat_get("audio_recordings", rec_id)
@@ -414,8 +418,8 @@ class FirebaseClient:
         data.update({"userId": user_id, "courseId": course_id})
         return self._flat_save("historical_exams", data)
 
-    def update_historical_exam(self, exam_id: str, data: dict):
-        self._flat_update("historical_exams", exam_id, data)
+    def update_historical_exam(self, exam_id: str, data: dict, *, expected_foundation_revision=None):
+        self._flat_update("historical_exams", exam_id, data, expected_foundation_revision=expected_foundation_revision)
 
     def get_course_historical_exams(self, course_id: str, user_id: str = None) -> list:
         return self._flat_query_by_course("historical_exams", course_id, user_id)
@@ -432,8 +436,8 @@ class FirebaseClient:
         data.update({"userId": user_id, "courseId": course_id})
         return self._flat_save("tutorials", data)
 
-    def update_tutorial(self, tut_id: str, data: dict):
-        self._flat_update("tutorials", tut_id, data)
+    def update_tutorial(self, tut_id: str, data: dict, *, expected_foundation_revision=None):
+        self._flat_update("tutorials", tut_id, data, expected_foundation_revision=expected_foundation_revision)
 
     def get_tutorial(self, tut_id: str) -> dict:
         return self._flat_get("tutorials", tut_id)
@@ -445,12 +449,12 @@ class FirebaseClient:
         self._flat_delete("tutorials", tut_id)
 
     # --- Generated Exams (flat, for enhanced generator) ---
-    def save_exam_flat(self, user_id: str, course_id: str, data: dict) -> str:
+    def save_exam_flat(self, user_id: str, course_id: str, data: dict, *, expected_foundation_revision=None) -> str:
         data.update({"userId": user_id, "courseId": course_id})
-        return self._flat_save("exams", data)
+        return self._flat_save("exams", data, expected_foundation_revision=expected_foundation_revision)
 
-    def update_exam(self, doc_id: str, data: dict):
-        self._flat_update("exams", doc_id, data)
+    def update_exam(self, doc_id: str, data: dict, *, expected_foundation_revision=None):
+        self._flat_update("exams", doc_id, data, expected_foundation_revision=expected_foundation_revision)
 
     def get_exam(self, doc_id: str) -> dict:
         return self._flat_get("exams", doc_id)
@@ -462,9 +466,9 @@ class FirebaseClient:
         self._flat_delete("exams", doc_id)
 
     # --- Flashcard Sets ---
-    def save_flashcard_set(self, user_id: str, course_id: str, data: dict) -> str:
+    def save_flashcard_set(self, user_id: str, course_id: str, data: dict, *, expected_foundation_revision=None) -> str:
         data.update({"userId": user_id, "courseId": course_id})
-        return self._flat_save("flashcard_sets", data)
+        return self._flat_save("flashcard_sets", data, expected_foundation_revision=expected_foundation_revision)
 
     def get_flashcard_set(self, doc_id: str) -> dict:
         return self._flat_get("flashcard_sets", doc_id)
@@ -476,9 +480,9 @@ class FirebaseClient:
         self._flat_delete("flashcard_sets", doc_id)
 
     # --- Summaries ---
-    def save_summary(self, user_id: str, course_id: str, data: dict) -> str:
+    def save_summary(self, user_id: str, course_id: str, data: dict, *, expected_foundation_revision=None) -> str:
         data.update({"userId": user_id, "courseId": course_id})
-        return self._flat_save("summaries", data)
+        return self._flat_save("summaries", data, expected_foundation_revision=expected_foundation_revision)
 
     def get_summary(self, doc_id: str) -> dict:
         return self._flat_get("summaries", doc_id)
@@ -576,9 +580,9 @@ class FirebaseClient:
             ],
         }
 
-    def save_tutor_chat(self, user_id: str, course_id: str, data: dict) -> str:
+    def save_tutor_chat(self, user_id: str, course_id: str, data: dict, *, expected_foundation_revision=None) -> str:
         data.update({"userId": user_id, "courseId": course_id})
-        return self._flat_save("tutor_chats", data)
+        return self._flat_save("tutor_chats", data, expected_foundation_revision=expected_foundation_revision)
 
     def get_tutor_chat(self, chat_id: str) -> dict:
         return self._flat_get("tutor_chats", chat_id)
@@ -589,7 +593,7 @@ class FirebaseClient:
     @local_locked
     def append_tutor_messages(self, user_id: str, course_id: str, chat_id: str,
                               expected_messages: list, new_messages: list, updated_at: int,
-                              *, foundation_revision: str = None) -> dict:
+                              *, foundation_revision: str = None, expected_foundation_revision=None, source_turn=None) -> dict:
         """Atomically append one turn only to the exact authorized prior history."""
         validate_component(user_id, 'user ID')
         validate_component(course_id, 'course ID')
@@ -612,11 +616,14 @@ class FirebaseClient:
             data = {'messages': messages, 'updatedAt': updated_at}
             if foundation_revision is not None:
                 data['foundationRevision'] = foundation_revision
+            if source_turn is not None:
+                data['sourceTurns'] = [*chat.get('sourceTurns', []), deepcopy(source_turn)]
             return data
 
         if self.use_local:
             self._assert_write_allowed(user_id, course_id)
             local = self._read_local_db()
+            self._assert_foundation_current(user_id, course_id, expected_foundation_revision, local=local)
             course = local.get('courses', {}).get(course_id, {})
             chat = local.get('tutor_chats', {}).get(chat_id, {})
             data = authorize(course, chat)
@@ -632,6 +639,7 @@ class FirebaseClient:
         @firestore.transactional
         def append(transaction):
             self._assert_write_allowed(user_id, course_id, transaction)
+            self._assert_foundation_current(user_id, course_id, expected_foundation_revision, transaction=transaction)
             course = course_ref.get(transaction=transaction)
             chat = chat_ref.get(transaction=transaction)
             current = chat.to_dict() or {} if chat.exists else {}
@@ -1334,8 +1342,34 @@ class FirebaseClient:
             return {}
         return row
 
+    def _assert_foundation_current(self, user_id, course_id, revision, *, local=None,
+                                   transaction=None, confirming=False):
+        """No artifact/provider I/O: atomically fence the material rows and confirmation."""
+        if revision is None:
+            return  # Explicit compatibility seam for existing internal writes.
+        from src.utils.course_foundation import foundation_material_revision
+        if local is not None:
+            documents = [{**row, 'id': identity} for identity, row in local.get('documents', {}).items()
+                         if row.get('courseId') == course_id and row.get('userId') == user_id]
+            confirmation = local.get('document_foundations', {}).get(course_id, {})
+        else:
+            from google.cloud.firestore_v1.base_query import FieldFilter
+            query = self.db.collection('documents').where(filter=FieldFilter('courseId', '==', course_id))
+            documents = [{**snap.to_dict(), 'id': snap.id} for snap in query.stream(transaction=transaction)
+                         if (snap.to_dict() or {}).get('userId') == user_id]
+            snap = self.db.collection('document_foundations').document(course_id).get(transaction=transaction)
+            confirmation = snap.to_dict() or {} if snap.exists else {}
+        if (not documents or foundation_material_revision(documents) != revision
+                or any(any(row.get(field) != 'completed' for field in
+                           ('status', 'preparationStatus', 'guideStatus')) for row in documents)):
+            raise DataConflict('Lecture foundation changed. Confirm all documents again and retry.')
+        if not confirming and (confirmation.get('userId') != user_id
+                               or confirmation.get('courseId') != course_id
+                               or confirmation.get('revision') != revision):
+            raise DataConflict('Lecture foundation confirmation changed. Confirm again and retry.')
+
     @local_locked
-    def confirm_document_foundation(self, user_id: str, course_id: str, revision: str) -> bool:
+    def confirm_document_foundation(self, user_id: str, course_id: str, revision: str, *, require_current_documents=False) -> bool:
         """Atomically save backend-only confirmation without changing course data."""
         validate_component(user_id, 'user ID')
         validate_component(course_id, 'course ID')
@@ -1350,6 +1384,8 @@ class FirebaseClient:
         if self.use_local:
             self._assert_write_allowed(user_id, course_id)
             local = self._read_local_db()
+            if require_current_documents:
+                self._assert_foundation_current(user_id, course_id, revision, local=local, confirming=True)
             authorize(local.get('document_foundations', {}).get(course_id, {}))
             local.setdefault('document_foundations', {})[course_id] = data
             self._write_local_db(local)
@@ -1360,6 +1396,8 @@ class FirebaseClient:
         @firestore.transactional
         def confirm(transaction):
             self._assert_write_allowed(user_id, course_id, transaction)
+            if require_current_documents:
+                self._assert_foundation_current(user_id, course_id, revision, transaction=transaction, confirming=True)
             snapshot = reference.get(transaction=transaction)
             authorize(snapshot.to_dict() or {} if snapshot.exists else {})
             transaction.set(reference, data)
@@ -1579,11 +1617,12 @@ class FirebaseClient:
     # ──────────────────────────────────────────────────
 
     @local_locked
-    def save_secret_rubrics(self, user_id: str, course_id: str, exam_id: str, rubrics_data: dict):
+    def save_secret_rubrics(self, user_id: str, course_id: str, exam_id: str, rubrics_data: dict, *, expected_foundation_revision=None):
         validate_record_size(rubrics_data)
         if self.use_local:
             self._assert_write_allowed(user_id, course_id)
             data = self._read_local_db()
+            self._assert_foundation_current(user_id, course_id, expected_foundation_revision, local=data)
             data.setdefault("users", {}).setdefault(user_id, {}).setdefault("courses", {}).setdefault(course_id, {}).setdefault("exams", {})
             data["users"][user_id]["courses"][course_id]["exams"][exam_id] = rubrics_data
             self._write_local_db(data)
@@ -1595,6 +1634,7 @@ class FirebaseClient:
         @firestore.transactional
         def save(transaction):
             self._assert_write_allowed(user_id, course_id, transaction)
+            self._assert_foundation_current(user_id, course_id, expected_foundation_revision, transaction=transaction)
             existing = reference.get(transaction=transaction)
             changes = {'exam_id': exam_id, 'rubrics': rubrics_data, 'created_at': firestore.SERVER_TIMESTAMP}
             validate_record_size({**(existing.to_dict() or {} if existing.exists else {}), **changes})

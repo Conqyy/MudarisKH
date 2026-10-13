@@ -1,3 +1,4 @@
+from src.services.source_evidence import evidence_content, SOURCE_POLICY
 """Generate study summaries independently of exam generation."""
 import logging
 from openai import OpenAI
@@ -28,7 +29,7 @@ class SummaryGeneratorAgent:
                          historical_analysis: list = None, document_texts: list = None,
                          historical_texts: list = None,
                          tutorial_insights: list = None, tutorial_texts: list = None,
-                         instructions: str = "") -> dict:
+                         instructions: str = "", *, lecture_evidence: dict | None = None) -> dict:
         """Generate a structured study summary from the course intelligence.
         Returns {title, overview, sections[], keyTerms[], examFocus[]}."""
         document_insights = normalize_insights(document_insights)
@@ -44,12 +45,13 @@ class SummaryGeneratorAgent:
         # against the whole course at upload time). Without this, selecting one
         # chapter still produced a whole-course summary, because the past exams
         # cover every chapter and the prompt tells the model to cover them.
-        historical_analysis = retag_topic_weights(historical_analysis, document_insights)
+        if lecture_evidence is None:
+            historical_analysis = retag_topic_weights(historical_analysis, document_insights)
 
         sections = []
 
         # HARD SCOPE: only the selected documents' topics may appear.
-        course_topics = _course_topic_list(document_insights)
+        course_topics = _course_topic_list(document_insights) if lecture_evidence is None else []
         if course_topics:
             sections.append(
                 "--- SELECTED SCOPE (HARD LIMIT — the summary must cover ONLY these "
@@ -174,8 +176,8 @@ class SummaryGeneratorAgent:
 
         def _call(reminder):
             response = chat_with_retry(self.client, model=self.model_id,
-                messages=[{'role': 'system', 'content': prompts.SUMMARY_GEN_SYSTEM_PROMPT + reminder},
-                          {'role': 'user', 'content': user_payload}], temperature=0.3,
+                messages=[{'role': 'system', 'content': prompts.SUMMARY_GEN_SYSTEM_PROMPT + reminder + (SOURCE_POLICY if lecture_evidence is not None else "")},
+                          {'role': 'user', 'content': evidence_content(user_payload, lecture_evidence)}], temperature=0.3,
                 max_tokens=max(settings.OPENROUTER_MAX_TOKENS, 20000))
             if getattr(response.choices[0], 'finish_reason', None) == 'length':
                 raise ValueError('Summary response was truncated')

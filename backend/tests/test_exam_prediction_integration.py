@@ -7,7 +7,7 @@ import pytest
 from src.utils.ai_contracts import validate_exam_contract, validate_analysis
 from src.utils.topic_scope import retag_topic_weights
 from src.agents.exam_generator import ExamGeneratorAgent
-from tests.foundation_fixtures import confirm_lecture_foundation, lecture_document
+from tests.foundation_fixtures import confirm_lecture_foundation, lecture_document, source_refs
 
 
 TEX = r'\begin{document}\textbf{Question 1:} Choose. [2 marks]\textbf{Question 2:} Explain. [3 marks]\end{document}'
@@ -112,11 +112,11 @@ def test_generation_uses_and_saves_one_combined_prediction(monkeypatch, api_modu
     agent = ExamGeneratorAgent.__new__(ExamGeneratorAgent)
     agent.client, agent.model_id = object(), 'fake'
     monkeypatch.setattr(api, 'ai_agent', agent)
-    complete = TEX + '\n<secret-rubrics>' + json.dumps(RUBRICS) + '</secret-rubrics>'
+    complete = TEX + '\n<secret-rubrics>' + json.dumps({'questions': {k: {**v, 'sourceRefs': source_refs(documents)} for k, v in RUBRICS['questions'].items()}}) + '</secret-rubrics>'
     response = SimpleNamespace(choices=[SimpleNamespace(finish_reason='stop', message=SimpleNamespace(content=complete))])
     monkeypatch.setattr('src.agents.exam_generator.chat_with_retry', lambda *a, **kw: response)
     monkeypatch.setattr('src.utils.pdf_response.compile_temp_pdf', lambda *a, **kw: None)
-    monkeypatch.setattr(agent, 'repair_latex', lambda tex: tex)
+    monkeypatch.setattr(agent, 'repair_latex', lambda tex, **kwargs: tex)
     result = api.generate_enhanced_exam_endpoint(api.EnhancedExamGenerateRequest(
         user_id='owner', course_id='course', total_marks=5, exam_type='Final', historical_exam_ids=['a', 'b']), uid='owner')
     blueprint = result['exam_blueprint']
@@ -166,7 +166,7 @@ def test_generation_stops_if_selected_past_source_disappears_on_refresh(monkeypa
          'source_ids': {'historical_exam_ids': []}},
     ]
     monkeypatch.setattr(api, 'db_client', db)
-    monkeypatch.setattr(api, '_ensure_historical_paper_analysis', lambda *a: True)
+    monkeypatch.setattr(api, '_ensure_historical_paper_analysis', lambda *a, **kw: True)
     agent = MagicMock()
     monkeypatch.setattr(api, 'ai_agent', agent)
     with pytest.raises(api.HTTPException) as error:
@@ -176,3 +176,9 @@ def test_generation_stops_if_selected_past_source_disappears_on_refresh(monkeypa
     assert db.get_course_intelligence.call_count == 2
     agent.compile_enhanced_exam.assert_not_called()
     db.save_exam_flat.assert_not_called()
+
+
+@pytest.fixture(autouse=True)
+def source_provider_boundary(monkeypatch):
+    from tests.foundation_fixtures import stub_source_provider
+    stub_source_provider(monkeypatch)

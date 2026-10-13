@@ -19,7 +19,7 @@ def foundation_db(monkeypatch, api_module):
     db.get_course_documents.return_value = []
     db.get_course_intelligence.return_value = {'document_analyses': [ANALYSIS]}
     db.get_document_foundation.return_value = {}
-    def confirm(owner, course_id, revision):
+    def confirm(owner, course_id, revision, **kwargs):
         db.get_document_foundation.return_value = {'userId': owner, 'courseId': course_id, 'revision': revision}
         return True
     db.confirm_document_foundation.side_effect = confirm
@@ -190,3 +190,9 @@ def test_foundation_failure_identifies_the_document_that_can_be_retried(api_modu
     status = api.get_course_foundation('course', uid='owner')
     assert status['state'] == 'failed'
     assert status['failedDocumentIds'] == ['doc']
+
+
+@pytest.fixture(autouse=True)
+def source_provider_boundary(monkeypatch):
+    from tests.foundation_fixtures import stub_source_provider
+    stub_source_provider(monkeypatch)

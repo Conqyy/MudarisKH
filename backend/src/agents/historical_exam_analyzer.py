@@ -1,3 +1,4 @@
+from src.services.source_evidence import evidence_content, SOURCE_POLICY
 from openai import OpenAI
 import json
 import logging
@@ -92,20 +93,20 @@ class HistoricalExamAnalyzer:
         return extract_pdf_text(file_bytes)
 
     def analyze_exam(self, text: str, course_title: str, image_uris: list = None,
-                     document_insights: list = None) -> dict:
+                     document_insights: list = None, *, lecture_evidence: dict | None = None) -> dict:
         """Compatibility entry for one photo/text paper; PDFs use analyze_pdf."""
-        result = self._analyze_paper(text, course_title, image_uris, document_insights)
+        result = self._analyze_paper(text, course_title, image_uris, document_insights, lecture_evidence=lecture_evidence)
         paper = {**result, 'paperId': 'paper_1', 'startPage': 1,
                  'endPage': max(1, len(image_uris or [])), 'examType': result.get('examType'), 'totalMarks': result.get('totalMarks'),
                  'boundaryEvidence': 'Individual photo/text input; PDF paper boundaries were not detected.',
                  'boundaryConfidence': None, 'boundaryStatus': 'individual_input'}
         combined = aggregate_papers([paper])
-        self.tag_topic_scope(combined, document_insights)
+        self.tag_topic_scope(combined, document_insights) if lecture_evidence is None else None
         combined['_contextCoverage'] = result['_contextCoverage']
         return combined
 
     def analyze_pdf(self, file_bytes: bytes, course_title: str,
-                    document_insights: list = None) -> dict:
+                    document_insights: list = None, *, lecture_evidence: dict | None = None) -> dict:
         """Detect complete contiguous papers, then analyze every page of each paper."""
         from src.utils.pdf_extract import extract_pdf_pages, render_pdf_page_window
         from src.utils.json_parse import parse_with_retry
@@ -133,8 +134,8 @@ class HistoricalExamAnalyzer:
 
             def _call(reminder):
                 answer = chat_with_retry(self.client, model=self.model_id,
-                    messages=[{'role': 'system', 'content': HISTORICAL_BOUNDARY_SYSTEM_PROMPT + reminder},
-                              {'role': 'user', 'content': content}], temperature=0.0, max_tokens=4000)
+                    messages=[{'role': 'system', 'content': HISTORICAL_BOUNDARY_SYSTEM_PROMPT + reminder + (SOURCE_POLICY if lecture_evidence is not None else '')},
+                              {'role': 'user', 'content': evidence_content(content, lecture_evidence)}], temperature=0.0, max_tokens=4000)
                 return response_text(answer)
 
             def _validate(value):
@@ -182,14 +183,14 @@ class HistoricalExamAnalyzer:
             images = render_pdf_page_window(file_bytes, first, last)
             self._require_page_coverage(images, list(range(first, last + 1)))
             text = '\n\n'.join(f'[Page {page["page"]}]\n{page["text"]}' for page in pages[first - 1:last])
-            result = self._analyze_paper(text, course_title, [image['imageUri'] for image in images], document_insights)
+            result = self._analyze_paper(text, course_title, [image['imageUri'] for image in images], document_insights, lecture_evidence=lecture_evidence)
             papers.append({**result, 'paperId': f'paper_{index + 1}', 'startPage': first, 'endPage': last,
                            'examType': start.get('examType') or result.get('examType'),
                            'totalMarks': start.get('totalMarks') or result.get('totalMarks'),
                            'boundaryEvidence': start['evidence'], 'boundaryConfidence': start['confidence'],
                            'boundaryStatus': 'detected'})
         combined = aggregate_papers(papers)
-        self.tag_topic_scope(combined, document_insights)
+        self.tag_topic_scope(combined, document_insights) if lecture_evidence is None else None
         combined['_contextCoverage'] = {'pagesAvailable': len(pages), 'pagesIncluded': len(pages),
             'imagesAvailable': len(pages), 'imagesIncluded': len(pages), 'excerpted': False,
             'characters': sum(len(page['text']) for page in pages),
@@ -203,7 +204,7 @@ class HistoricalExamAnalyzer:
             raise ValueError('Incomplete PDF image page coverage. Check the source and retry.')
 
     def _analyze_paper(self, text: str, course_title: str, image_uris: list = None,
-                       document_insights: list = None) -> dict:
+                       document_insights: list = None, *, lecture_evidence: dict | None = None) -> dict:
         logger.info("Analyzing historical exam"
                     + (f" (+{len(image_uris)} page images)" if image_uris else ""))
 
@@ -247,12 +248,12 @@ class HistoricalExamAnalyzer:
                 messages=[
                     {
                         "role": "system",
-                        "content": prompts.HISTORICAL_EXAM_SYSTEM_PROMPT + reminder
+                        "content": prompts.HISTORICAL_EXAM_SYSTEM_PROMPT + reminder + (SOURCE_POLICY if lecture_evidence is not None else "")
                             + '\nThis input is ONE already-separated paper. Analyze only this paper, '
                               'count each exam question once (not again in attached answer keys), '
                               'and return its flat historical-analysis fields. Do not aggregate other papers.',
                     },
-                    {"role": "user", "content": _user_content()},
+                    {"role": "user", "content": evidence_content(_user_content(), lecture_evidence)},
                 ],
                 temperature=0.1,
                 max_tokens=settings.OPENROUTER_MAX_TOKENS,
@@ -289,7 +290,7 @@ class HistoricalExamAnalyzer:
         # exam's topics is still covered by the course's current lecture
         # documents. The result is stored on the analysis so the generator just
         # reads the flag — it never re-decides scope itself.
-        self.tag_topic_scope(result, document_insights)
+        self.tag_topic_scope(result, document_insights) if lecture_evidence is None else None
 
         result['_contextCoverage'] = {'characters': len(text), 'includedCharacters': len(truncated), 'excerpted': False,
                                       'imagesIncluded': len(image_uris or []), 'imagesAvailable': len(image_uris or [])}

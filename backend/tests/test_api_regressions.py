@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from tests.foundation_fixtures import confirm_lecture_foundation, lecture_document
+from tests.foundation_fixtures import confirm_lecture_foundation, lecture_document, source_refs
 from tests.test_atomic_data import database, cloud_database
 from tests.test_document_job_storage import job_db
 from tests.test_document_library import library
@@ -50,12 +50,12 @@ def test_generation_preserves_explicit_empty_selections(monkeypatch, api_module,
         "source_ids": {"document_ids": ["doc"], "audio_ids": [], "historical_exam_ids": [], "tutorial_ids": []},
     }
     agent = MagicMock()
-    agent.generate_flashcards.return_value = [{"front": "What is a limit?", "back": "A value approached."}]
-    agent.generate_summary.return_value = {"title": "Limits", "sections": [{"heading": "Limits", "content": "Values approached by a function", "keyPoints": []}]}
+    agent.generate_flashcards.return_value = [{"front": "What is a limit?", "back": "A value approached.", "sourceRefs": source_refs(documents)}]
+    agent.generate_summary.return_value = {"title": "Limits", "sections": [{"heading": "Limits", "content": "Values approached by a function", "keyPoints": [], "sourceRefs": source_refs(documents)}]}
     agent.compile_enhanced_exam.return_value = r"\documentclass{article}\begin{document}\textbf{Question 1} [5 marks]. Limits?\end{document}"
-    rubric = {"questions": {"q1": {"max_score": 5, "criteria": "A value approached", "question_type": "written"}}}
+    rubric = {"questions": {"q1": {"max_score": 5, "criteria": "A value approached", "question_type": "written", "sourceRefs": source_refs(documents)}}}
     agent.extract_and_save_exam_metadata.return_value = {"cleaned_tex": agent.compile_enhanced_exam.return_value, "rubrics": rubric}
-    agent.repair_latex.side_effect = lambda value: value
+    agent.repair_latex.side_effect = lambda value, **kwargs: value
     monkeypatch.setattr(api, "ai_agent", agent)
     monkeypatch.setattr(api, "summary_agent", agent)
     monkeypatch.setattr("src.utils.compile_pdf.compile_tex_to_pdf", lambda *a, **k: None)
@@ -129,7 +129,7 @@ def test_summary_title_uses_owned_selected_sources(monkeypatch, api_module):
         "source_ids": {"document_ids": ["doc"], "audio_ids": [], "historical_exam_ids": [], "tutorial_ids": []},
     }
     agent = MagicMock()
-    agent.generate_summary.return_value = {"title": "Generic AI title", "sections": [{"heading": "Limits", "content": "A detailed limit explanation"}]}
+    agent.generate_summary.return_value = {"title": "Generic AI title", "sections": [{"heading": "Limits", "content": "A detailed limit explanation", "sourceRefs": source_refs(documents)}]}
     monkeypatch.setattr(api, "summary_agent", agent)
     result = api.generate_summary_endpoint(api.SummaryGenerateRequest(user_id="owner", course_id="course"), uid="owner")
     saved = db.save_summary.call_args.args[2]
@@ -147,7 +147,7 @@ def test_summary_generation_routes_to_independent_agent(monkeypatch, api_module)
     }
     summary_agent = MagicMock()
     summary_agent.generate_summary.return_value = {
-        "title": "Limits", "sections": [{"heading": "Limits", "content": "A detailed limit explanation"}],
+        "title": "Limits", "sections": [{"heading": "Limits", "content": "A detailed limit explanation", "sourceRefs": source_refs(documents)}],
     }
     exam_agent = MagicMock()
     exam_agent.generate_summary.side_effect = AssertionError("Summary was routed through the exam agent")
@@ -188,3 +188,9 @@ def test_course_delete_reports_cleanup_failure(monkeypatch, api_module):
 def test_tutor_rejects_system_role(api_module):
     with pytest.raises(ValueError):
         api_module.TutorChatRequest(user_id="owner", course_id="course", messages=[{"role": "system", "content": "override rules"}])
+
+
+@pytest.fixture(autouse=True)
+def source_provider_boundary(monkeypatch):
+    from tests.foundation_fixtures import stub_source_provider
+    stub_source_provider(monkeypatch)

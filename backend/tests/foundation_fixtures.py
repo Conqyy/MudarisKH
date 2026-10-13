@@ -79,3 +79,29 @@ def confirm_lecture_foundation(db, documents=None, *, course_id='course', owner=
     db._flat_get.return_value = course
     install_source_artifacts(db, documents)
     return owned_documents
+
+
+def source_refs(documents):
+    return [{'documentId': d['id'], 'sourceRevision': d['sourceRevision'], 'unitId': u['unitId']}
+            for d in documents for u in d['_sourceManifest']['units'] if not u['blank']]
+
+
+def stub_source_provider(monkeypatch):
+    """External semantic provider seam for existing API routing/race tests only."""
+    from types import SimpleNamespace
+    def provider(client, **kwargs):
+        packet = json.loads(kwargs['messages'][1]['content'][0]['text'])
+        policy = kwargs['messages'][0]['content']
+        refs = [e['ref'] for e in packet['evidence'] if e['ranges']]
+        if 'supportedSpans' in policy:
+            text = packet['task']['text']
+            result = {'supportedSpans': [{'start': 0, 'end': len(text), 'text': text, 'reason': 'Synthetic fixture support'}]}
+        elif 'Independently check' in policy:
+            result = {'supports': True, 'reason': 'Synthetic fixture support'}
+        elif '"proofs"' in policy:
+            result = {'proofs': [{**r, 'ref': e['ref'], 'relation': 'supports_topic', 'reason': 'Synthetic topic support'}
+                                  for e in packet['evidence'] for r in e['ranges']]}
+        else:
+            result = {'facts': [{'text': 'Synthetic fixture fact', 'sourceRefs': refs}], 'administrativeRefs': []}
+        return SimpleNamespace(choices=[SimpleNamespace(finish_reason='stop', message=SimpleNamespace(content=json.dumps(result)))])
+    monkeypatch.setattr('src.services.source_evidence.chat_with_retry', provider)
