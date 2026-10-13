@@ -3,10 +3,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import MultiUploadModal from '../../src/components/MultiUploadModal';
 import UploadDocumentModal from '../../src/components/UploadDocumentModal';
-const mocks = vi.hoisted(() => ({ fetch: vi.fn(), json: vi.fn(), user: { uid: 'u1' } }));
+const mocks = vi.hoisted(() => ({ fetch: vi.fn(), json: vi.fn(), user: { uid: 'u1' }, translate: (s: string) => s }));
 vi.mock('@/lib/auth-context', () => ({ useAuth: () => ({ user: mocks.user }) }));
 vi.mock('@/lib/api', () => ({ apiFetch: mocks.fetch, apiJson: mocks.json }));
-vi.mock('@/lib/i18n', () => ({ useLang: () => ({ t: (s: string) => s }) }));
+vi.mock('@/lib/i18n', () => ({ useLang: () => ({ t: mocks.translate }) }));
 beforeEach(() => { vi.resetAllMocks(); mocks.user = { uid: 'u1' }; });
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 async function upload() {
@@ -79,4 +79,48 @@ it('leaves supporting uploads on their existing response completion path and siz
   fireEvent.click(screen.getByRole('button', { name: /Upload & Analyze/ }));
   await screen.findByText('All files analyzed!');
   expect(mocks.json).not.toHaveBeenCalled();
+});
+
+it.each(['preparation', 'guide'])('keeps each file stage authoritative after the prior file fails %s', async failedStage => {
+  vi.useFakeTimers();
+  let acceptSecond!: (result: unknown) => void;
+  const secondUpload = new Promise(resolve => { acceptSecond = resolve; });
+  const accepted = (id: string) => ({ ok: true, status: 202, json: async () => ({ document_id: id }) });
+  mocks.fetch.mockResolvedValueOnce(accepted('first')).mockReturnValueOnce(secondUpload);
+  let firstReads = 0;
+  let secondReads = 0;
+  mocks.json.mockImplementation(async (url: string) => {
+    if (url.endsWith('/first')) {
+      firstReads++;
+      return { document: firstReads === 1 ? { id: 'first', preparationStatus: failedStage === 'guide' ? 'completed' : 'pending', guideStatus: failedStage === 'guide' ? 'processing' : 'pending' } : { id: 'first', preparationStatus: failedStage === 'preparation' ? 'failed' : 'completed', guideStatus: failedStage === 'guide' ? 'failed' : 'pending' } };
+    }
+    secondReads++;
+    return { document: { id: 'second', preparationStatus: secondReads === 1 ? 'pending' : 'completed', guideStatus: secondReads < 3 ? 'processing' : 'completed' } };
+  });
+  const success = vi.fn();
+  const view = render(<UploadDocumentModal courseId="c1" onClose={vi.fn()} onSuccess={success} />);
+  fireEvent.change(view.container.querySelector('input[type=file]')!, { target: { files: [new File(['a'], 'first.pdf'), new File(['b'], 'second.pdf')] } });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Upload & Analyze/ })); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  expect(mocks.fetch).toHaveBeenCalledTimes(2);
+  const stageRow = (label: string) => screen.getByText(label).parentElement!.textContent;
+  expect(stageRow('Uploading document')).toContain('in progress…');
+  expect(stageRow('Preparing document')).toContain('queued');
+  expect(stageRow('Creating lightweight analysis')).toContain('queued');
+  await act(async () => { acceptSecond(accepted('second')); });
+  expect(secondReads).toBe(1);
+  expect(stageRow('Uploading document')).toContain('done');
+  expect(stageRow('Preparing document')).toContain('in progress…');
+  expect(stageRow('Creating lightweight analysis')).toContain('queued');
+  expect(success).not.toHaveBeenCalled();
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  expect(stageRow('Preparing document')).toContain('done');
+  expect(stageRow('Creating lightweight analysis')).toContain('in progress…');
+  expect(screen.queryByText('Finished with some issues')).toBeNull();
+  await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+  expect(screen.getByText('Finished with some issues')).toBeTruthy();
+  expect(screen.getAllByText(/● Done/)).toHaveLength(1);
+  expect(success).not.toHaveBeenCalled();
+  await act(async () => { await vi.advanceTimersByTimeAsync(1600); });
+  expect(success).toHaveBeenCalledTimes(1);
 });

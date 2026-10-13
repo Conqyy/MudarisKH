@@ -22,12 +22,12 @@ function pause(signal: AbortSignal) {
   });
 }
 export default function UploadDocumentModal({ courseId, onClose, onSuccess }: Props) {
-  const [stage, setStage] = useState(0);
+  const [stage, setStage] = useState<{ documentId: string; step: number } | null>(null);
   const { t } = useLang();
   const pollAccepted = useCallback(async (result: unknown, signal: AbortSignal) => {
     const id = (result as { document_id?: unknown })?.document_id;
     if (typeof id !== "string" || !id) throw new Error(t("Upload did not return a document identity."));
-    setStage(1);
+    setStage({ documentId: id, step: 1 });
     for (let attempt = 0; attempt < 300; attempt++) {
       signal.throwIfAborted();
       const data: { document?: CourseDocument } = await apiJson(`${API_URL}/api/documents/detail/${encodeURIComponent(id)}`, { signal });
@@ -36,7 +36,7 @@ export default function UploadDocumentModal({ courseId, onClose, onSuccess }: Pr
       if (!doc || doc.id !== id || (doc.courseId && doc.courseId !== courseId)) throw new Error(t("Document is unavailable."));
       if (doc.preparationStatus === "failed") throw new Error(doc.preparationError || t("Document preparation failed. Retry preparation from the course."));
       if (doc.guideStatus === "failed") throw new Error(doc.guideError || t("Lightweight analysis failed. Retry analysis from the course."));
-      setStage(doc.preparationStatus === "completed" ? 2 : 1);
+      setStage({ documentId: id, step: doc.preparationStatus === "completed" ? 2 : 1 });
       if (doc.preparationStatus === "completed" && doc.guideStatus === "completed") return;
       await pause(signal);
     }

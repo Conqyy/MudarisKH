@@ -47,7 +47,7 @@ interface Props {
   footerNote?: string;
   maxSizeMB?: number;
   pollAccepted?: (result: unknown, signal: AbortSignal) => Promise<void>;
-  actualStep?: number;
+  actualStep?: { documentId: string; step: number } | null;
 }
 
 type Phase = "select" | "processing" | "done";
@@ -91,6 +91,7 @@ export default function MultiUploadModal({
 
   // Per-current-file step animation
   const [currentStep, setCurrentStep] = useState(0);
+  const [acceptedDocumentId, setAcceptedDocumentId] = useState<string | null>(null);
   const [completed, setCompleted] = useState<Set<string>>(new Set());
 
   const cancelledRef = useRef(false);
@@ -112,11 +113,12 @@ export default function MultiUploadModal({
   }, [identity]);
 
   useEffect(() => {
-    if (pollAccepted && actualStep !== undefined) {
-      setCurrentStep(actualStep);
-      setCompleted(new Set(steps.slice(0, actualStep).map(s => s.id)));
+    // Status belongs to one accepted document, never the previous batch file.
+    if (pollAccepted && acceptedDocumentId && actualStep?.documentId === acceptedDocumentId) {
+      setCurrentStep(actualStep.step);
+      setCompleted(new Set(steps.slice(0, actualStep.step).map(s => s.id)));
     }
-  }, [actualStep, pollAccepted, steps]);
+  }, [actualStep, acceptedDocumentId, pollAccepted, steps]);
 
   const validateFile = (f: File): string | null => {
     const sizeMB = f.size / 1024 / 1024;
@@ -201,6 +203,7 @@ export default function MultiUploadModal({
   // Process ONE file: animate the steps while the real request runs, resolve
   // when the request finishes. Returns whether it succeeded.
   const processOne = async (file: File): Promise<{ ok: boolean; error?: string }> => {
+    setAcceptedDocumentId(null);
     setCurrentStep(0);
     setCompleted(new Set());
 
@@ -226,6 +229,7 @@ export default function MultiUploadModal({
       if (pollAccepted) {
         const accepted = await response.json();
         controller.signal.throwIfAborted();
+        setAcceptedDocumentId(typeof accepted?.document_id === "string" ? accepted.document_id : null);
         await pollAccepted(accepted, controller.signal);
         controller.signal.throwIfAborted();
       }
