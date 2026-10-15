@@ -119,7 +119,7 @@ class SupportingLibrary:
             result.append(deepcopy(unit))
         return result
 
-    def _report_payloads(self, identity, report):
+    def _report_payloads(self, identity, report, *, foundation_revision):
         report = validate_alignment_report(report)
         manifest = self.load_source(identity, report['sourceRevision'])
         refs = {u['unitId']: {**{k: identity[k] for k in ('kind', 'materialId')},
@@ -130,8 +130,44 @@ class SupportingLibrary:
         if not set(manifest['coverage']['unresolvedUnitIds']) <= set(report['extractionCoverage']['unresolvedUnitIds']):
             raise ValueError('Report cannot hide unresolved original units')
         from src.services.document_library import DocumentLibrary
+        from src.utils.course_foundation import foundation_material_revision
+        from src.utils.source_contracts import validate_guide, guide_digest
+        # Historical originals remain readable, but new evidence must use the
+        # actual source/guide identities of its claimed whole foundation.
+        current = self.database.get_course_documents(identity['courseId'], identity['userId'])
+        if foundation_material_revision(current) != foundation_revision:
+            raise ValueError('Report lecture foundation changed')
+        current = {row['id']: row for row in current}
+        documents = report['scopeSnapshot'].get('documents')
+        if not isinstance(documents, list) or not documents:
+            raise ValueError('Report lecture scope documents are missing')
+        selected, available = set(), set()
+        lecture_library = DocumentLibrary(self.database)
+        for document in documents:
+            doc_id = document.get('id')
+            row = current.get(doc_id)
+            if (doc_id in selected or row is None or any(document.get(key) != row.get(key)
+                    for key in ('sourceRevision', 'guideRevision'))):
+                raise ValueError('Report lecture source or guide differs from current foundation')
+            selected.add(doc_id)
+            original = lecture_library.load_manifest(identity['userId'], identity['courseId'], doc_id)
+            guide = validate_guide(document.get('guide'), original)
+            if guide_digest(guide) != row.get('guideRevision'):
+                raise ValueError('Report lecture guide content differs')
+            available.update(canonical_bytes({'documentId': doc_id, 'sourceRevision': original['sourceRevision'],
+                                              'unitId': unit['unitId']}) for unit in original['units'])
         lecture_refs = report['scopeSnapshot']['allowedRefs']
-        lecture_units = DocumentLibrary(self.database).load_units(identity['userId'], identity['courseId'], lecture_refs)
+        scope_revision = digest([{key: document[key] for key in ('id', 'sourceRevision', 'guideRevision')}
+                                 for document in documents])
+        if report['scopeSnapshot']['scopeRevision'] != scope_revision:
+            raise ValueError('Report selected scope revision differs from its lecture identities')
+        # Existing selection is whole documents, exactly as resolve_source_scope
+        # and its complete-unit plan require; partial-document scopes need an
+        # explicit future contract rather than silently narrowing this set.
+        if ({ref['documentId'] for ref in lecture_refs} != selected
+                or {canonical_bytes(ref) for ref in lecture_refs} != available):
+            raise ValueError('Report lecture references differ from selected current sources')
+        lecture_units = lecture_library.load_units(identity['userId'], identity['courseId'], lecture_refs)
         lectures = {canonical_bytes(ref): unit for ref, unit in zip(lecture_refs, lecture_units)}
         for alignment in report['alignments']:
             for finding in alignment['requirements']:
@@ -144,7 +180,7 @@ class SupportingLibrary:
                     if unit_id not in units: raise ValueError('Report cites an unavailable original unit')
                     validate_source_proof(proof, ref=refs[unit_id], unit=units[unit_id])
         header = {k: v for k, v in report.items() if k not in REPORT_ARRAYS}
-        header_bytes = canonical_bytes(header)
+        header_bytes = canonical_bytes({'foundationRevision': foundation_revision, 'report': header})
         if len(header_bytes) > MAX_REPORT_CHUNK_BYTES: raise ValueError('Report metadata is too large; split selected sources')
         chunks, pending = [], []
         for kind in REPORT_ARRAYS:
@@ -157,8 +193,9 @@ class SupportingLibrary:
                     pending = []
                 pending.append(entry)
         if pending: chunks.append(canonical_bytes(pending))
-        revision = digest(report)
+        revision = digest({'foundationRevision': foundation_revision, 'report': report})
         descriptor = {'versionKind': 'report', 'revision': revision, 'contentDigest': revision,
+            'foundationRevision': foundation_revision,
             'sourceRevision': report['sourceRevision'], 'scopeRevision': report['scopeSnapshot']['scopeRevision'],
             'coverageComplete': report['extractionCoverage']['complete'] and report['alignmentCoverage']['complete'],
             'headerDigest': hashlib.sha256(header_bytes).hexdigest(), 'itemCount': len(report['items']),
@@ -167,7 +204,7 @@ class SupportingLibrary:
         return payloads, descriptor
 
     def save_report(self, identity, job, report):
-        payloads, descriptor = self._report_payloads(identity, report)
+        payloads, descriptor = self._report_payloads(identity, report, foundation_revision=job['foundationRevision'])
         return self._store(identity, job, payloads, descriptor)
 
     def save_checkpoint(self, identity, job, data):
@@ -199,7 +236,10 @@ class SupportingLibrary:
 
     def save_scoped_report(self, identity, expected, report):
         if report.get('sourceRevision') != expected.get('sourceRevision'): raise ValueError('Scoped report source differs')
-        payloads, descriptor = self._report_payloads(identity, report)
+        row = self.repository.get_owned(identity)
+        if not self.repository._expected(row, expected): raise ValueError('Scoped analysis changed')
+        payloads, descriptor = self._report_payloads(identity, report,
+            foundation_revision=row['processingJob']['foundationRevision'])
         return self._store(identity, None, payloads, descriptor, expected=expected)
 
     def load_report(self, identity, report_revision=None):
@@ -207,7 +247,15 @@ class SupportingLibrary:
         revision = report_revision or (row.get('supportingAnalysis') or {}).get('reportRevision')
         if not revision: raise ValueError('Supporting evidence report is not ready')
         version = self.repository.get_version(identity, 'report', revision)
-        report = json.loads(self._read(identity, version['headerPath'], version['headerDigest']))
+        envelope = json.loads(self._read(identity, version['headerPath'], version['headerDigest']))
+        if 'foundationRevision' in version:
+            if envelope.get('foundationRevision') != version['foundationRevision']:
+                raise ValueError('Report foundation binding differs')
+            report = envelope['report']
+        else:
+            # Pre-binding versions remain owned immutable reads; snapshot
+            # authorization rejects their missing foundation descriptor.
+            report = envelope
         report.update({key: [] for key in REPORT_ARRAYS})
         for chunk in version['chunks']:
             rows = json.loads(self._read(identity, chunk['path'], chunk['digest']))
@@ -215,10 +263,12 @@ class SupportingLibrary:
             for row in rows:
                 if row['collection'] not in REPORT_ARRAYS: raise ValueError('Unknown report content')
                 report[row['collection']].append(row['value'])
-        if digest(report) != version['contentDigest'] or digest(report) != revision:
+        if digest(envelope) != version['contentDigest'] or digest(envelope) != revision:
             raise ValueError('Report content revision differs')
         checked = validate_alignment_report(report)
-        if checked['sourceRevision'] != version['sourceRevision']: raise ValueError('Report source revision differs')
+        if (checked['sourceRevision'] != version['sourceRevision']
+                or checked['scopeSnapshot']['scopeRevision'] != version['scopeRevision']):
+            raise ValueError('Report source or scope revision differs')
         return checked
 
     def public_status(self, identity):

@@ -113,3 +113,31 @@ def test_pending_discovers_only_expired_valid_owned_jobs(repository):
     job, claim, now = queue_claim(repository, now=100)
     assert repository.pending(now_ms=100) == []
     assert repository.pending(now_ms=100+CLAIM_LEASE_MS) == [identity()]
+
+
+@pytest.mark.parametrize('leading', ['live', 'replaced', 'foundation'])
+@pytest.mark.parametrize('eligible', ['queued', 'expired'])
+def test_pending_result_limit_does_not_starve_later_eligible_jobs(repository, leading, eligible):
+    # More than a bounded scan page of ineligible rows must not hide work.
+    template_job, _, _ = queue_claim(repository, material=identity(material='a000'), now=100)
+    template = repository.get_owned(identity(material='a000'))
+    if leading == 'replaced':
+        template['originalDigest'] = 'c'*64
+        template['processingJob']['leaseUntil'] = 0
+    elif leading == 'foundation':
+        template['processingJob'].update(foundationRevision='e'*64, leaseUntil=0)
+    db = repository.database
+    for n in range(125):
+        row = deepcopy(template)
+        if db.use_local:
+            local = db._read_local_db()
+            local['historical_exams'][f'a{n:03d}'] = row
+            db._write_local_db(local)
+        else:
+            db.db.rows[f'historical_exams/a{n:03d}'] = row
+    wanted = identity(material='z-eligible')
+    repo_job = repository.queue(wanted, input_revision='b'*64, source_digest='a'*64,
+        foundation_revision=repository.test_foundation_revision, now_ms=100, initial_data={'title': 'Queued'})
+    if eligible == 'expired':
+        repository.claim(wanted, repo_job['id'], worker_id='expired', now_ms=0)
+    assert repository.pending(now_ms=CLAIM_LEASE_MS, limit=1) == [wanted]

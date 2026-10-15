@@ -42,12 +42,25 @@ class FakeCollection:
     def where(self, filter): return FakeCollection(self.db, self.path, self.filters + (filter,))
     def limit(self, count):
         query = type(self)(self.db, self.path, self.filters)
+        query.__dict__.update(self.__dict__)
         query.max_rows = count
+        return query
+    def order_by(self, field):
+        assert field == '__name__', 'Fake only models document-name ordering'
+        query = self.limit(getattr(self, 'max_rows', float('inf')))
+        query.ordered = True
+        return query
+    def start_after(self, snapshot):
+        query = self.limit(getattr(self, 'max_rows', float('inf')))
+        query.after_path = snapshot.reference.path
         return query
     def stream(self):
         prefix = self.path + '/'
         yielded = 0
-        for path, row in list(self.db.rows.items()):
+        rows = list(self.db.rows.items())
+        if getattr(self, 'ordered', False): rows.sort()
+        for path, row in rows:
+            if path <= getattr(self, 'after_path', ''): continue
             matches = all(row.get(f.field) in f.value if getattr(f, 'op', '==') == 'in' else row.get(f.field) == f.value for f in self.filters)
             if path.startswith(prefix) and '/' not in path[len(prefix):] and matches:
                 if yielded >= getattr(self, 'max_rows', float('inf')): return

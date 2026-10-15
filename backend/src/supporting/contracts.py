@@ -504,6 +504,7 @@ def validate_alignment_report(value):
     checked = {a.get('itemId') for a in alignments}
     if not checked <= item_ids: raise ValueError('Alignment refers to unknown item')
     canonical_findings = {}
+    unfinished_items = set()
     for alignment in alignments:
         findings = alignment.get('requirements')
         expected = aggregate_item_alignment(findings, item_id=alignment['itemId'])
@@ -516,6 +517,11 @@ def validate_alignment_report(value):
                 raise ValueError('Parent and child findings disagree')
             canonical_findings[rid] = encoded
             coverage = finding['reviewCoverage']
+            # A settled positive proof may stop its search early. Unverified
+            # checks interrupted before review finished remain processing work,
+            # including every ancestor carrying that requirement.
+            if finding['relation'] == 'unverified' and not coverage['complete']:
+                unfinished_items.add(alignment['itemId'])
             if coverage['scopeRevision'] != scope['scopeRevision'] or {canonical_bytes(r) for r in coverage['allowedRefs']} != allowed_keys:
                 raise ValueError('Review narrowed the selected lecture scope')
             for ref in finding['lectureAnchorRefs']:
@@ -531,5 +537,7 @@ def validate_alignment_report(value):
                 raise ValueError('Historical questions cannot authorize supplementary teaching')
     _ledger(value.get('alignmentCoverage'), 'itemIds', 'checkedItemIds', 'unresolvedItemIds', item_ids)
     if set(value['alignmentCoverage']['checkedItemIds']) != checked: raise ValueError('Alignment coverage differs from checked items')
+    if not unfinished_items <= set(value['alignmentCoverage']['unresolvedItemIds']):
+        raise ValueError('Unfinished requirement reviews must remain unresolved item coverage')
     canonical_bytes(value)
     return value

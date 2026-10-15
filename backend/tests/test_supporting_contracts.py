@@ -8,6 +8,36 @@ from src.supporting.contracts import (
 from tests.supporting_fixtures import supporting_manifest, supporting_ref, requirement_alignment, alignment_report
 
 
+@pytest.mark.parametrize('parent', [False, True])
+def test_interrupted_unverified_review_requires_unresolved_item_coverage(parent):
+    report = alignment_report(relation='unverified')
+    finding = report['alignments'][0]['requirements'][0]
+    finding['reviewCoverage'].update(reviewedRefs=[], unresolvedRefs=deepcopy(finding['reviewCoverage']['allowedRefs']), complete=False)
+    report['alignments'][0] = aggregate_item_alignment([finding], item_id='q1')
+    if parent:
+        heading = deepcopy(report['items'][0])
+        heading.update(id='parent', requirements=[])
+        report['items'][0]['parentId'] = 'parent'
+        report['items'].append(heading)
+        report['alignments'].append(aggregate_item_alignment([finding], item_id='parent'))
+        report['alignmentCoverage']['itemIds'].append('parent')
+        report['alignmentCoverage']['checkedItemIds'].append('parent')
+    with pytest.raises(ValueError, match='(?i)unfinished|incomplete|unresolved'):
+        validate_alignment_report(report)
+    report['alignmentCoverage'].update(unresolvedItemIds=['q1'], complete=False)
+    if parent:
+        with pytest.raises(ValueError, match='(?i)unfinished|incomplete|unresolved'):
+            validate_alignment_report(report)
+        report['alignmentCoverage']['unresolvedItemIds'].append('parent')
+    assert validate_alignment_report(report)['alignmentCoverage']['complete'] is False
+
+
+def test_positive_proof_can_complete_without_exhaustive_review():
+    report = alignment_report()
+    report['alignments'][0]['requirements'][0]['reviewCoverage'].update(reviewedRefs=[], complete=False)
+    assert validate_alignment_report(report)['alignmentCoverage']['complete'] is True
+
+
 def test_one_supported_requirement_cannot_cover_another():
     rows = [requirement_alignment('lecture_supported', requirement_id='r1'),
             requirement_alignment('unverified', requirement_id='r2')]

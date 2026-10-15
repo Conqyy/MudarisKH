@@ -10,7 +10,7 @@ from tests.test_atomic_data import database, cloud_database
 from tests.test_document_job_storage import job_db
 from tests.test_supporting_job_storage import repository, identity, queue_claim
 from tests.supporting_fixtures import supporting_manifest, alignment_report
-from src.supporting.contracts import supporting_revision, aggregate_item_alignment, MAX_REPORT_CHUNK_BYTES
+from src.supporting.contracts import supporting_revision, aggregate_item_alignment, digest, MAX_REPORT_CHUNK_BYTES
 from src.supporting.library import SupportingLibrary
 
 
@@ -52,7 +52,9 @@ def report_for(library, manifest, count=1, size=0):
     scope = {'documents': [{key: lecture[key] for key in ('id', 'title', 'sourceRevision', 'guideRevision', 'guide')}],
              'manifests': [lecture['_sourceManifest']],
              'allowedRefs': [{'documentId': lecture['id'], 'sourceRevision': lecture['sourceRevision'], 'unitId': u['unitId']}
-                             for u in lecture['_sourceManifest']['units']], 'scopeRevision': 'b'*64}
+                             for u in lecture['_sourceManifest']['units']]}
+    scope['scopeRevision'] = digest([{key: document[key] for key in ('id', 'sourceRevision', 'guideRevision')}
+                                     for document in scope['documents']])
     report['scopeSnapshot'] = scope
     report['sourceRevision'] = manifest['sourceRevision']
     original_item, original_alignment = report['items'][0], report['alignments'][0]
@@ -60,7 +62,7 @@ def report_for(library, manifest, count=1, size=0):
     finding['lectureAnchorRefs'] = [scope['allowedRefs'][0]]
     finding['lectureSupportProofs'] = [{'type': 'text_span', 'ref': scope['allowedRefs'][0],
         'field': 'text', 'start': 0, 'end': 7, 'quote': 'Lecture'}]
-    finding['reviewCoverage'].update(allowedRefs=deepcopy(scope['allowedRefs']), reviewedRefs=deepcopy(scope['allowedRefs']))
+    finding['reviewCoverage'].update(scopeRevision=scope['scopeRevision'], allowedRefs=deepcopy(scope['allowedRefs']), reviewedRefs=deepcopy(scope['allowedRefs']))
     report['items'], report['alignments'] = [], []
     for n in range(count):
         item, finding = deepcopy(original_item), deepcopy(original_alignment['requirements'][0])
@@ -157,9 +159,8 @@ def test_scoped_report_does_not_overwrite_current_report_and_retry_fences_it(lib
     version = library.save_report(identity(), claim, original)
     expected = deepcopy(library.repository.get_owned(identity())['supportingAnalysis'])
     scoped = deepcopy(original)
-    scoped['scopeSnapshot']['scopeRevision'] = 'd'*64
     for alignment in scoped['alignments']:
-        for finding in alignment['requirements']: finding['reviewCoverage']['scopeRevision'] = 'd'*64
+        for finding in alignment['requirements']: finding['reason'] = 'A separate scoped analysis of the same selected document'
     cached = library.save_scoped_report(identity(), expected, scoped)
     assert cached['revision'] != version['revision']
     assert library.repository.get_owned(identity())['supportingAnalysis'] == expected
@@ -271,4 +272,206 @@ def test_report_publication_resolves_lecture_proofs_against_owned_originals(libr
                 for child in value: change(child)
         change(report)
     with pytest.raises(ValueError): library.save_report(identity(), claim, report)
+
+
+def completed_snapshot(library, manifest, claim, version, scoped=None):
+    return {'version': 1, 'materials': [{'identity': identity(), 'sourceRevision': manifest['sourceRevision'],
+        'reportRevision': version['revision'], 'analysisId': claim['id'],
+        'scopedReportRevision': (scoped or version)['revision']}]}
+
+
+def test_interrupted_review_cannot_publish_or_authorize_completed_evidence(library):
+    manifest, claim = prepare(library)
+    report = report_for(library, manifest)
+    finding = report['alignments'][0]['requirements'][0]
+    finding.update(relation='unverified', lectureAnchorRefs=[], lectureSupportProofs=[])
+    finding['reviewCoverage'].update(reviewedRefs=[], unresolvedRefs=deepcopy(finding['reviewCoverage']['allowedRefs']), complete=False)
+    report['alignments'][0] = aggregate_item_alignment([finding], item_id='q0')
+    with pytest.raises(ValueError): library.save_report(identity(), claim, report)
+    report['alignmentCoverage'].update(unresolvedItemIds=['q0'], complete=False)
+    version = library.save_report(identity(), claim, report)
+    assert library.repository.get_owned(identity())['status'] == 'incomplete'
+    with pytest.raises(ValueError): library.repository.assert_snapshot(completed_snapshot(library, manifest, claim, version))
+
+
+@pytest.mark.parametrize('boundary', ['snapshot', 'reserve', 'publish'])
+@pytest.mark.parametrize('replacement', ['row', 'descriptor'])
+def test_completed_source_replacement_fences_all_consumers(library, boundary, replacement):
+    from src.supporting.repository import version_id, VERSIONS
+    from src.utils.storage_paths import build_supporting_artifact_path
+    manifest, claim = prepare(library)
+    report = report_for(library, manifest)
+    version = library.save_report(identity(), claim, report)
+    repo = library.repository
+    expected = deepcopy(repo.get_owned(identity())['supportingAnalysis'])
+    path = build_supporting_artifact_path(identity(), claim['id'], claim['claimToken'], 'f'*32, 'report.json')
+    assert repo.reserve_scoped_artifacts(identity(), expected, paths=[path])
+    proposed = {**version, 'supportingArtifactPaths': [path], 'reservationId': repo.reservation_id(identity(), [path])}
+    if replacement == 'row':
+        library.database._flat_update('historical_exams', 'source', {'originalDigest': 'c'*64})
+    else:
+        library.database._flat_update(VERSIONS, version_id(identity(), 'source', manifest['sourceRevision']), {'originalDigest': 'c'*64})
+    if boundary == 'snapshot':
+        with pytest.raises(ValueError): repo.assert_snapshot(completed_snapshot(library, manifest, claim, version))
+    elif boundary == 'reserve':
+        assert not repo.reserve_scoped_artifacts(identity(), expected, paths=[path])
+    else:
+        assert not repo.publish_scoped_report(identity(), expected, report_version=proposed)
+
+
+def advance_foundation_attempt(library):
+    from src.utils.course_foundation import foundation_material_revision
+    db = library.database
+    db._flat_update('documents', 'lecture', {'processingJob': {'id': 'f'*32, 'stage': 'completed'}})
+    revision = foundation_material_revision(db.get_course_documents('c', 'u'))
+    db.confirm_document_foundation('u', 'c', revision, require_current_documents=True)
+    library.repository.test_foundation_revision = revision
+    return revision
+
+
+def retry_supporting(library, manifest):
+    now = int(time.time()*1000)
+    repo = library.repository
+    job = repo.queue(identity(), input_revision='b'*64, source_digest=manifest['originalDigest'],
+                    foundation_revision=repo.test_foundation_revision, now_ms=now)
+    return repo.claim(identity(), job['id'], worker_id='retry', now_ms=now)
+
+
+def test_same_report_under_new_foundation_has_distinct_immutable_binding(library):
+    manifest, claim = prepare(library)
+    report = report_for(library, manifest)
+    old = library.save_report(identity(), claim, report)
+    old_descriptor = deepcopy(old)
+    expected = deepcopy(library.repository.get_owned(identity())['supportingAnalysis'])
+    scoped = deepcopy(report)
+    scoped['alignments'][0]['requirements'][0]['reason'] = 'Selected-scope verification'
+    old_scoped = library.save_scoped_report(identity(), expected, scoped)
+    new_foundation = advance_foundation_attempt(library)
+    retry = retry_supporting(library, manifest)
+    new = library.save_report(identity(), retry, report)
+    assert new['revision'] != old['revision']
+    assert new['foundationRevision'] == new_foundation
+    assert library.repository.get_version(identity(), 'report', old['revision']) == old_descriptor
+    assert library.load_report(identity(), old['revision']) == report
+    assert library.load_report(identity(), new['revision']) == report
+    library.repository.assert_snapshot(completed_snapshot(library, manifest, retry, new))
+    with pytest.raises(ValueError):
+        library.repository.assert_snapshot(completed_snapshot(library, manifest, retry, new, old))
+    with pytest.raises(ValueError):
+        library.repository.assert_snapshot(completed_snapshot(library, manifest, retry, new, old_scoped))
+    assert library.load_report(identity(), old_scoped['revision']) == scoped
+
+
+@pytest.mark.parametrize('changed', ['sourceRevision', 'guideRevision'])
+@pytest.mark.parametrize('scoped', [False, True])
+def test_historical_lecture_basis_cannot_be_stamped_as_current(library, changed, scoped):
+    manifest, claim = prepare(library)
+    historical = report_for(library, manifest)
+    if scoped:
+        library.save_report(identity(), claim, historical)
+        expected = deepcopy(library.repository.get_owned(identity())['supportingAnalysis'])
+    library.database._flat_update('documents', 'lecture', {changed: 'e'*64})
+    advance_foundation_attempt(library)
+    if scoped:
+        with pytest.raises(ValueError): library.save_scoped_report(identity(), expected, historical)
+    else:
+        retry = retry_supporting(library, manifest)
+        with pytest.raises(ValueError): library.save_report(identity(), retry, historical)
+
+
+def test_snapshot_scoped_version_must_match_requested_scope(library):
+    manifest, claim = prepare(library)
+    report = report_for(library, manifest)
+    version = library.save_report(identity(), claim, report)
+    snapshot = completed_snapshot(library, manifest, claim, version)
+    with pytest.raises(ValueError, match='(?i)scope'):
+        library.repository.assert_snapshot(snapshot, scope_revision='e'*64)
+    library.repository.assert_snapshot(snapshot, scope_revision=report['scopeSnapshot']['scopeRevision'])
+
+
+def test_report_cannot_mislabel_its_selected_lecture_scope(library):
+    manifest, claim = prepare(library)
+    report = report_for(library, manifest)
+    report['scopeSnapshot']['scopeRevision'] = 'e'*64
+    report['alignments'][0]['requirements'][0]['reviewCoverage']['scopeRevision'] = 'e'*64
+    with pytest.raises(ValueError, match='(?i)scope'):
+        library.save_report(identity(), claim, report)
+
+
+def test_report_cannot_omit_a_unit_from_selected_document(library, monkeypatch):
+    from tests import foundation_fixtures
+    original_document = foundation_fixtures.Document
+    def two_paragraphs():
+        document = original_document()
+        document.add_paragraph('Lecture additional unit that must also be checked.')
+        return document
+    monkeypatch.setattr(foundation_fixtures, 'Document', two_paragraphs)
+    lecture = foundation_fixtures.lecture_document('lecture', userId='u', courseId='c')
+    assert len(lecture['_sourceManifest']['units']) == 2
+    library.database._flat_update('documents', 'lecture',
+        {key: value for key, value in lecture.items() if not key.startswith('_') and key != 'id'})
+    for path, original in lecture['_artifactFiles'].items():
+        library.database.upload_file_to_storage(original.read_bytes(), path, 'u')
+    library.repository.test_lecture = lecture
+    advance_foundation_attempt(library)
+    manifest, claim = prepare(library)
+    report = report_for(library, manifest)
+    report['scopeSnapshot']['allowedRefs'] = report['scopeSnapshot']['allowedRefs'][:1]
+    coverage = report['alignments'][0]['requirements'][0]['reviewCoverage']
+    coverage.update(allowedRefs=deepcopy(report['scopeSnapshot']['allowedRefs']),
+                    reviewedRefs=deepcopy(report['scopeSnapshot']['allowedRefs']))
+    with pytest.raises(ValueError, match='(?i)scope|references'):
+        library.save_report(identity(), claim, report)
+
+
+def test_scoped_report_accepts_a_complete_document_subset(library):
+    from tests.foundation_fixtures import lecture_document
+    extra = lecture_document('extra', topic='Graphs', userId='u', courseId='c')
+    db = library.database
+    row = {key: value for key, value in extra.items() if not key.startswith('_') and key != 'id'}
+    if db.use_local:
+        local = db._read_local_db()
+        local['documents']['extra'] = row
+        db._write_local_db(local)
+    else:
+        db.db.rows['documents/extra'] = row
+    for path, original in extra['_artifactFiles'].items():
+        db.upload_file_to_storage(original.read_bytes(), path, 'u')
+    advance_foundation_attempt(library)
+    manifest, claim = prepare(library)
+    selected = report_for(library, manifest)
+    version = library.save_report(identity(), claim, selected)
+    expected = deepcopy(library.repository.get_owned(identity())['supportingAnalysis'])
+    cached = library.save_scoped_report(identity(), expected, selected)
+    assert cached['revision'] == version['revision']
+    library.repository.assert_snapshot(completed_snapshot(library, manifest, claim, version, cached),
+        scope_revision=selected['scopeSnapshot']['scopeRevision'])
+
+
+def test_legacy_unbound_report_remains_readable_but_cannot_authorize_snapshot(library):
+    from src.supporting.contracts import canonical_bytes, digest
+    from src.supporting.library import REPORT_ARRAYS
+    from src.supporting.repository import VERSIONS, version_id
+    manifest, claim = prepare(library)
+    report = report_for(library, manifest)
+    bound = library.save_report(identity(), claim, report)
+    # Model the exact pre-binding disk format while retaining owned chunks.
+    legacy = deepcopy(bound)
+    legacy.pop('foundationRevision', None)
+    legacy['revision'] = legacy['contentDigest'] = digest(report)
+    header = canonical_bytes({key: value for key, value in report.items() if key not in REPORT_ARRAYS})
+    legacy['headerPath'] = bound['headerPath'].replace('report.json', 'legacy.json')
+    legacy['supportingArtifactPaths'][0] = legacy['headerPath']
+    legacy['headerDigest'] = sha256(header).hexdigest()
+    library.database.upload_file_to_storage(header, legacy['headerPath'], 'u')
+    key = version_id(identity(), 'report', legacy['revision'])
+    if library.database.use_local:
+        local = library.database._read_local_db()
+        local[VERSIONS][key] = legacy
+        library.database._write_local_db(local)
+    else:
+        library.database.db.rows[f'{VERSIONS}/{key}'] = legacy
+    assert library.load_report(identity(), legacy['revision']) == report
+    with pytest.raises(ValueError):
+        library.repository.assert_snapshot(completed_snapshot(library, manifest, claim, bound, legacy))
 
