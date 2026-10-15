@@ -5,7 +5,7 @@ import io
 import json
 from types import SimpleNamespace
 
-import fitz
+import pymupdf as fitz
 import pytest
 from PIL import Image, ImageDraw
 from docx import Document
@@ -671,3 +671,121 @@ def test_structured_retry_reuses_full_available_navigation_budget():
         render=lambda u: render_source_unit(raw, 'pdf', u['unitId']), checkpoint=lambda s: None)
     assert result['extractionCoverage']['complete']
     assert result['extractionCoverage']['modelCalls'] == 3
+
+
+@pytest.mark.parametrize('recover', [False, True])
+def test_same_atomic_requirement_continued_across_pages_unions_evidence_once(recover):
+    from src.supporting.contracts import validate_alignment_report
+    raw = pdf(['Question 1: Explain trees', 'Continued explanation of trees'])
+    def rows(m):
+        first = item(proof(m), 'Explain trees')
+        continued = item(first['origin'], 'Continued explanation')
+        continued['proofs'] = [proof(m, 2)]
+        continued['requirements'] = copy.deepcopy(first['requirements'])
+        continued['requirements'][0]['proofs'] = [proof(m, 2)]
+        return {'p0001': page([first], start=True), 'p0002': page([continued])}
+    result, _, manifest, states = run(raw, rows=rows, model_call_budget=2 if recover else 512)
+    if recover:
+        result = extractor(Provider(rows(manifest))).extract(manifest, course_title='Algorithms', lecture_reader=reader(),
+            render=lambda u: render_source_unit(raw, 'pdf', u['unitId']), checkpoint=lambda s: None,
+            resume=states[-1], model_call_budget=4)
+    assert result['extractionCoverage']['complete']
+    requirements = result['items'][0]['requirements']
+    assert len(requirements) == len({r['id'] for r in requirements}) == 1
+    assert [r['unitId'] for r in requirements[0]['supportingSourceRefs']] == ['p0001', 'p0002']
+    assert requirements[0]['supportingSourceProofs'] == [proof(manifest), proof(manifest, 2)]
+    # The real report validator must accept the extracted inventory before Task5
+    # has performed alignment; empty alignment coverage is explicitly incomplete.
+    report = {**result, 'version': 1, 'alignmentVersion': 1, 'sourceRevision': manifest['sourceRevision'],
+        'scopeSnapshot': reader().snapshot(), 'alignments': [], 'alignmentCoverage': {
+            'itemIds': [i['id'] for i in result['items']], 'checkedItemIds': [],
+            'unresolvedItemIds': [i['id'] for i in result['items']], 'complete': False}}
+    assert validate_alignment_report(report)['items'][0]['requirements'] == requirements
+
+
+def test_continued_requirement_disagreement_is_not_hidden_by_evidence_union():
+    raw = pdf(['Question 1: Explain trees', 'Continued explanation of trees'])
+    def rows(m):
+        q = item(proof(m), 'Explain trees')
+        continued = copy.deepcopy(q)
+        continued['proofs'] = [proof(m, 2)]
+        continued['requirements'][0]['proofs'] = [proof(m, 2)]
+        return {'p0001': page([q], start=True), 'p0002': page([continued])}
+    def disagreement(m):
+        result = rows(m)
+        result['p0002']['items'][0]['requirements'][0]['text'] = 'Explain graphs'
+        return result
+    result, _, _, _ = run(raw, rows=rows, reconciliation=disagreement)
+    assert not result['extractionCoverage']['complete']
+    assert 'p0002' in result['extractionCoverage']['unresolvedUnitIds']
+
+
+@pytest.mark.parametrize('target,field', [('item', 'printedMarks'), ('item', 'printedLabel'), ('item', 'parent'),
+    ('item', 'questionType'), ('paper', 'totalMarks'), ('paper', 'examType')])
+def test_missing_nullable_fields_normalize_before_accepted_checkpoint(target, field):
+    raw = pdf(['Question 1'])
+    def rows(m):
+        value = page([item(proof(m))], start=True)
+        record = value['items'][0] if target == 'item' else value['paper']
+        record.pop(field, None)
+        return {'p0001': value}
+    result, _, manifest, states = run(raw, rows=rows)
+    assert result['extractionCoverage']['complete']
+    for state in states:
+        for response in state['responses']['extract'].values():
+            row = response['items'][0] if target == 'item' else response['paper']
+            assert field in row and row[field] is None
+    recovered = extractor(Provider({})).extract(manifest, course_title='Algorithms', lecture_reader=reader(),
+        render=lambda u: render_source_unit(raw, 'pdf', u['unitId']), checkpoint=lambda s: None, resume=states[-1])
+    assert recovered['extractionCoverage']['complete']
+
+
+@pytest.mark.parametrize('malformation', ['topic_item_null', 'topic_item_list', 'topic_requirement_null',
+    'topic_requirement_list', 'topic_origin_null', 'topic_requirement_origin_null', 'item_origin_null',
+    'requirement_null', 'requirement_origin_list', 'parent_origin_null', 'context_origin_null', 'proof_ref_null',
+    'topic_item_missing_type', 'topic_requirement_missing_text', 'topic_requirement_missing_category',
+    'topic_requirement_missing_origin', 'context_missing_text', 'item_missing_choices',
+    'paper_missing_confidence', 'requirement_missing_proofs', 'proof_missing_box'])
+def test_malformed_nested_inventory_is_counted_rejected_and_recoverable(malformation):
+    raw = pdf(['Question 1: Explain trees'])
+    def valid(m):
+        question = item(proof(m))
+        value = page([question], start=True)
+        value['topics'] = [{'text': 'Explain trees', 'items': [{'origin': proof(m), 'itemType': 'question'}],
+            'requirements': [{k: question['requirements'][0][k] for k in ('origin', 'text', 'category')}], 'proofs': [proof(m)]}]
+        return {'p0001': value}
+    def broken(m):
+        values = valid(m)
+        value = values['p0001']
+        topic, q = value['topics'][0], value['items'][0]
+        if malformation.startswith('topic_item_') and 'missing' not in malformation:
+            topic['items'] = [None if malformation.endswith('null') else []]
+        elif malformation.startswith('topic_requirement_') and 'origin' not in malformation and 'missing' not in malformation:
+            topic['requirements'] = [None if malformation.endswith('null') else []]
+        elif malformation == 'topic_origin_null': topic['items'][0]['origin'] = None
+        elif malformation == 'topic_requirement_origin_null': topic['requirements'][0]['origin'] = None
+        elif malformation == 'item_origin_null': q['origin'] = None
+        elif malformation == 'requirement_null': q['requirements'] = [None]
+        elif malformation == 'requirement_origin_list': q['requirements'][0]['origin'] = []
+        elif malformation == 'parent_origin_null': q['parent'] = {'itemType': 'question', 'origin': None}
+        elif malformation == 'context_origin_null': q['contextOrigins'] = [None]
+        elif malformation == 'proof_ref_null': q['proofs'] = [{**proof(m), 'ref': None}]
+        elif malformation == 'topic_item_missing_type': topic['items'][0].pop('itemType')
+        elif malformation.startswith('topic_requirement_missing_'): topic['requirements'][0].pop(malformation.rsplit('_', 1)[-1])
+        elif malformation == 'context_missing_text': value['sharedContexts'] = [{'origin': proof(m), 'proofs': [proof(m)]}]
+        elif malformation == 'item_missing_choices': q.pop('choices')
+        elif malformation == 'paper_missing_confidence': value['paper'].pop('confidence')
+        elif malformation == 'requirement_missing_proofs': q['requirements'][0].pop('proofs')
+        elif malformation == 'proof_missing_box':
+            p = proof(m, visual=True)
+            p.pop('box')
+            q['proofs'] = [p]
+        return values
+    result, _, manifest, states = run(raw, rows=broken, model_call_budget=2)
+    assert not result['extractionCoverage']['complete']
+    assert states[-1]['modelCalls'] == 2
+    assert states[-1]['responses'] == {'extract': {}, 'reconcile': {}}
+    recovered = extractor(Provider(valid(manifest))).extract(manifest, course_title='Algorithms', lecture_reader=reader(),
+        render=lambda u: render_source_unit(raw, 'pdf', u['unitId']), checkpoint=lambda s: None,
+        resume=states[-1], model_calls=0, model_call_budget=2)
+    assert recovered['extractionCoverage']['complete']

@@ -20,6 +20,18 @@ def array(value, label):
     return value
 
 
+def object_row(value, label):
+    if not isinstance(value, dict):
+        raise ValueError('Missing or invalid ' + label)
+    return value
+
+
+def enum(value, choices, label):
+    if not isinstance(value, str) or value not in choices:
+        raise ValueError('Missing or invalid ' + label)
+    return value
+
+
 def anchor(proof):
     """Identity is location, not a generated label or the chosen quote length."""
     if proof['type'] == 'text_span':
@@ -50,10 +62,9 @@ def _marks(value):
 def validate_response(value, manifest, source, previous, earlier):
     """Only exact supplied originals authorize new content; old anchors authorize joins."""
     value = deepcopy(value)
-    if not isinstance(value, dict) or value.get('disposition') not in DISPOSITIONS:
-        raise ValueError('Missing original readability disposition')
-    if value.get('pageRole') not in ('questions', 'answer_key', 'cover', 'blank', 'other', 'uncertain'):
-        raise ValueError('Missing original page role')
+    object_row(value, 'inventory response')
+    enum(value.get('disposition'), DISPOSITIONS, 'original readability disposition')
+    enum(value.get('pageRole'), ('questions', 'answer_key', 'cover', 'blank', 'other', 'uncertain'), 'original page role')
     units = {u['unitId']: u for u in manifest['units']}
     known = set()
     for old in earlier:
@@ -64,9 +75,12 @@ def validate_response(value, manifest, source, previous, earlier):
                     known.add(canonical_bytes(anchor(req['origin'])))
 
     def check(proof, *, origin=False, current=False):
-        if not isinstance(proof, dict) or not isinstance(proof.get('ref'), dict):
-            raise ValueError('Exact original proof is required')
-        unit = units.get(proof['ref'].get('unitId'))
+        object_row(proof, 'exact original proof')
+        ref = object_row(proof.get('ref'), 'exact original proof reference')
+        for key in ('kind', 'materialId', 'sourceRevision', 'unitId'):
+            text(ref.get(key), 'original proof reference ' + key)
+        enum(proof.get('type'), ('text_span', 'visual_region'), 'original proof type')
+        unit = units.get(ref['unitId'])
         if unit is None:
             raise ValueError('Unknown original proof unit')
         validate_source_proof(proof, ref=reference(manifest, unit), unit=unit)
@@ -102,16 +116,13 @@ def validate_response(value, manifest, source, previous, earlier):
 
     for collection in ('items', 'sharedContexts', 'topics'):
         array(value.get(collection), collection)
-        if any(not isinstance(row, dict) for row in value[collection]):
-            raise ValueError('Invalid inventory record')
-    for collection in ('items', 'sharedContexts'):
-        identities = [identifier(row['origin'], row.get('itemType', 'context')) for row in value[collection]]
-        if len(identities) != len(set(identities)):
-            raise ValueError('Duplicate original origin in one response')
+        for row in value[collection]:
+            object_row(row, 'inventory record')
     paper = value.get('paper')
     if manifest['identity']['kind'] == 'historical_exam':
-        if not isinstance(paper, dict):
-            raise ValueError('Historical original requires a boundary decision')
+        object_row(paper, 'historical boundary decision')
+        for key in ('examType', 'totalMarks'):
+            paper.setdefault(key, None)
         if type(paper.get('startsPaper')) is not bool or type(paper.get('uncertain')) is not bool:
             raise ValueError('Invalid original boundary decision')
         confidence = paper.get('confidence')
@@ -125,16 +136,16 @@ def validate_response(value, manifest, source, previous, earlier):
     else:
         value['paper'] = None
     for row in value['sharedContexts']:
-        check(row['origin'], origin=True)
+        check(row.get('origin'), origin=True)
         text(row.get('text'), 'shared context')
         proofs(row)
     for row in value['items']:
-        if row.get('itemType') not in ITEM_TYPES:
-            raise ValueError('Invalid extracted item type')
-        if row.get('questionType') is not None and row['questionType'] not in QUESTION_TYPES:
-            raise ValueError('Unsupported observed question type; use null when unknown')
-        row.setdefault('questionType', None)
-        check(row['origin'], origin=True)
+        enum(row.get('itemType'), ITEM_TYPES, 'extracted item type')
+        for key in ('parent', 'printedLabel', 'printedMarks', 'questionType'):
+            row.setdefault(key, None)
+        if row['questionType'] is not None:
+            enum(row['questionType'], QUESTION_TYPES, 'observed question type; use null when unknown')
+        check(row.get('origin'), origin=True)
         text(row.get('text'), 'question text', empty=row['itemType'] == 'nonacademic')
         if row.get('textJoin', '\n') not in ('', ' ', '\n'):
             raise ValueError('Invalid original continuation separator')
@@ -145,19 +156,17 @@ def validate_response(value, manifest, source, previous, earlier):
             array(row.get(key), key)
         parent = row.get('parent')
         if parent is not None:
-            if not isinstance(parent, dict) or parent.get('itemType') not in ('question', 'subpart'):
-                raise ValueError('Invalid parent origin')
-            check(parent['origin'], origin=True)
+            object_row(parent, 'parent origin')
+            enum(parent.get('itemType'), ('question', 'subpart'), 'parent item type')
+            check(parent.get('origin'), origin=True)
         for origin in row['contextOrigins']:
             check(origin, origin=True)
         proofs(row)
         for requirement in row['requirements']:
-            if not isinstance(requirement, dict):
-                raise ValueError('Invalid atomic requirement')
+            object_row(requirement, 'atomic requirement')
             text(requirement.get('text'), 'requirement')
-            if requirement.get('category') not in REQUIREMENT_CATEGORIES:
-                raise ValueError('Invalid requirement category')
-            check(requirement['origin'], origin=True)
+            enum(requirement.get('category'), REQUIREMENT_CATEGORIES, 'requirement category')
+            check(requirement.get('origin'), origin=True)
             proofs(requirement)
         ids = [requirement_id(r) for r in row['requirements']]
         if len(ids) != len(set(ids)):
@@ -167,15 +176,19 @@ def validate_response(value, manifest, source, previous, earlier):
         if not array(row.get('items'), 'topic origins') or not array(row.get('requirements'), 'topic requirements'):
             raise ValueError('Topic requires originating items and exact requirements')
         for origin in row['items']:
-            if origin.get('itemType') not in ITEM_TYPES:
-                raise ValueError('Invalid topic item origin')
-            check(origin['origin'], origin=True)
+            object_row(origin, 'topic item origin')
+            enum(origin.get('itemType'), ITEM_TYPES, 'topic item type')
+            check(origin.get('origin'), origin=True)
         for req in row['requirements']:
-            check(req['origin'], origin=True)
+            object_row(req, 'topic requirement')
+            check(req.get('origin'), origin=True)
             text(req.get('text'), 'topic requirement')
-            if req.get('category') not in REQUIREMENT_CATEGORIES:
-                raise ValueError('Invalid topic requirement category')
+            enum(req.get('category'), REQUIREMENT_CATEGORIES, 'topic requirement category')
         proofs(row)
+    for collection in ('items', 'sharedContexts'):
+        identities = [identifier(row['origin'], row['itemType'] if collection == 'items' else 'context') for row in value[collection]]
+        if len(identities) != len(set(identities)):
+            raise ValueError('Duplicate original origin in one response')
     if value['pageRole'] == 'answer_key' and any(i['itemType'] != 'nonacademic' for i in value['items']):
         raise ValueError('Answer keys cannot create new academic questions')
     if value['disposition'] in ('blank', 'nonacademic') and any(i['itemType'] != 'nonacademic' for i in value['items']):
@@ -210,9 +223,22 @@ def inventory(manifest, plan, responses):
             existing['text'] += separator + row['text']
         elif row['text'] != existing['text']:
             issue(unit, 'Same original origin has contradictory text')
-        for field in ('supportingSourceProofs', 'supportingSourceRefs', 'choices', 'givenData', 'sharedContextIds', 'requirements'):
+        for field in ('supportingSourceProofs', 'supportingSourceRefs', 'choices', 'givenData', 'sharedContextIds'):
             if field in row:
                 existing[field] = unique(existing[field] + row[field])
+        if 'requirements' in row:
+            requirements = {r['id']: r for r in existing['requirements']}
+            for requirement in row['requirements']:
+                original = requirements.get(requirement['id'])
+                if original is None:
+                    requirements[requirement['id']] = requirement
+                    continue
+                if any(original[key] != requirement[key] for key in ('text', 'category')):
+                    issue(unit, 'Continued atomic requirement has contradictory content')
+                    continue
+                for field in ('supportingSourceRefs', 'supportingSourceProofs'):
+                    original[field] = unique(original[field] + requirement[field])
+            existing['requirements'] = list(requirements.values())
 
     for index, response in sorted(responses.items(), key=lambda pair: int(pair[0])):
         source = plan[int(index)]
