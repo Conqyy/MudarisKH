@@ -116,7 +116,7 @@ def validate_analysis(kind: str, data: dict) -> dict:
             raise ValueError('Invalid historical exam type')
         if data.get('totalMarks') is not None:
             _number(data, 'totalMarks', lower=0.000001)
-        if data.get('analysisVersion') == 2:
+        if data.get('analysisVersion') in (2, 3):
             papers = _objects(data, 'papers', ('paperId',), True)
             if _number(data, 'paperCount', lower=1, integer=True) != len(papers):
                 raise ValueError('Historical paper count disagrees with detected papers')
