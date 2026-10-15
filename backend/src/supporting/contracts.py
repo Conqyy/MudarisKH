@@ -9,7 +9,7 @@ import hashlib
 import json
 import math
 import re
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 MaterialKind = Literal['historical_exam', 'tutorial', 'audio', 'notes']
 Relation = Literal['lecture_supported', 'related_supplementary', 'outside_selected_scope', 'not_found', 'unverified', 'conflicting']
@@ -105,6 +105,7 @@ class SupportingRequirement(TypedDict):
     text: str
     category: str
     supportingSourceRefs: list[SupportingRef]
+    supportingSourceProofs: NotRequired[list[SourceProof]]
 
 
 class SupportingItem(TypedDict):
@@ -120,6 +121,8 @@ class SupportingItem(TypedDict):
     printedMarks: float | None
     requirements: list[SupportingRequirement]
     supportingSourceRefs: list[SupportingRef]
+    supportingSourceProofs: NotRequired[list[SourceProof]]
+    questionType: NotRequired[str | None]
 
 
 class RequirementAlignment(TypedDict):
