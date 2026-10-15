@@ -41,13 +41,9 @@ export default function DocumentViewer({
   };
   useTrackRecent(bookmarkItem);
 
-  const defaultTab = doc.guide || doc.analysis ? "analysis" : "content";
+  const defaultTab = doc.guide || doc.analysis ? "analysis" : doc.fileType !== "pdf" && doc.sourceRevision ? "sources" : "content";
   const [activeTab, setActiveTab] = useState<"content" | "analysis" | "sources">(defaultTab);
   const [activeChapter, setActiveChapter] = useState(0);
-  const [extractedText, setExtractedText] = useState(doc.extractedText || "");
-  const [loadingText, setLoadingText] = useState(false);
-  const [textError, setTextError] = useState("");
-  const [textAttempt, setTextAttempt] = useState(0);
   const dialogRef = useDialog(onClose);
   const [sourceAttempt, setSourceAttempt] = useState(0);
   const [sourceState, setSourceState] = useState<{ key: string; units: { unitId: string; label: string; kind: string }[]; warnings: string[]; error?: string } | null>(null);
@@ -71,20 +67,6 @@ export default function DocumentViewer({
   }, [sourceKey, sourceAttempt, doc.sourceRevision, doc.id, user?.uid, t]);
   const sources = sourceState?.key === sourceKey ? sourceState : null;
   const chapterRefs = useRef<(HTMLDivElement | null)[]>([]);
-
-  useEffect(() => {
-    if (doc.fileType === "pdf") return;
-    const controller = new AbortController();
-    setExtractedText(doc.extractedText || "");
-    setTextError("");
-    if (doc.extractedText) { setLoadingText(false); return; }
-    setLoadingText(true);
-    apiJson(API_URL + "/api/documents/detail/" + doc.id, { signal: controller.signal })
-      .then(data => { if (!controller.signal.aborted) setExtractedText(data.document?.extractedText || ""); })
-      .catch(error => { if (!controller.signal.aborted) setTextError(error.message || "Could not load content."); })
-      .finally(() => { if (!controller.signal.aborted) setLoadingText(false); });
-    return () => controller.abort();
-  }, [doc.id, doc.fileType, doc.extractedText, textAttempt, user?.uid]);
 
   const scrollToChapter = (idx: number) => {
     setActiveChapter(idx);
@@ -173,7 +155,7 @@ export default function DocumentViewer({
               {t(doc.guide ? "Lightweight analysis" : "Analysis")}
             </button>
           )}
-          <button
+          {isPdf && <button
             onClick={() => setActiveTab("content")}
             className={`px-4 py-3 text-sm font-medium border-b-2 transition ${
               activeTab === "content"
@@ -182,7 +164,7 @@ export default function DocumentViewer({
             }`}
           >
             {t("Content")}
-          </button>
+          </button>}
           {doc.sourceRevision && <button onClick={() => setActiveTab("sources")} className={`px-4 py-3 text-sm font-medium border-b-2 ${activeTab === "sources" ? "border-accent text-accent" : "border-transparent text-ink-mute"}`}>{t("Source units")}</button>}
         </div>
 
@@ -319,7 +301,7 @@ export default function DocumentViewer({
               </div>
             </>
           ) : (
-            /* Content Tab — shows extracted text or PDF */
+            /* Original PDF or preparation guidance for legacy Office files. */
             <div className="flex-1 overflow-y-auto">
               {isPdf ? (
                 pdfUrl ? (
@@ -333,18 +315,9 @@ export default function DocumentViewer({
                     {pdf.error ? <div role="alert" className="text-center"><p>{pdf.error}</p><button onClick={pdf.retry} className="mt-3 underline">Retry PDF</button></div> : "Loading PDF..."}
                   </div>
                 )
-              ) : loadingText ? (
-                <div className="flex items-center justify-center h-full text-ink-mute text-sm">
-                  Loading content...
-                </div>
-              ) : extractedText ? (
-                <pre className="p-6 text-sm font-mono text-ink-soft leading-relaxed whitespace-pre-wrap">
-                  {extractedText}
-                </pre>
               ) : (
                 <div className="flex items-center justify-center h-full text-ink-mute text-sm">
-                  {textError ? <p role="alert">{textError}</p> : <p>No content available for this document.</p>}
-                  <button onClick={() => setTextAttempt(n => n + 1)} className="ms-3 underline">Retry content</button>
+                  <p>{t("Prepare this document from the course page to view its original source units.")}</p>
                 </div>
               )}
             </div>

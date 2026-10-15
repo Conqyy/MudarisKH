@@ -55,19 +55,19 @@ describe("authenticated previews", () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:old");
     unmount(); expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:new");
   });
-  it("keeps failed text requests terminal until retry and then displays recovered content", async () => {
-    mocks.api.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(response({ document: { extractedText: "Recovered notes" } }));
-    render(<DocumentViewer document={doc} onClose={() => {}} />);
+  it("keeps failed Office source requests terminal until retry and then displays recovered units", async () => {
+    mocks.api.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce(response({ source: { available: true, sourceRevision: 'rev1', units: [{ unitId: 'b1', label: 'Recovered notes', kind: 'docx_block' }] } }));
+    render(<DocumentViewer document={{ ...doc, fileType: 'docx', sourceRevision: 'rev1' }} onClose={() => {}} />);
     await screen.findByRole("alert");
     expect(mocks.api).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: /retry content/i }));
+    fireEvent.click(screen.getByRole("button", { name: /retry source/i }));
     await screen.findByText("Recovered notes");
     expect(mocks.api).toHaveBeenCalledTimes(2);
   });
   it("supports Escape and restores focus when the viewer closes", async () => {
     const onClose = vi.fn();
     const opener = document.createElement("button"); document.body.append(opener); opener.focus();
-    render(<DocumentViewer document={{ ...doc, extractedText: "Ready" }} onClose={onClose} />);
+    render(<DocumentViewer document={{ ...doc, fileType: 'pdf' }} onClose={onClose} />);
     const dialog = screen.getByRole("dialog");
     expect(dialog.contains(document.activeElement)).toBe(true);
     fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
@@ -78,13 +78,11 @@ describe("authenticated previews", () => {
     expect(onClose).toHaveBeenCalledOnce();
     cleanup(); expect(document.activeElement).toBe(opener); opener.remove();
   });
-  it("does not refetch empty extracted text until an explicit retry", async () => {
-    mocks.api.mockResolvedValue(response({ document: { extractedText: "" } }));
-    render(<DocumentViewer document={doc} onClose={() => {}} />);
-    await screen.findByText("No content available for this document.");
-    expect(mocks.api).toHaveBeenCalledTimes(1);
-    fireEvent.click(screen.getByRole("button", { name: /retry content/i }));
-    await waitFor(() => expect(mocks.api).toHaveBeenCalledTimes(2));
+  it("explains preparation for legacy Office documents without a dead Content tab or detail request", async () => {
+    render(<DocumentViewer document={{ ...doc, fileType: 'docx' }} onClose={() => {}} />);
+    await screen.findByText(/Prepare this document from the course page/);
+    expect(screen.queryByRole('button', { name: 'Content' })).toBeNull();
+    expect(mocks.api).not.toHaveBeenCalled();
   });
   it("shows a PDF failure and retries once", async () => {
     mocks.object.mockRejectedValueOnce(new Error("offline")).mockResolvedValueOnce("blob:doc");
@@ -344,4 +342,29 @@ it('keeps guide references on their original revision while the current source c
   render(<DocumentViewer document={staleGuide as any} onClose={() => {}} />);
   fireEvent.click(await screen.findByRole('button', { name: 'page-1' }));
   await waitFor(() => expect(mocks.api.mock.calls.some(([url]) => url.includes('source_revision=guide-original'))).toBe(true));
+});
+
+it.each(['docx', 'pptx'])('opens prepared %s content through exact source units without a dead Content tab', async fileType => {
+  mocks.api.mockImplementation(async (url: string) => url.endsWith('/sources')
+    ? response({ source: { available: true, sourceRevision: 'rev1', units: [{ unitId: 'unit1', label: 'Original unit', kind: 'office' }] } })
+    : response({ unit: { documentId: 'd1', sourceRevision: 'rev1', unitId: 'unit1', text: 'Original Office content' }, images: [] }));
+  render(<DocumentViewer document={{ ...doc, fileType, sourceRevision: 'rev1' }} onClose={() => {}} />);
+  expect(screen.queryByRole('button', { name: 'Content' })).toBeNull();
+  fireEvent.click(await screen.findByRole('button', { name: 'Original unit' }));
+  await screen.findByText('Original Office content');
+  expect(mocks.api.mock.calls.every(([url]) => !url.includes('/detail/'))).toBe(true);
+});
+
+it('discards late Office unit lists on document and account changes', async () => {
+  const old = deferred<any>();
+  mocks.api.mockReturnValueOnce(old.promise).mockResolvedValue(response({ source: { available: true, sourceRevision: 'rev2', units: [{ unitId: 'new', label: 'Current unit', kind: 'office' }] } }));
+  const view = render(<DocumentViewer document={{ ...doc, fileType: 'pptx', sourceRevision: 'rev1' }} onClose={() => {}} />);
+  const signal = mocks.api.mock.calls[0][1].signal;
+  mocks.user = { uid: 'u2' };
+  view.rerender(<DocumentViewer document={{ ...doc, id: 'd2', courseId: 'c2', fileType: 'pptx', sourceRevision: 'rev2' }} onClose={() => {}} />);
+  await screen.findByRole('button', { name: 'Current unit' });
+  await act(async () => old.resolve(response({ source: { available: true, sourceRevision: 'rev1', units: [{ unitId: 'old', label: 'Old private unit', kind: 'office' }] } })));
+  expect(signal.aborted).toBe(true);
+  expect(screen.queryByRole('button', { name: 'Old private unit' })).toBeNull();
+  mocks.user = { uid: 'u1' };
 });

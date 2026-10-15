@@ -825,7 +825,7 @@ async def upload_historical_exam(
     course_id: str = Form(...),
     title: str = Form(""), uid: str = Depends(require_uid),):
     user_id = uid  # the token decides the owner, not the form field
-    foundation = _require_document_foundation(course_id, uid)
+    foundation = await run_in_threadpool(_require_document_foundation, course_id, uid)
     course = foundation['course']
     import time as _time
 
@@ -875,12 +875,12 @@ async def upload_historical_exam(
 
         # Pass the course's CURRENT lecture-document analyses so the analyzer can
         # tag each past-exam topic as in/out of the course as it is taught now.
-        _require_document_foundation(course_id, uid, foundation['revision'])
+        await run_in_threadpool(_require_document_foundation, course_id, uid, foundation['revision'])
         document_insights = foundation['document_insights']
 
         db_client.update_historical_exam(exam_id, {"extractedText": extracted_text})
-        reader = _source_reader(course_id, uid, hist_analyzer)
-        lecture_evidence = _source_prepare(reader, "focused", extracted_text)
+        reader = await run_in_threadpool(_source_reader, course_id, uid, hist_analyzer)
+        lecture_evidence = await run_in_threadpool(_source_prepare, reader, "focused", extracted_text)
         if is_pdf:
             analysis = await run_in_threadpool(hist_analyzer.analyze_pdf,
                 file_bytes, course_title, document_insights=document_insights, lecture_evidence=lecture_evidence)
@@ -889,8 +889,8 @@ async def upload_historical_exam(
                 extracted_text, course_title, image_uris=page_images,
                 document_insights=document_insights, lecture_evidence=lecture_evidence)
 
-        _require_document_foundation(course_id, uid, foundation['revision'])
-        analysis = reader.tag_analysis(analysis)
+        await run_in_threadpool(_require_document_foundation, course_id, uid, foundation['revision'])
+        analysis = await run_in_threadpool(reader.tag_analysis, analysis)
         db_client.update_historical_exam(exam_id, {
             "extractedText": extracted_text,
             "analysis": analysis,
@@ -945,7 +945,7 @@ async def upload_tutorial(
     TOPICS and worked-problem IDEAS only — it never contributes grading weight
     or exam format (those come from past exams). Reuses the document analyzer."""
     user_id = uid  # the token decides the owner, not the form field
-    foundation = _require_document_foundation(course_id, uid)
+    foundation = await run_in_threadpool(_require_document_foundation, course_id, uid)
     course = foundation['course']
     import time as _time
 
@@ -996,14 +996,14 @@ async def upload_tutorial(
 
         course_title = course.get("title", course_id)
 
-        _require_document_foundation(course_id, uid, foundation['revision'])
-        reader = _source_reader(course_id, uid, doc_processor)
-        lecture_evidence = _source_prepare(reader, "focused", extracted_text)
+        await run_in_threadpool(_require_document_foundation, course_id, uid, foundation['revision'])
+        reader = await run_in_threadpool(_source_reader, course_id, uid, doc_processor)
+        lecture_evidence = await run_in_threadpool(_source_prepare, reader, "focused", extracted_text)
         analysis = await run_in_threadpool(doc_processor.analyze_tutorial, extracted_text, course_title,
             image_uris=page_images, document_insights=foundation['document_insights'], lecture_evidence=lecture_evidence)
-        _require_document_foundation(course_id, uid, foundation['revision'])
+        await run_in_threadpool(_require_document_foundation, course_id, uid, foundation['revision'])
 
-        analysis = reader.tag_analysis(analysis)
+        analysis = await run_in_threadpool(reader.tag_analysis, analysis)
         db_client.update_tutorial(tut_id, {
             "extractedText": extracted_text,
             "analysis": analysis,
@@ -1652,6 +1652,10 @@ def _normalize_marks(rubrics: dict, total_marks: int):
 
 def _compile_answer_tex(tex: str, name: str):
     from src.utils.pdf_response import compile_temp_pdf
+    # New structured keys declare fontspec. Retained legacy/deterministic keys
+    # keep their original engine; cache reads use the same choice as serving.
+    if r'\usepackage{fontspec}' in tex:
+        return compile_temp_pdf(tex.strip(), name + "-answers", engine='xelatex')
     return compile_temp_pdf(tex.strip(), name + "-answers")
 
 
@@ -1786,7 +1790,7 @@ def _make_compilable_answer_key(exam: dict, *, reader, lecture_evidence) -> dict
     shared = exam_shared_context(exam['texContent'])
     reader.verify_rows(checked, shared_context=shared)
     tex = ai_agent._answers_to_latex(checked, exam.get('examId', 'exam'), shared_context=shared)
-    if not check_tex_compiles(tex, exam.get('examId', 'exam') + '-answers'):
+    if not check_tex_compiles(tex, exam.get('examId', 'exam') + '-answers', engine='xelatex'):
         raise ValueError('Verified answer document cannot compile')
     return {'tex': tex, 'mapping': mapping}
 
@@ -2672,47 +2676,7 @@ def delete_summary_endpoint(doc_id: str, uid: str = Depends(require_uid)):
     return {"status": "success", "deleted": doc_id}
 
 
-# Common non-ASCII characters the LLM emits in technical summaries. pdflatex
-# (T1 fontenc, no Unicode setup) hard-fails on these with "Unicode character
-# not set up for use with LaTeX", so map them to LaTeX equivalents. Math symbols
-# are wrapped in $...$; typographic ones map to their text form.
-_UNICODE_LATEX = {
-    # Greek lowercase
-    "α": r"$\alpha$", "β": r"$\beta$", "γ": r"$\gamma$", "δ": r"$\delta$",
-    "ε": r"$\varepsilon$", "ζ": r"$\zeta$", "η": r"$\eta$", "θ": r"$\theta$",
-    "ι": r"$\iota$", "κ": r"$\kappa$", "λ": r"$\lambda$", "μ": r"$\mu$",
-    "ν": r"$\nu$", "ξ": r"$\xi$", "π": r"$\pi$", "ρ": r"$\rho$",
-    "σ": r"$\sigma$", "τ": r"$\tau$", "υ": r"$\upsilon$", "φ": r"$\varphi$",
-    "χ": r"$\chi$", "ψ": r"$\psi$", "ω": r"$\omega$", "ϕ": r"$\phi$",
-    # Greek uppercase
-    "Γ": r"$\Gamma$", "Δ": r"$\Delta$", "Θ": r"$\Theta$", "Λ": r"$\Lambda$",
-    "Ξ": r"$\Xi$", "Π": r"$\Pi$", "Σ": r"$\Sigma$", "Φ": r"$\Phi$",
-    "Ψ": r"$\Psi$", "Ω": r"$\Omega$",
-    # Relations
-    "≤": r"$\leq$", "≥": r"$\geq$", "≠": r"$\neq$", "≈": r"$\approx$",
-    "≡": r"$\equiv$", "∈": r"$\in$", "∉": r"$\notin$", "⊂": r"$\subset$",
-    "⊆": r"$\subseteq$", "⊃": r"$\supset$", "⊇": r"$\supseteq$", "∝": r"$\propto$",
-    # Arrows
-    "→": r"$\rightarrow$", "←": r"$\leftarrow$", "↔": r"$\leftrightarrow$",
-    "⇒": r"$\Rightarrow$", "⇐": r"$\Leftarrow$", "⇔": r"$\Leftrightarrow$",
-    "↦": r"$\mapsto$",
-    # Operators / misc math
-    "×": r"$\times$", "÷": r"$\div$", "±": r"$\pm$", "∓": r"$\mp$",
-    "·": r"$\cdot$", "∗": r"$*$", "∘": r"$\circ$", "∑": r"$\sum$",
-    "∏": r"$\prod$", "∫": r"$\int$", "√": r"$\sqrt{\,}$", "∞": r"$\infty$",
-    "∂": r"$\partial$", "∇": r"$\nabla$", "∧": r"$\wedge$", "∨": r"$\vee$",
-    "¬": r"$\neg$", "∀": r"$\forall$", "∃": r"$\exists$", "∅": r"$\emptyset$",
-    "°": r"$^{\circ}$", "′": r"$'$", "″": r"$''$",
-    # Typographic
-    "–": "--", "—": "---", "•": r"$\bullet$", "…": r"\ldots{}",
-    "‘": "`", "’": "'", "“": "``", "”": "''", " ": " ",
-}
-
-_LATEX_SPECIALS = {
-    "\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$",
-    "#": r"\#", "_": r"\_", "{": r"\{", "}": r"\}",
-    "~": r"\textasciitilde{}", "^": r"\textasciicircum{}",
-}
+from src.utils.latex_text import _UNICODE_LATEX, _LATEX_SPECIALS
 
 
 def _latex_escape(s, keep_unknown_unicode: bool = False) -> str:
@@ -3087,6 +3051,11 @@ def tutor_chat(payload: TutorChatRequest, uid: str = Depends(require_uid)):
     elif len(payload.messages) != 1 or payload.messages[-1].get("role") != "user":
         raise HTTPException(status_code=400, detail="Start a new conversation with one user message.")
 
+    # Validate the original selection before the resource bundle can filter IDs.
+    # Only omitted/null or intentionally empty selections use the foundation.
+    selected_documents = payload.document_ids or [d['id'] for d in foundation['documents']]
+    reader = _source_reader(payload.course_id, uid, tutor_agent, selected_documents)
+
     # The tutor reads its resources DIRECTLY from the DBs, restricted to the
     # specific lectures and past exams the student selected.
     resources = db_client.get_tutor_resources(
@@ -3101,8 +3070,6 @@ def tutor_chat(payload: TutorChatRequest, uid: str = Depends(require_uid)):
         resources['documents'] = foundation['documents']
     resources['course'] = foundation['course']
 
-    reader = _source_reader(payload.course_id, uid, tutor_agent,
-                            [d['id'] for d in resources['documents']])
     lecture_evidence = _source_prepare(reader, 'focused', '\n'.join(m['content'] for m in payload.messages[-12:]))
     try:
         grounded = tutor_agent.reply_grounded(resources, payload.messages, lecture_evidence=lecture_evidence)

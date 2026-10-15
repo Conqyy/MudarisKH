@@ -21,6 +21,7 @@ export const AR: Record<string, string> = {
   "guide sections": "قسم من الدليل",
   "Preparation required": "يحتاج المستند إلى التجهيز",
   "Prepare document": "جهّز المستند",
+  "Prepare this document from the course page to view its original source units.": "جهّز هذا المستند من صفحة المقرر لعرض وحدات المصدر الأصلية.",
   "Retry preparation": "أعد تجهيز المستند",
   "Retry lightweight analysis": "أعد التحليل المختصر",
   "Document retry failed.": "تعذرت إعادة معالجة المستند.",

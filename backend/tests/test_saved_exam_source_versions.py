@@ -53,6 +53,79 @@ def confirm(api):
     api.confirm_course_foundation('c', api.FoundationConfirmRequest(revision=state['revision']), uid='u')
 
 
+def test_unicode_answer_fallback_probe_serve_and_cache_use_same_engine(saved, monkeypatch):
+    api, library, doc, eid, exam = saved
+    exam['texContent'] = TEX.replace('Use the given constant.', 'استخدم الثابت مع x ≤ 2.')
+    exam['texContent'] = exam['texContent'].replace('Compute $\\given+2$. Options: A: 3; B: 4.', 'ما هو الذكاء الاصطناعي؟')
+    exam['rubrics']['questions']['q1'].update(question_type='written', criteria='محاكاة الذكاء البشري')
+    identity = saved_question_identity(exam['texContent'], exam['rubrics'])
+    exam.update(questionIdentity=identity, questionStructure=identity['questions'])
+    library.database.update_exam(eid, exam)
+    item = {'questionId': 'q1', 'question': identity['questions'][0]['text'],
+            'answer': 'محاكاة الذكاء البشري', 'explanation': 'مثال مع α ≤ 2', 'sourceRefs': exam['sharedSourceRefs']}
+    monkeypatch.setattr(api.ai_agent, 'generate_answer_pairs', lambda *a, **kw: [deepcopy(item)])
+    compiled = []
+    def compiler(tex, name, engine='pdflatex'):
+        compiled.append((tex, engine))
+        if 'Model Answers' not in tex:
+            return None  # Force the structured, identity-checked fallback.
+        return 'pdf' if engine == 'xelatex' and r'\usepackage{fontspec}' in tex else None
+    monkeypatch.setattr('src.utils.pdf_response.compile_temp_pdf', compiler)
+    assert api.get_exam_answer_key_pdf(eid, uid='u') == {'pdf': 'pdf'}
+    stored = library.database.get_exam(eid)
+    assert stored['questionIdentity'] == exam['questionIdentity']
+    assert stored['rubrics'] == exam['rubrics']
+    assert stored['questionStructure'] == exam['questionStructure']
+    assert 'ما هو الذكاء الاصطناعي؟' in stored['answerKeyTex']
+    assert item['answer'] in stored['answerKeyTex']
+    assert 'استخدم الثابت' in stored['answerKeyTex']
+    assert [engine for tex, engine in compiled if 'Model Answers' in tex] == ['xelatex', 'xelatex']
+    monkeypatch.setattr(api.ai_agent, 'generate_answer_pairs', lambda *a, **kw: pytest.fail('cached key regenerated'))
+    assert api.get_exam_answer_key_pdf(eid, uid='u') == {'pdf': 'pdf'}
+    assert compiled[-1] == (stored['answerKeyTex'], 'xelatex')
+
+
+def test_answer_renderer_preserves_literal_code_and_renders_arabic_and_math():
+    from src.agents.exam_generator import ExamGeneratorAgent
+    from src.utils.compile_pdf import validate_tex_source
+    items = [{'question': 'ما هو الذكاء الاصطناعي؟',
+              'answer': 'if (x_1 <= 2) {\n  return "مرحبا"; // α ≤ ∞\n}',
+              'explanation': r'Literal \input{private} is text, not a command.'}]
+    original = deepcopy(items)
+    tex = ExamGeneratorAgent._answers_to_latex(items, 'unicode')
+    validate_tex_source(tex)
+    assert items == original
+    assert r'\textarabic{' in tex
+    assert 'مرحبا' in tex
+    assert r'\alpha' in tex and r'\leq' in tex and r'\infty' in tex
+    assert r'\textbackslash{}input\{private\}' in tex
+    assert r'\tracinglostchars=3' in tex
+
+
+def test_answer_and_shared_code_preserve_indentation_blank_lines_and_repeated_spaces():
+    import json
+    from src.agents.exam_generator import ExamGeneratorAgent
+    from src.utils.compile_pdf import validate_tex_source
+    code = 'for i in range(3):\n    total  += i\n\n\treturn "مرحبا"'
+    tex = ExamGeneratorAgent._answers_to_latex(
+        [{'question': 'Keep the code.', 'answer': code}], 'spaces', shared_context=json.dumps([code]))
+    validate_tex_source(tex)
+    assert tex.count(r'\hphantom{~~~~}') == 4
+    assert tex.count(r'\hphantom{~~}') == 2
+    assert tex.count(r'\mbox{}') == 2
+    assert tex.count('total') == 2 and tex.count('مرحبا') == 2
+
+
+def test_multiline_answer_starts_below_label_with_one_shared_code_margin():
+    from src.agents.exam_generator import ExamGeneratorAgent
+    tex = ExamGeneratorAgent._answers_to_latex([
+        {'question': 'Code?', 'answer': 'if x:\n    return x'},
+        {'question': 'Value?', 'answer': '2'},
+    ], 'code-layout')
+    assert r'\textbf{Answer:}\par\smallskip {\ttfamily if x:' in tex
+    assert r'\textbf{Answer:}~ 2' in tex
+
+
 def replace(api, library, doc):
     raw = pdf_bytes('REPLACEMENT SENTINEL teaches unrelated content')
     db = library.database
@@ -186,7 +259,7 @@ def test_answer_pairs_require_exact_saved_mapping_and_authoritative_answers(save
         return items
     monkeypatch.setattr(api.ai_agent, 'generate_answer_pairs', pairs)
     monkeypatch.setattr(api.ai_agent, 'generate_answer_key', lambda *a, **k: pytest.fail('unmapped rich key used'))
-    monkeypatch.setattr('src.utils.pdf_response.check_tex_compiles', lambda *a: True)
+    monkeypatch.setattr('src.utils.pdf_response.check_tex_compiles', lambda *a, **kw: True)
     # Original rubric document fails, while separately rendered verified pairs compile.
     attempts = iter([None, 'pdf'])
     monkeypatch.setattr(api, '_compile_answer_tex', lambda *a: next(attempts))
@@ -298,7 +371,7 @@ def test_answer_publication_fences_after_last_api_check(saved, monkeypatch, race
     items = [{'questionId': 'q1', 'question': exam['questionStructure'][0]['text'],
               'answer': 'B', 'explanation': '2+2=4', 'sourceRefs': exam['sharedSourceRefs']}]
     monkeypatch.setattr(api.ai_agent, 'generate_answer_pairs', lambda *a, **k: items)
-    monkeypatch.setattr('src.utils.pdf_response.check_tex_compiles', lambda *a: True)
+    monkeypatch.setattr('src.utils.pdf_response.check_tex_compiles', lambda *a, **kw: True)
     attempts = iter([None, 'pdf'])
     monkeypatch.setattr(api, '_compile_answer_tex', lambda *a: next(attempts))
     cleaned = []

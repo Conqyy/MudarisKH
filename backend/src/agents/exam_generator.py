@@ -932,17 +932,20 @@ Respond ONLY with raw JSON (no markdown, no commentary) in this exact shape:
 
     @staticmethod
     def _answers_to_latex(items: list, exam_id: str, *, shared_context: str = '') -> str:
-        """Render {question, answer, explanation} items into a SAFE, always-compilable,
+        """Render {question, answer, explanation} items into a safe Unicode,
         cleanly-formatted answer key — question heading, the exact answer in red,
         then a short explanation, with a thin separator between questions. Multi-line
         answers (code/assembly) are shown monospaced with their line breaks kept."""
+        from src.utils.pdf_response import unicode_font_preamble
+        from src.utils.latex_text import _UNICODE_LATEX, _LATEX_SPECIALS
+
         def esc(s) -> str:
-            repl = {
-                "\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$",
-                "#": r"\#", "_": r"\_", "{": r"\{", "}": r"\}",
-                "~": r"\textasciitilde{}", "^": r"\textasciicircum{}",
-            }
-            return "".join(repl.get(ch, ch) for ch in str(s or ""))
+            body = ''.join(_LATEX_SPECIALS.get(ch, _UNICODE_LATEX.get(ch, ch)) for ch in str(s or ''))
+            # Keep mixed Latin/code runs LTR and shape Arabic with the bounded
+            # installed font. Reset monospace within Arabic answer-code runs.
+            arabic = r'[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]'
+            return re.sub(arabic + r'+(?:[ \t]+' + arabic + r'+)*',
+                          lambda m: r'{\rmfamily\textarabic{\upshape ' + m.group() + '}}', body)
 
         def inline(s) -> str:
             # Single flowing paragraph (collapse newlines to spaces).
@@ -950,19 +953,26 @@ Respond ONLY with raw JSON (no markdown, no commentary) in this exact shape:
 
         def block(s) -> str:
             # Preserve line breaks (for code/steps); monospace if multi-line.
-            txt = str(s or "").replace("\r\n", "\n").strip()
+            txt = str(s or "").replace("\r\n", "\n")
             if not txt:
                 return ""
-            lines = [ln for ln in txt.split("\n") if ln.strip() != ""]
+            def line(ln):
+                # TeX collapses indentation and repeated spaces. Phantom spaces
+                # retain their current-font widths without executing source code.
+                return ''.join(r'\hphantom{' + '~' * len(part) + '}' if part.isspace() else esc(part)
+                               for part in re.split(r'(^ +| {2,}| +$)', ln.expandtabs(4))) or r'\mbox{}'
+            lines = txt.split("\n")
             if len(lines) <= 1:
-                return esc(txt)
-            joined = " \\\\\n".join(esc(ln) for ln in lines)
-            return r"\ttfamily " + joined
+                return line(txt)
+            joined = " \\\\\n".join(line(ln) for ln in lines)
+            return r"{\ttfamily " + joined + "}"
 
         parts = [
             r"\documentclass[11pt,a4paper]{article}",
             r"\usepackage[a4paper,margin=2.3cm]{geometry}",
-            r"\usepackage[T1]{fontenc}",
+            *unicode_font_preamble(),
+            r"\tracinglostchars=3",
+            r"\usepackage{amsmath,amssymb}",
             r"\usepackage{textcomp}",
             r"\usepackage{parskip}",
             r"\usepackage{xcolor}",
@@ -983,10 +993,11 @@ Respond ONLY with raw JSON (no markdown, no commentary) in this exact shape:
         n = len(items)
         for i, it in enumerate(items, 1):
             ans = block(it.get("answer", ""))
+            answer_label = r"\textbf{Answer:}\par\smallskip " if '\n' in str(it.get('answer', '')) else r"\textbf{Answer:}~ "
             expl = inline(it.get("explanation", ""))
             parts.append(r"\textbf{\large Question " + str(i) + r"}\par\smallskip")
             parts.append(inline(it.get("question", "")) + r"\par\smallskip")
-            parts.append(r"\begin{flushleft}{\color{ansred}\textbf{Answer:}~ " + ans + r"}\end{flushleft}")
+            parts.append(r"\begin{flushleft}{\color{ansred}" + answer_label + ans + r"}\end{flushleft}")
             if expl:
                 parts.append(r"{\color{ansred}" + expl + r"}\par")
             parts.append(r"\vspace{0.6em}")
