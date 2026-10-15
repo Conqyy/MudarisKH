@@ -56,7 +56,7 @@ class TransactionFirestore(FakeFirestore):
 def cloud_database(monkeypatch):
     from google.cloud import firestore
     monkeypatch.setattr(firestore, 'transactional', lambda fn: fn)
-    monkeypatch.setattr('google.cloud.firestore_v1.base_query.FieldFilter', lambda field, op, value: types.SimpleNamespace(field=field, value=value))
+    monkeypatch.setattr('google.cloud.firestore_v1.base_query.FieldFilter', lambda field, op, value: types.SimpleNamespace(field=field, op=op, value=value))
     client = FirebaseClient.__new__(FirebaseClient)
     client.use_local = False
     client.db = TransactionFirestore({'courses/c': {'userId': 'u'}, 'tutor_chats/chat': {'userId': 'u', 'courseId': 'c', 'messages': []}})

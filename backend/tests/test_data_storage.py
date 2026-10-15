@@ -40,11 +40,19 @@ class FakeCollection:
     def __init__(self, db, path, filters=()): self.db, self.path, self.filters = db, path, filters
     def document(self, key): return FakeReference(self.db, self.path + '/' + key)
     def where(self, filter): return FakeCollection(self.db, self.path, self.filters + (filter,))
+    def limit(self, count):
+        query = type(self)(self.db, self.path, self.filters)
+        query.max_rows = count
+        return query
     def stream(self):
         prefix = self.path + '/'
+        yielded = 0
         for path, row in list(self.db.rows.items()):
-            if path.startswith(prefix) and '/' not in path[len(prefix):] and all(row.get(f.field) == f.value for f in self.filters):
+            matches = all(row.get(f.field) in f.value if getattr(f, 'op', '==') == 'in' else row.get(f.field) == f.value for f in self.filters)
+            if path.startswith(prefix) and '/' not in path[len(prefix):] and matches:
+                if yielded >= getattr(self, 'max_rows', float('inf')): return
                 yield FakeSnapshot(FakeReference(self.db, path))
+                yielded += 1
 
 
 class FakeFirestore:

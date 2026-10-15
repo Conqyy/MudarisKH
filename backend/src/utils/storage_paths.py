@@ -45,6 +45,35 @@ def build_document_artifact_path(user_id: str, course_id: str, document_id: str,
     return build_storage_path(user_id, course_id, 'documents', filename)
 
 
+SUPPORTING_CATEGORIES = {'historical_exam': 'historical_exams', 'tutorial': 'tutorials', 'audio': 'audio', 'notes': 'audio'}
+
+
+def supporting_artifact_prefix(kind: str, material_id: str) -> str:
+    if kind not in SUPPORTING_CATEGORIES:
+        raise ValueError('Invalid supporting kind')
+    validate_component(material_id, 'material ID')
+    return 'supporting-' + hashlib.sha256((kind + ':' + material_id).encode('utf-8')).hexdigest() + '-'
+
+
+def build_supporting_artifact_path(identity: dict, job_id: str, claim_token: str, attempt_id: str, suffix: str) -> str:
+    for value in (job_id, claim_token, attempt_id):
+        if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{32}', value):
+            raise ValueError('Invalid supporting artifact identity')
+    if not isinstance(suffix, str) or not re.fullmatch(r'(original\.bin|manifest\.json|report\.json|part-[0-9]+\.json|checkpoint\.json)', suffix):
+        raise ValueError('Invalid supporting artifact suffix')
+    filename = supporting_artifact_prefix(identity['kind'], identity['materialId']) + '-'.join((job_id, claim_token, attempt_id, suffix))
+    return build_storage_path(identity['userId'], identity['courseId'], SUPPORTING_CATEGORIES[identity['kind']], filename)
+
+
+def validate_supporting_storage_path(identity: dict, path: str, *, root=None):
+    resolved = resolve_storage_path(path, identity['userId'], root=root)
+    parts = path.split('/')
+    if (parts[0] != SUPPORTING_CATEGORIES.get(identity['kind']) or parts[2] != identity['courseId']
+            or not parts[3].startswith(supporting_artifact_prefix(identity['kind'], identity['materialId']))):
+        raise ValueError('Supporting artifact belongs to another material or course')
+    return resolved
+
+
 def resolve_storage_path(storage_path: str, user_id: str = None, root: Path = None) -> Path:
     if not isinstance(storage_path, str):
         raise ValueError("Invalid storage path")

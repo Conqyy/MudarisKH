@@ -428,6 +428,11 @@ class FirebaseClient:
         return self._flat_query_by_course("audio_recordings", course_id, user_id)
 
     def delete_audio_recording(self, rec_id: str):
+        row = self.get_audio_recording(rec_id)
+        if row.get('supportingAnalysis'):
+            from src.supporting.repository import SupportingRepository
+            return SupportingRepository(self).delete({'userId': row['userId'], 'courseId': row['courseId'],
+                'kind': 'notes' if row.get('sourceType') == 'notes' else 'audio', 'materialId': rec_id})
         self._flat_delete("audio_recordings", rec_id)
 
     # --- Historical Exams (Model 3) ---
@@ -446,6 +451,11 @@ class FirebaseClient:
         return self._flat_get("historical_exams", exam_id)
 
     def delete_historical_exam(self, exam_id: str):
+        row = self.get_historical_exam(exam_id)
+        if row.get('supportingAnalysis'):
+            from src.supporting.repository import SupportingRepository
+            return SupportingRepository(self).delete({'userId': row['userId'], 'courseId': row['courseId'],
+                'kind': 'historical_exam', 'materialId': exam_id})
         self._flat_delete("historical_exams", exam_id)
 
     # --- Tutorials (practice problems — ideas only, no grading weight/format) ---
@@ -463,6 +473,11 @@ class FirebaseClient:
         return self._flat_query_by_course("tutorials", course_id, user_id)
 
     def delete_tutorial(self, tut_id: str):
+        row = self.get_tutorial(tut_id)
+        if row.get('supportingAnalysis'):
+            from src.supporting.repository import SupportingRepository
+            return SupportingRepository(self).delete({'userId': row['userId'], 'courseId': row['courseId'],
+                'kind': 'tutorial', 'materialId': tut_id})
         self._flat_delete("tutorials", tut_id)
 
     # --- Generated Exams (flat, for enhanced generator) ---
@@ -927,7 +942,7 @@ class FirebaseClient:
     OWNED_COLLECTIONS = ("documents", "audio_recordings", "historical_exams",
                          "tutorials", "exams", "flashcard_sets", "summaries",
                          "tutor_chats", "schedule_entries", "lectures", "_schedule_versions",
-                         "document_foundations")
+                         "document_foundations", "supporting_material_versions")
 
     @staticmethod
     def _document_identity(user_id, course_id, doc_id):
@@ -1455,6 +1470,14 @@ class FirebaseClient:
 
     def _record_storage_paths(self, row: dict, user_id: str, course_id: str = None) -> list:
         paths = []
+        if row.get('supportingArtifactPaths'):
+            from src.utils.storage_paths import validate_supporting_storage_path
+            identity = {key: row.get(key) for key in ('userId', 'courseId', 'kind', 'materialId')}
+            if identity['userId'] != user_id or (course_id is not None and identity['courseId'] != course_id):
+                raise ValueError('Supporting artifact ownership changed')
+            for path in row['supportingArtifactPaths']:
+                validate_supporting_storage_path(identity, path, root=UPLOADS_ROOT)
+                paths.append(path)
         for key in ("storagePath", "solutionPath"):
             if row.get(key):
                 paths.append(row[key])
