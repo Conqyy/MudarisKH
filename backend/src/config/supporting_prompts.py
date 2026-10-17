@@ -40,7 +40,35 @@ EXTRACTION = {
     'tutorial': COMMON + '\nThis is a tutorial. Preserve every exercise and its context across blocks/slides/pages. Do not invent exam papers; paper is null.',
 }
 
+TEACHING = '''\nThis source is teaching evidence, not an exam paper. Use pageRole "other" for
+academic content and paper null. Inventory every distinct teaching_point, worked example,
+explicit emphasis, and standalone academic heading in the supplied original range.
+Use itemType teaching_point, example, emphasis, topic_statement, or nonacademic as
+appropriate. Give each academic item complete, atomic requirements with exact original
+text-span proofs. Give each topic explicit originating item and requirement origins;
+standalone headings need their own topic_statement with a concept requirement.
+Do not invent printed labels, marks, question formats, or exam promises. Distinguish
+the source's actual words from your paraphrase: quoted text and proof.quote must be
+exact original substrings at the given offsets. The lecture navigation helps locate
+concepts but cannot turn an unsupported source claim into a lecturer statement.
+An uncertain or unreadable original range stays uncertain, even if other ranges read well.
+'''
+TEACHING_COMMON = COMMON.replace(
+    'Inventory EVERY question, subpart, shared context and standalone academic heading',
+    'Inventory EVERY teaching point, worked example, emphasis, nonacademic interlude and standalone academic heading'
+).replace('"itemType":"question|subpart|topic_statement|nonacademic"',
+          '"itemType":"teaching_point|example|emphasis|topic_statement|nonacademic"')
+EXTRACTION['audio'] = TEACHING_COMMON + TEACHING + '''\nThese are raw provider transcript segments from a recording.
+Attribute statements to the recording only when the original wording supports them.
+Provider wording may contain errors; uncertain segments cannot be treated as verified teaching.
+'''
+EXTRACTION['notes'] = TEACHING_COMMON + TEACHING + '''\nThese are the student's typed notes.
+Attribute claims to typed notes, never to verified professor speech or recording audio.
+Preserve Unicode spelling, punctuation, and whitespace in every exact proof.
+'''
+
 RECONCILIATION = '''INDEPENDENT ORIGINAL RECONCILIATION: enumerate the original again, without access to the
-first inventory. Include every question, subpart, context, requirement, and explicit topic heading, with
+first inventory. Include every source item (questions/subparts for papers, teaching points/examples/emphasis
+for recordings or notes), context, requirement, and explicit topic heading, with
 the same exact original anchors. Verify readability and boundary/page roles independently. No self-reported
 counts or empty assurances establish coverage. Use the response schema below.\n'''

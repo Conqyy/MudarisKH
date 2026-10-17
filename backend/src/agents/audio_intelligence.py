@@ -3,6 +3,13 @@ from openai import OpenAI
 import json
 import re
 import logging
+import csv
+import glob
+import math
+import os
+import shutil
+import subprocess
+import tempfile
 from collections import namedtuple
 from src.config import settings
 from src.config import prompts
@@ -63,17 +70,55 @@ class AudioIntelligenceAgent:
             raise RuntimeError(
                 "Transcription requires GROQ_API_KEY — set it in backend/.env."
             )
-        return self._transcribe_groq(file_path)
+        return self.transcribe_audio_source(file_path)['text']
 
     def _transcribe_groq(self, file_path: str) -> str:
+        """Compatibility entry point for callers expecting the display transcript."""
+        return self.transcribe_audio_source(file_path)['text']
+
+    @staticmethod
+    def _measured_chunks(list_path, chunks):
+        """Bind produced files to ffmpeg's measured segment boundaries."""
+        try:
+            with open(list_path, encoding='utf-8', newline='') as stream:
+                rows = list(csv.reader(stream))
+        except (OSError, UnicodeError, csv.Error) as exc:
+            raise ValueError('Missing or invalid audio chunk boundaries') from exc
+        if len(rows) != len(chunks):
+            raise ValueError('Audio chunk boundary count differs from produced chunks')
+        measured, previous_end = [], None
+        for index, (row, chunk) in enumerate(zip(rows, chunks)):
+            if len(row) != 3 or row[0] != os.path.basename(chunk):
+                raise ValueError('Audio chunk boundary does not match a produced chunk')
+            try:
+                start, end = float(row[1]), float(row[2])
+            except ValueError as exc:
+                raise ValueError('Invalid audio chunk boundary') from exc
+            if (not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start
+                    or (index == 0 and start != 0) or (previous_end is not None and start < previous_end)):
+                raise ValueError('Malformed or overlapping audio chunk boundaries')
+            measured.append((chunk, start, end))
+            previous_end = end
+        return measured
+
+    @staticmethod
+    def _actual_timing(segment, chunk_start, chunk_end):
+        get = segment.get if isinstance(segment, dict) else lambda key: getattr(segment, key, None)
+        start, end = get('start'), get('end')
+        if (isinstance(start, bool) or isinstance(end, bool)
+                or not isinstance(start, (int, float)) or not isinstance(end, (int, float))
+                or not math.isfinite(start) or not math.isfinite(end)
+                or start < 0 or end <= start or end > chunk_end - chunk_start + 0.01):
+            return None
+        return {'startSeconds': chunk_start + start, 'endSeconds': chunk_start + end}
+
+    def transcribe_audio_source(self, file_path: str, *, before_call=None, on_response=None) -> dict:
         """Transcribe via Groq's hosted Whisper-large-v3 (GPU) — minutes, not
-        hours. Long files are split into ~10-min, 16 kHz mono chunks so each
-        stays well under the API's upload-size limit, then stitched back."""
-        import os
-        import glob
-        import shutil
-        import tempfile
-        import subprocess
+        hours. Preserve provider wording and measured timing separately from
+        the cleaned transcript shown by legacy callers."""
+
+        if not getattr(settings, 'GROQ_API_KEY', ''):
+            raise RuntimeError('Transcription requires GROQ_API_KEY — set it in backend/.env.')
 
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
@@ -91,9 +136,11 @@ class AudioIntelligenceAgent:
         workdir = tempfile.mkdtemp()
         try:
             chunk_tmpl = os.path.join(workdir, "chunk_%03d.mp3")
+            chunk_list = os.path.join(workdir, 'chunks.csv')
             proc = subprocess.run(
                 [ffmpeg, "-y", *FFMPEG_INPUT_OPTIONS, "-i", file_path, "-vn", "-ac", "1", "-ar", "16000",
                  "-f", "segment", "-segment_time", str(seg_len),
+                 "-segment_list", chunk_list, "-segment_list_type", "csv",
                  "-c:a", "libmp3lame", "-q:a", "4", chunk_tmpl],
                 capture_output=True,
                 timeout=600,
@@ -105,13 +152,20 @@ class AudioIntelligenceAgent:
             chunks = sorted(glob.glob(os.path.join(workdir, "chunk_*.mp3")))
             if not chunks:
                 raise RuntimeError("No audio chunks were produced for Groq.")
+            measured = self._measured_chunks(chunk_list, chunks)
 
             logger.info(f"Groq transcribing {len(chunks)} chunk(s) with {model}...")
-            all_segs = []
-            for i, ch in enumerate(chunks):
-                offset = i * seg_len
+            raw_segments, display_segments, previous_display = [], [], ''
+            chunk_ids, unresolved = [], set()
+            for ch, chunk_start, chunk_end in measured:
+                chunk_id = os.path.basename(ch)
+                chunk_ids.append(chunk_id)
                 with open(ch, "rb") as fh:
-                    resp = call_with_retry(client.audio.transcriptions.create,
+                    def request(**kwargs):
+                        if before_call is not None:
+                            before_call()
+                        return client.audio.transcriptions.create(**kwargs)
+                    resp = call_with_retry(request,
                         model=model, file=fh, language=lang,
                         response_format="verbose_json",
                         # Short, English-only hint to bias language without
@@ -123,28 +177,48 @@ class AudioIntelligenceAgent:
                         # silence/noise (a common source of stray languages).
                         temperature=0,
                     )
+                if on_response is not None:
+                    on_response()
                 segs = getattr(resp, "segments", None)
                 if segs is None and isinstance(resp, dict):
                     segs = resp.get("segments")
-                if segs:
-                    for s in segs:
-                        get = (lambda k: s.get(k) if isinstance(s, dict) else getattr(s, k, None))
-                        all_segs.append(_Seg(
-                            get("text") or "",
-                            (get("start") or 0) + offset,
-                            (get("end") or 0) + offset,
-                        ))
-                else:
-                    txt = getattr(resp, "text", "") or (resp.get("text") if isinstance(resp, dict) else "")
-                    if txt:
-                        all_segs.append(_Seg(txt, offset, offset))
-            # Drop any segment written in a clearly non-Arabic / non-English
-            # script (e.g. CJK, Cyrillic, Devanagari) — stray mis-detections.
-            all_segs = [s for s in all_segs if self._is_arabic_or_english(s.text)]
-            # Strip Whisper's prompt-echo / subtitle-credit hallucinations and
-            # collapse repetition loops that otherwise bury the real speech.
-            all_segs = self._clean_segments(all_segs)
-            return self._format_segments(all_segs)
+                if segs is not None and not isinstance(segs, (list, tuple)):
+                    raise ValueError('Invalid provider segments')
+                if not segs:
+                    fallback = resp.get('text') if isinstance(resp, dict) else getattr(resp, 'text', None)
+                    if fallback is not None and not isinstance(fallback, str):
+                        raise ValueError('Invalid provider text')
+                    segs = [{'text': fallback or '', 'start': None, 'end': None}]
+                for segment in segs:
+                    get = segment.get if isinstance(segment, dict) else lambda key: getattr(segment, key, None)
+                    raw = get('text')
+                    if not isinstance(raw, str):
+                        raise ValueError('Invalid provider segment text')
+                    timing = self._actual_timing(segment, chunk_start, chunk_end)
+                    absolute_start = timing['startSeconds'] if timing is not None else None
+                    absolute_end = timing['endSeconds'] if timing is not None else None
+                    cleaned = self._clean_segments([_Seg(raw, absolute_start, absolute_end)])
+                    if not raw.strip():
+                        disposition = 'uncertain'
+                    elif not self._is_arabic_or_english(raw):
+                        disposition = 'uncertain'
+                    elif not cleaned:
+                        disposition = 'nonacademic' if any(p in raw for p in self._HALLUCINATION_PHRASES) else 'uncertain'
+                    elif cleaned[0].text == previous_display:
+                        disposition = 'uncertain'
+                    else:
+                        disposition = 'readable'
+                        display_segments.append(cleaned[0])
+                        previous_display = cleaned[0].text
+                    if disposition == 'uncertain':
+                        unresolved.add(chunk_id)
+                    raw_segments.append({'chunkId': chunk_id, 'text': raw,
+                                         'timing': timing, 'disposition': disposition})
+            return {'text': self._format_segments(display_segments), 'segments': raw_segments,
+                    'timingAvailable': all(s['timing'] is not None for s in raw_segments if s['text']),
+                    'coverage': {'chunkIds': chunk_ids, 'accountedChunkIds': chunk_ids,
+                                 'unresolvedChunkIds': [c for c in chunk_ids if c in unresolved],
+                                 'complete': not unresolved}}
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
 
