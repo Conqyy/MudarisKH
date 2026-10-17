@@ -214,8 +214,9 @@ class AudioIntelligenceAgent:
                         unresolved.add(chunk_id)
                     raw_segments.append({'chunkId': chunk_id, 'text': raw,
                                          'timing': timing, 'disposition': disposition})
+            spoken_segments = [s for s in raw_segments if s['text'].strip()]
             return {'text': self._format_segments(display_segments), 'segments': raw_segments,
-                    'timingAvailable': all(s['timing'] is not None for s in raw_segments if s['text']),
+                    'timingAvailable': bool(spoken_segments) and all(s['timing'] is not None for s in spoken_segments),
                     'coverage': {'chunkIds': chunk_ids, 'accountedChunkIds': chunk_ids,
                                  'unresolvedChunkIds': [c for c in chunk_ids if c in unresolved],
                                  'complete': not unresolved}}

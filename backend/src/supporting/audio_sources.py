@@ -56,7 +56,8 @@ def build_audio_manifest(identity, *, original_digest: str, transcript: dict):
             'disposition': disposition, 'timing': deepcopy(segment.get('timing'))})
     if set(chunk_ids) != {unit['chunkId'] for unit in units}:
         raise ValueError('Transcript omitted a chunk outcome')
-    actual_timing_available = all(unit['timing'] is not None for unit in units if unit['text'])
+    spoken_units = [unit for unit in units if unit['text'].strip()]
+    actual_timing_available = bool(spoken_units) and all(unit['timing'] is not None for unit in spoken_units)
     if type(transcript.get('timingAvailable')) is not bool or transcript['timingAvailable'] != actual_timing_available:
         raise ValueError('Transcript timing availability conflicts with provider segments')
     expected_unresolved = {unit['chunkId'] for unit in units if unit['disposition'] in ('uncertain', 'unsupported')}

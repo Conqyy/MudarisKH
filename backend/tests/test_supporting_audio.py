@@ -36,8 +36,9 @@ DIGEST = hashlib.sha256(b'original recording bytes').hexdigest()
 
 def transcript(segments):
     chunks = list(dict.fromkeys(s['chunkId'] for s in segments))
+    voiced = [s for s in segments if s['text'].strip()]
     return {'text': ' '.join(s['text'] for s in segments if s['disposition'] == 'readable').strip(),
-            'segments': segments, 'timingAvailable': all(s['timing'] is not None for s in segments if s['text']),
+            'segments': segments, 'timingAvailable': bool(voiced) and all(s['timing'] is not None for s in voiced),
             'coverage': {'chunkIds': chunks, 'accountedChunkIds': chunks,
                          'unresolvedChunkIds': [s['chunkId'] for s in segments if s['disposition'] == 'uncertain'],
                          'complete': not any(s['disposition'] == 'uncertain' for s in segments)}}
@@ -99,6 +100,16 @@ def test_empty_provider_outcome_requires_uncertainty_without_no_speech_evidence(
     source = transcript([segment('', disposition='blank')])
     with pytest.raises(ValueError, match='(?i)empty|speech|uncertain'):
         build_audio_manifest(AUDIO, original_digest=DIGEST, transcript=source)
+
+
+def test_empty_uncertain_segment_has_no_verified_timing_in_manifest():
+    source = transcript([segment('', disposition='uncertain')])
+    assert source['timingAvailable'] is False
+    manifest = build_audio_manifest(AUDIO, original_digest=DIGEST, transcript=source)
+    assert manifest['units'][0]['timing'] is None
+    assert manifest['coverage']['complete'] is False
+    with pytest.raises(ValueError, match='(?i)timing'):
+        build_audio_manifest(AUDIO, original_digest=DIGEST, transcript={**source, 'timingAvailable': True})
 
 
 def _transcribe_fixture(monkeypatch, tmp_path, *, boundaries, responses):
@@ -172,6 +183,7 @@ def test_empty_provider_reply_is_uncertain_and_failed_chunk_cannot_publish(monke
     assert len(result['segments']) == 1
     assert result['segments'][0]['text'] == ''
     assert result['segments'][0]['disposition'] == 'uncertain'
+    assert result['timingAvailable'] is False
     assert result['coverage']['complete'] is False
 
 
