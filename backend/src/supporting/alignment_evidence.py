@@ -130,6 +130,94 @@ def proof_in_supplied(proof, supplied):
         raise ValueError('Proof image was not supplied in this review')
 
 
+def exact_review_coverage(scope, supplied, excluded_blank):
+    """Derive coverage from exact current original intervals and assets."""
+    allowed = deepcopy(scope['allowedRefs'])
+    units = {ref_key({'documentId': manifest['documentId'],
+                      'sourceRevision': manifest['sourceRevision'], 'unitId': unit['unitId']}): unit
+             for manifest in scope['manifests'] for unit in manifest['units']}
+    fully = {ref_key(ref) for ref in excluded_blank}
+    for ref in allowed:
+        key = ref_key(ref)
+        entry = next((row for row in supplied if ref_key(row['ref']) == key), None)
+        if entry is None:
+            continue
+        unit = units[key]
+        if entry['assetIds'] != sorted(asset['assetId'] for asset in unit['visualAssets']):
+            continue
+        complete = True
+        for field in ('text', 'visualText'):
+            ranges = [part for part in entry['ranges'] if part['textField'] == field]
+            length = len(unit.get(field, ''))
+            complete &= (not ranges if not length else bool(ranges)
+                         and ranges[0]['start'] == 0 and ranges[-1]['end'] == length
+                         and all(left['end'] == right['start']
+                                 for left, right in zip(ranges, ranges[1:])))
+        if complete:
+            fully.add(key)
+    coverage = {'scopeRevision': scope['scopeRevision'], 'allowedRefs': allowed,
+        'reviewedRefs': [deepcopy(ref) for ref in allowed if ref_key(ref) in fully],
+        'unresolvedRefs': [deepcopy(ref) for ref in allowed if ref_key(ref) not in fully],
+        'complete': all(ref_key(ref) in fully for ref in allowed),
+        'suppliedEvidence': deepcopy(supplied), 'excludedBlankRefs': deepcopy(excluded_blank),
+        'checkState': 'pending'}
+    validate_review_ledger(coverage, units=units)
+    return coverage
+
+
+def proof_batch(scope, proofs):
+    """Reconstruct one complete, bounded-preflight bundle around exact proof locations."""
+    units = {ref_key({'documentId': manifest['documentId'],
+                      'sourceRevision': manifest['sourceRevision'], 'unitId': unit['unitId']}): unit
+             for manifest in scope['manifests'] for unit in manifest['units']}
+    grouped, order = {}, []
+    for proof in proofs:
+        key = ref_key(proof['ref'])
+        unit = units.get(key)
+        if unit is None:
+            raise ValueError('Combined proof is outside selected originals')
+        if key not in grouped:
+            grouped[key] = {'ref': deepcopy(proof['ref']), 'kind': unit['kind'],
+                'position': unit['position'], 'label': unit['label'], 'ranges': [],
+                'images': [], 'disposition': 'candidate'}
+            order.append(key)
+        entry = grouped[key]
+        if proof['type'] == 'text_span':
+            field = proof['field']
+            text = unit[field]
+            start = max(0, proof['start'] - 1000)
+            end = min(len(text), proof['end'] + 1000)
+            entry['ranges'].append({'textField': field, 'start': start, 'end': end,
+                                    'text': text[start:end]})
+        else:
+            index = next((index for index, asset in enumerate(unit['visualAssets'])
+                          if asset['assetId'] == proof['assetId']), None)
+            if index is None:
+                raise ValueError('Combined proof image is unavailable')
+            entry['images'].append({'ref': deepcopy(proof['ref']), 'assetIndex': index,
+                                    'asset': deepcopy(unit['visualAssets'][index])})
+    for entry in grouped.values():
+        ranges = sorted(entry['ranges'], key=lambda part: (part['textField'], part['start'], part['end']))
+        merged = []
+        for part in ranges:
+            if (merged and merged[-1]['textField'] == part['textField']
+                    and part['start'] <= merged[-1]['end']):
+                merged[-1]['end'] = max(merged[-1]['end'], part['end'])
+                unit = units[ref_key(entry['ref'])]
+                merged[-1]['text'] = unit[part['textField']][merged[-1]['start']:merged[-1]['end']]
+            else:
+                merged.append(deepcopy(part))
+        entry['ranges'] = merged
+    evidence = [grouped[key] for key in order]
+    refs = [deepcopy(entry['ref']) for entry in evidence]
+    return {'scope': {'scopeRevision': scope['scopeRevision'], 'allowedRefs': refs},
+        'guide': [], 'evidence': evidence,
+        'coverage': {'state': 'planned', 'mode': 'partial',
+            'selectedUnitCount': len(scope['allowedRefs']), 'plannedRefs': deepcopy(refs),
+            'plannedExcludedRefs': [], 'processedRefs': [], 'includedRefs': [],
+            'excludedRefs': [], 'unavailableRefs': [], 'complete': False}}
+
+
 def context_components(items, shared_contexts):
     """Enumerate every potentially copied shared/ancestor component per item."""
     by_item = {row['id']: row for row in items}

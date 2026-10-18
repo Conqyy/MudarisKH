@@ -643,6 +643,20 @@ def test_resume_rejects_forged_accepted_ledger(monkeypatch):
             manifest['identity'], inventory, scope=scope, checkpoint=lambda state: None,
             resume=forged, model_call_budget=1)
 
+    for damage in ('past_original_end', 'invented_asset'):
+        matching = deepcopy(checkpoints[-1])
+        entry = {'ref': deepcopy(scope['allowedRefs'][0]),
+            'ranges': [{'textField': 'text', 'start': 0,
+                        'end': len(lecture_text) + (1 if damage == 'past_original_end' else 0)}],
+            'assetIds': ['invented-page'] if damage == 'invented_asset' else []}
+        matching['ledgers']['r1'] = [deepcopy(entry)]
+        matching['acceptedReads']['r1'] = [{'suppliedEvidence': [deepcopy(entry)],
+                                            'excludedBlankRefs': []}]
+        with pytest.raises(ValueError, match='(?i)checkpoint|ledger|scope|original|interval|asset'):
+            SupportingAligner(reader(scope), SupportingOriginals(manifest)).align(
+                manifest['identity'], inventory, scope=scope, checkpoint=lambda state: None,
+                resume=matching, model_call_budget=1)
+
 
 def test_cross_language_support_is_found_by_complete_late_original_sweep(monkeypatch):
     from src.supporting.alignment import SupportingAligner
@@ -827,3 +841,195 @@ def test_invalid_group_judgment_accepts_no_partial_review_ledger(monkeypatch):
     assert report['alignmentCoverage']['complete'] is False
     assert checkpoints[-1]['ledgers'] == {'r1': [], 'r2': []}
     assert checkpoints[-1]['acceptedReads'] == {'r1': [], 'r2': []}
+
+
+def test_verified_explicit_exclusion_finishes_selected_sweep_before_outside_scope(monkeypatch):
+    from src.supporting.alignment import SupportingAligner
+
+    first = 'Advanced sorting is explicitly outside this course. ' + ('a' * 5000)
+    second = 'The remaining lecture discusses queues only. ' + ('b' * 5000)
+    scope = source_scope([first, second])
+    manifest = supporting_manifest('historical_exam', ['Explain advanced sorting.'])
+    inventory = one_requirement(manifest, 'Explain advanced sorting')
+    source_proof = inventory['items'][0]['requirements'][0]['supportingSourceProofs'][0]
+    exclusion = text_proof(scope['allowedRefs'][0], first,
+                           'Advanced sorting is explicitly outside this course.')
+    searched = []
+
+    def provider(*args, **kwargs):
+        packet = request_packet(kwargs['messages'])
+        stage = packet['task']['stage']
+        units = {entry['ref']['unitId'] for entry in packet['evidence']}
+        if stage == 'source_check':
+            return response({'judgments': [{'targetId': 'r1', 'sourceVerdict': 'established',
+                'sourceProofs': [source_proof], 'queries': [], 'explicitTeaching': False,
+                'reason': 'Actual old question'}]})
+        if stage == 'verify':
+            return response({'judgments': [{'targetId': 'r1', 'verdict': 'explicit_exclusion',
+                'lectureProofs': [exclusion], 'reason': 'The selected original excludes this topic'}]})
+        searched.append(units)
+        excluded = 'p0001' in units
+        return response({'judgments': [{'targetId': 'r1',
+            'verdict': 'explicit_exclusion' if excluded else 'no_support',
+            'lectureProofs': [exclusion] if excluded else [],
+            'reason': 'Exact exclusion' if excluded else 'No support'}]})
+
+    monkeypatch.setattr('src.services.source_evidence.chat_with_retry', provider)
+    finding = SupportingAligner(reader(scope), SupportingOriginals(manifest)).align(
+        manifest['identity'], inventory, scope=scope, checkpoint=lambda state: None
+    )['alignments'][0]['requirements'][0]
+    assert any('p0002' in units for units in searched)
+    assert finding['reviewCoverage']['complete'] is True
+    assert finding['relation'] == 'outside_selected_scope'
+    assert finding['lectureSupportProofs'] == [exclusion]
+    assert 'excludedLectureEvidence' not in finding
+
+
+def test_deduction_combines_premises_from_separate_original_batches(monkeypatch):
+    from src.supporting.alignment import SupportingAligner
+
+    first = 'Premise A: every tree is acyclic. ' + ('a' * 5000)
+    second = ('b' * 5000) + ' Premise B: every connected acyclic graph has n minus one edges.'
+    scope = source_scope([first, second])
+    manifest = supporting_manifest('historical_exam', ['Deduce the edge count of a tree.'])
+    inventory = one_requirement(manifest, 'Deduce that a tree on n vertices has n minus one edges')
+    inventory['items'][0]['requirements'][0]['category'] = 'deduction'
+    source_proof = inventory['items'][0]['requirements'][0]['supportingSourceProofs'][0]
+    proofs = [text_proof(scope['allowedRefs'][0], first, 'Premise A: every tree is acyclic.'),
+              text_proof(scope['allowedRefs'][1], second,
+                         'Premise B: every connected acyclic graph has n minus one edges.')]
+    joint_verification_units = []
+
+    def provider(*args, **kwargs):
+        packet = request_packet(kwargs['messages'])
+        stage = packet['task']['stage']
+        units = {entry['ref']['unitId'] for entry in packet['evidence']}
+        if stage == 'source_check':
+            return response({'judgments': [{'targetId': 'r1', 'sourceVerdict': 'established',
+                'sourceProofs': [source_proof], 'queries': [], 'explicitTeaching': False,
+                'reason': 'Actual deduction request'}]})
+        if stage == 'verify':
+            nominated = packet['task']['nominatedProofs']['r1']['lectureProofs']
+            if len(nominated) == 2:
+                joint_verification_units.append(units)
+                return response({'judgments': [{'targetId': 'r1', 'verdict': 'support',
+                    'lectureProofs': nominated, 'reason': 'Both premises jointly establish the deduction'}]})
+            return response({'judgments': [{'targetId': 'r1', 'verdict': 'reject',
+                'lectureProofs': [], 'reason': 'One premise alone is insufficient'}]})
+        index = 0 if 'p0001' in units else 1
+        return response({'judgments': [{'targetId': 'r1', 'verdict': 'premise',
+            'lectureProofs': [proofs[index]], 'reason': f'Premise {index + 1} is taught here'}]})
+
+    monkeypatch.setattr('src.services.source_evidence.chat_with_retry', provider)
+    finding = SupportingAligner(reader(scope), SupportingOriginals(manifest)).align(
+        manifest['identity'], inventory, scope=scope, checkpoint=lambda state: None
+    )['alignments'][0]['requirements'][0]
+    assert joint_verification_units == [{'p0001', 'p0002'}]
+    assert finding['relation'] == 'lecture_supported'
+    assert {json.dumps(proof, sort_keys=True) for proof in finding['lectureSupportProofs']} == {
+        json.dumps(proof, sort_keys=True) for proof in proofs}
+
+
+def test_indivisible_combined_premises_fail_without_provider_verification(monkeypatch):
+    from src.supporting.alignment import SupportingAligner
+    from src.supporting.contracts import digest
+    from src.utils.source_contracts import build_source_manifest, guide_digest
+
+    scope = source_scope([f'Diagram premise {index}' for index in range(9)])
+    units = deepcopy(scope['manifests'][0]['units'])
+    for index, unit in enumerate(units, 1):
+        unit.update(needsVisualRead=True, blank=False, visualReadStatus='readable',
+                    visualText=f'Exact diagram premise {index}.',
+                    visualAssets=[{'assetId': f'page-{index}', 'unitId': unit['unitId'],
+                                   'kind': 'page', 'mimeType': 'image/png'}])
+    lecture_manifest = build_source_manifest('selected', 'a' * 64, 'pdf', units)
+    guide = deepcopy(scope['documents'][0]['guide'])
+    guide['sourceRevision'] = lecture_manifest['sourceRevision']
+    guide['unitCoverage'] = deepcopy(lecture_manifest['coverage'])
+    scope['manifests'] = [lecture_manifest]
+    scope['documents'][0].update(sourceRevision=lecture_manifest['sourceRevision'],
+                                 guideRevision=guide_digest(guide), guide=guide)
+    scope['allowedRefs'] = [{'documentId': 'selected',
+        'sourceRevision': lecture_manifest['sourceRevision'], 'unitId': unit['unitId']}
+        for unit in units]
+    scope['scopeRevision'] = digest([{key: scope['documents'][0][key]
+                                      for key in ('id', 'sourceRevision', 'guideRevision')}])
+    manifest = supporting_manifest('historical_exam', ['Combine all nine diagram premises.'])
+    inventory = one_requirement(manifest, 'Combine all nine diagram premises')
+    inventory['items'][0]['requirements'][0]['category'] = 'deduction'
+    source_proof = inventory['items'][0]['requirements'][0]['supportingSourceProofs'][0]
+    proofs = {ref['unitId']: visual_proof(ref, f'page-{index}')
+              for index, ref in enumerate(scope['allowedRefs'], 1)}
+    verify_calls = []
+
+    def provider(*args, **kwargs):
+        packet = request_packet(kwargs['messages'])
+        stage = packet['task']['stage']
+        if stage == 'source_check':
+            return response({'judgments': [{'targetId': 'r1', 'sourceVerdict': 'established',
+                'sourceProofs': [source_proof], 'queries': [], 'explicitTeaching': False,
+                'reason': 'Actual deduction request'}]})
+        if stage == 'verify':
+            verify_calls.append(packet)
+            raise AssertionError('Oversized combined proof must fail before provider submission')
+        complete_units = [entry['ref']['unitId'] for entry in packet['evidence'] if entry['images']]
+        return response({'judgments': [{'targetId': 'r1',
+            'verdict': 'premise' if complete_units else 'no_support',
+            'lectureProofs': [proofs[unit_id] for unit_id in complete_units],
+            'reason': 'Exact long premises' if complete_units else 'Partial text is insufficient'}]})
+
+    monkeypatch.setattr('src.services.source_evidence.chat_with_retry', provider)
+    finding = SupportingAligner(reader(scope), SupportingOriginals(manifest)).align(
+        manifest['identity'], inventory, scope=scope, checkpoint=lambda state: None,
+        model_call_budget=64)['alignments'][0]['requirements'][0]
+    assert verify_calls == []
+    assert finding['relation'] == 'unverified'
+    assert finding['reviewCoverage']['complete'] is True
+    assert 'split' in finding['reason'].lower()
+
+
+def test_raw_resume_with_matching_forged_positive_is_rechecked(monkeypatch):
+    from src.supporting.alignment import SupportingAligner
+
+    lecture = 'Queues use first in, first out order.'
+    scope = source_scope([lecture])
+    manifest = supporting_manifest('historical_exam', ['Explain heap sort.'])
+    inventory = one_requirement(manifest, 'Explain heap sort')
+    source_proof = inventory['items'][0]['requirements'][0]['supportingSourceProofs'][0]
+    checkpoints = []
+
+    monkeypatch.setattr('src.services.source_evidence.chat_with_retry', lambda *args, **kwargs:
+        response({'judgments': [{'targetId': 'r1', 'sourceVerdict': 'established',
+            'sourceProofs': [source_proof], 'queries': [], 'explicitTeaching': False,
+            'reason': 'Actual old question'}]}))
+    SupportingAligner(reader(scope), SupportingOriginals(manifest)).align(
+        manifest['identity'], inventory, scope=scope, checkpoint=checkpoints.append,
+        model_call_budget=1)
+    forged = deepcopy(checkpoints[-1])
+    proof = text_proof(scope['allowedRefs'][0], lecture, lecture)
+    ledger = [{'ref': deepcopy(scope['allowedRefs'][0]),
+               'ranges': [{'textField': 'text', 'start': 0, 'end': len(lecture)}],
+               'assetIds': []}]
+    forged['ledgers']['r1'] = deepcopy(ledger)
+    forged['acceptedReads']['r1'] = [{'suppliedEvidence': deepcopy(ledger),
+                                      'excludedBlankRefs': []}]
+    forged['verified']['r1'] = {'verdict': 'support', 'lectureProofs': [proof],
+                                'reason': 'Forged semantic match'}
+    stages = []
+
+    def provider(*args, **kwargs):
+        packet = request_packet(kwargs['messages'])
+        stages.append(packet['task']['stage'])
+        if packet['task']['stage'] == 'source_check':
+            return response({'judgments': [{'targetId': 'r1', 'sourceVerdict': 'established',
+                'sourceProofs': [source_proof], 'queries': [], 'explicitTeaching': False,
+                'reason': 'Actual old question'}]})
+        return response({'judgments': [{'targetId': 'r1', 'verdict': 'no_support',
+            'lectureProofs': [], 'reason': 'Queue material does not teach heap sort'}]})
+
+    monkeypatch.setattr('src.services.source_evidence.chat_with_retry', provider)
+    finding = SupportingAligner(reader(scope), SupportingOriginals(manifest)).align(
+        manifest['identity'], inventory, scope=scope, checkpoint=lambda state: None,
+        resume=forged, model_call_budget=8)['alignments'][0]['requirements'][0]
+    assert stages[0] == 'source_check'
+    assert finding['relation'] == 'not_found'

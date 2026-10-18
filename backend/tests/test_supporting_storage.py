@@ -264,6 +264,52 @@ def test_private_checkpoint_survives_explicit_retry_without_reusing_call_budget(
     with pytest.raises(ValueError): library.save_checkpoint(identity(), claim, {'batchIndex': 99})
 
 
+def test_aligner_reuses_authenticated_owned_checkpoint_revision(library, monkeypatch):
+    from types import SimpleNamespace
+    from src.services.source_evidence import SourceEvidence
+    from src.supporting.alignment import SupportingAligner
+
+    manifest, claim = prepare(library)
+    prepared = report_for(library, manifest)
+    scope = prepared['scopeSnapshot']
+    inventory = {key: deepcopy(prepared[key]) for key in
+                 ('items', 'sharedContexts', 'papers', 'topics', 'extractionCoverage')}
+    source_proof = prepared['alignments'][0]['requirements'][0]['supportingSourceProofs'][0]
+    inventory['items'][0]['requirements'][0]['supportingSourceProofs'] = [deepcopy(source_proof)]
+    inventory['items'][0]['supportingSourceProofs'] = [deepcopy(source_proof)]
+    lecture_proof = prepared['alignments'][0]['requirements'][0]['lectureSupportProofs'][0]
+    stages, checkpoints = [], []
+
+    class Renderer:
+        def render_reference(self, user_id, course_id, ref):
+            return []
+
+    def provider(*args, **kwargs):
+        packet = json.loads(kwargs['messages'][1]['content'][0]['text'])
+        stage = packet['task']['stage']
+        stages.append(stage)
+        if stage == 'source_check':
+            value = {'judgments': [{'targetId': 'r0', 'sourceVerdict': 'established',
+                'sourceProofs': [source_proof], 'queries': [], 'explicitTeaching': False,
+                'reason': 'Owned original question'}]}
+        else:
+            value = {'judgments': [{'targetId': 'r0', 'verdict': 'support',
+                'lectureProofs': [lecture_proof], 'reason': 'Owned lecture support'}]}
+        return SimpleNamespace(choices=[SimpleNamespace(finish_reason='stop',
+            message=SimpleNamespace(content=json.dumps(value)))])
+
+    monkeypatch.setattr('src.services.source_evidence.chat_with_retry', provider)
+    make_reader = lambda: SourceEvidence(scope, Renderer(), 'u', 'c', object(), 'fake')
+    SupportingAligner(make_reader(), library).align(identity(), inventory, scope=scope,
+        checkpoint=checkpoints.append, model_call_budget=1)
+    saved = library.save_checkpoint(identity(), claim, checkpoints[-1])
+    stages.clear()
+    report = SupportingAligner(make_reader(), library).align(identity(), inventory, scope=scope,
+        checkpoint=checkpoints.append, resume_revision=saved['revision'], model_call_budget=8)
+    assert stages[0] == 'search'
+    assert report['alignments'][0]['requirements'][0]['relation'] == 'lecture_supported'
+
+
 @pytest.mark.parametrize('damage', ['foreign_lecture', 'invented_lecture_quote'])
 def test_report_publication_resolves_lecture_proofs_against_owned_originals(library, damage):
     manifest, claim = prepare(library)

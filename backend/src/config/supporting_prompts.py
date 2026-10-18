@@ -82,9 +82,10 @@ explicitTeaching boolean, and concise reason. Queries are navigation only. Do no
 
 ALIGNMENT_SEARCH = '''For EACH target independently assess EVERY supplied original lecture text range and image.
 The automatic guide is partial navigation only; its omission is not absence. Return JSON judgments for
-exactly all targetIds: verdict support|no_support|related_anchor|conflict|explicit_exclusion|uncertain,
+exactly all targetIds: verdict support|premise|no_support|related_anchor|conflict|explicit_exclusion|uncertain,
 exact lectureProofs and concise reason. Match the full requested operation or deduction, not a shared heading.
-For a deduction, identify taught premises and operation. A quote's existence alone is insufficient.
+For a deduction, use premise only for an exact taught premise that is insufficient alone; identify every taught
+premise and operation. A quote's existence alone is insufficient.
 Do not claim coverage beyond physically supplied ranges/assets.'''
 
 ALIGNMENT_VERIFY = '''Independently reread the nominated exact lecture proof in its ORIGINAL context and the
