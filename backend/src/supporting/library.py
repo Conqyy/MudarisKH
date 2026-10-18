@@ -9,6 +9,7 @@ from src.supporting.contracts import (
     validate_supporting_manifest, validate_alignment_report, validate_source_proof, validate_ref,
     canonical_bytes, digest, MAX_REPORT_CHUNK_BYTES, MAX_REPORT_CHUNK_ITEMS,
 )
+from src.supporting.alignment_evidence import proof_in_supplied, ref_key, validate_review_ledger
 from src.utils.storage_paths import build_supporting_artifact_path
 
 REPORT_ARRAYS = ('items', 'alignments', 'sharedContexts', 'papers', 'topics')
@@ -119,6 +120,23 @@ class SupportingLibrary:
             result.append(deepcopy(unit))
         return result
 
+    def render_reference(self, identity, ref):
+        """Render an exact owned supporting unit from its immutable original."""
+        unit = self.read_refs(identity, [ref])[0]
+        manifest = self.load_source(identity, ref['sourceRevision'])
+        if manifest['fileType'] == 'image':
+            from src.utils.pdf_extract import image_to_image_uri
+            rendered = [image_to_image_uri(self.original_bytes(identity, ref['sourceRevision']))]
+        elif manifest['fileType'] in ('pdf', 'docx', 'pptx'):
+            from src.utils.document_sources import render_source_unit
+            rendered = render_source_unit(self.original_bytes(identity, ref['sourceRevision']),
+                                          manifest['fileType'], unit['unitId'])
+        else:
+            rendered = []
+        if len(rendered) != len(unit['visualAssets']):
+            raise ValueError('Original supporting image asset count changed')
+        return rendered
+
     def _report_payloads(self, identity, report, *, foundation_revision):
         report = validate_alignment_report(report)
         manifest = self.load_source(identity, report['sourceRevision'])
@@ -169,8 +187,56 @@ class SupportingLibrary:
             raise ValueError('Report lecture references differ from selected current sources')
         lecture_units = lecture_library.load_units(identity['userId'], identity['courseId'], lecture_refs)
         lectures = {canonical_bytes(ref): unit for ref, unit in zip(lecture_refs, lecture_units)}
+        exact_lecture_units = {ref_key(ref): unit for ref, unit in zip(lecture_refs, lecture_units)}
+
+        def validate_excluded_evidence(finding):
+            envelope = finding.get('excludedLectureEvidence')
+            if envelope is None:
+                return
+            if envelope['foundationRevision'] != foundation_revision:
+                raise ValueError('Excluded lecture evidence belongs to another foundation')
+            descriptors = {document['id']: document for document in envelope['documents']}
+            if set(descriptors) & selected:
+                raise ValueError('Excluded lecture evidence overlaps the selected scope')
+            excluded_units = {}
+            for doc_id, descriptor in descriptors.items():
+                row = current.get(doc_id)
+                if row is None or any(descriptor[key] != row.get(key)
+                                      for key in ('sourceRevision', 'guideRevision')):
+                    raise ValueError('Excluded lecture source or guide differs from current foundation')
+                original = lecture_library.load_manifest(identity['userId'], identity['courseId'], doc_id)
+                if original['sourceRevision'] != descriptor['sourceRevision']:
+                    raise ValueError('Excluded lecture original differs from current foundation')
+                for unit in original['units']:
+                    ref = {'documentId': doc_id, 'sourceRevision': original['sourceRevision'],
+                           'unitId': unit['unitId']}
+                    excluded_units[ref_key(ref)] = unit
+            supplied = validate_review_ledger({'allowedRefs': [entry['ref'] for entry in
+                envelope['suppliedEvidence']], 'suppliedEvidence': envelope['suppliedEvidence'],
+                'excludedBlankRefs': [], 'checkState': 'complete'})
+            for entry in envelope['suppliedEvidence']:
+                ref = entry['ref']
+                if ref['documentId'] not in descriptors:
+                    raise ValueError('Excluded supplied evidence is outside its document envelope')
+                unit = excluded_units.get(ref_key(ref))
+                if unit is None:
+                    raise ValueError('Excluded supplied evidence is unavailable in the owned original')
+                for part in entry['ranges']:
+                    if part['end'] > len(unit.get(part['textField'], '')):
+                        raise ValueError('Excluded supplied interval exceeds the owned original')
+                actual_assets = {asset['assetId'] for asset in unit['visualAssets']}
+                if any(asset not in actual_assets for asset in entry['assetIds']):
+                    raise ValueError('Excluded supplied image is absent from the owned original')
+            for proof in envelope['proofs']:
+                unit = excluded_units.get(ref_key(proof['ref']))
+                if unit is None:
+                    raise ValueError('Excluded proof is unavailable in the owned original')
+                validate_source_proof(proof, ref=proof['ref'], unit=unit)
+                proof_in_supplied(proof, supplied)
+
         for alignment in report['alignments']:
             for finding in alignment['requirements']:
+                validate_review_ledger(finding['reviewCoverage'], units=exact_lecture_units)
                 for proof in finding['lectureSupportProofs']:
                     unit = lectures.get(canonical_bytes(proof['ref']))
                     if unit is None: raise ValueError('Lecture evidence is unavailable in the owned selected scope')
@@ -179,6 +245,31 @@ class SupportingLibrary:
                     unit_id = proof['ref']['unitId']
                     if unit_id not in units: raise ValueError('Report cites an unavailable original unit')
                     validate_source_proof(proof, ref=refs[unit_id], unit=units[unit_id])
+                validate_excluded_evidence(finding)
+            for dependency in alignment['contextDependencies']:
+                validate_review_ledger(dependency['reviewCoverage'], units=exact_lecture_units)
+                for proof in dependency['lectureSupportProofs']:
+                    unit = lectures.get(canonical_bytes(proof['ref']))
+                    if unit is None: raise ValueError('Context lecture proof is outside selected originals')
+                    validate_source_proof(proof, ref=proof['ref'], unit=unit)
+                for proof in dependency['supportingSourceProofs']:
+                    unit_id = proof['ref']['unitId']
+                    if unit_id not in units: raise ValueError('Context source proof is unavailable')
+                    validate_source_proof(proof, ref=refs[unit_id], unit=units[unit_id])
+        for topic in report['topics']:
+            finding = topic.get('alignment')
+            if finding is None:
+                continue
+            validate_review_ledger(finding['reviewCoverage'], units=exact_lecture_units)
+            for proof in finding['lectureSupportProofs']:
+                unit = lectures.get(canonical_bytes(proof['ref']))
+                if unit is None: raise ValueError('Topic lecture proof is outside selected originals')
+                validate_source_proof(proof, ref=proof['ref'], unit=unit)
+            for proof in finding['supportingSourceProofs']:
+                unit_id = proof['ref']['unitId']
+                if unit_id not in units: raise ValueError('Topic source proof is unavailable')
+                validate_source_proof(proof, ref=refs[unit_id], unit=units[unit_id])
+            validate_excluded_evidence(finding)
         header = {k: v for k, v in report.items() if k not in REPORT_ARRAYS}
         header_bytes = canonical_bytes({'foundationRevision': foundation_revision, 'report': header})
         if len(header_bytes) > MAX_REPORT_CHUNK_BYTES: raise ValueError('Report metadata is too large; split selected sources')

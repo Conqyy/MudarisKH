@@ -24,15 +24,22 @@ def supporting_ref(manifest, index=0):
 def requirement_alignment(relation, *, requirement_id, complete=True):
     scope = source_scope(['Trees are connected graphs.'])
     lecture_ref = scope['allowedRefs'][0]
+    lecture_text = scope['manifests'][0]['units'][0]['text']
     source_ref = supporting_ref(supporting_manifest())
     return {'requirementId': requirement_id, 'relation': relation, 'reason': 'Checked original evidence',
             'lectureAnchorRefs': [lecture_ref] if relation in ('lecture_supported', 'related_supplementary', 'conflicting') else [],
             'lectureSupportProofs': [{'type': 'text_span', 'ref': lecture_ref, 'field': 'text', 'start': 0,
-                                      'end': 5, 'quote': 'Trees'}] if relation in ('lecture_supported', 'conflicting') else [],
+                                      'end': 5, 'quote': 'Trees'}] if relation in (
+                                          'lecture_supported', 'related_supplementary', 'conflicting') else [],
             'supportingSourceProofs': [{'type': 'text_span', 'ref': source_ref, 'field': 'text', 'start': 0, 'end': 7, 'quote': 'Explain'}],
             'reviewCoverage': {'scopeRevision': scope['scopeRevision'], 'allowedRefs': deepcopy(scope['allowedRefs']),
                                'reviewedRefs': deepcopy(scope['allowedRefs']) if complete else [],
-                               'unresolvedRefs': [], 'complete': complete}}
+                               'unresolvedRefs': [] if complete else deepcopy(scope['allowedRefs']), 'complete': complete,
+                               'suppliedEvidence': [{'ref': deepcopy(lecture_ref), 'ranges': [
+                                   {'textField': 'text', 'start': 0, 'end': len(lecture_text)}], 'assetIds': []}] if complete else [],
+                               'excludedBlankRefs': [],
+                               'checkState': 'uncertain' if relation == 'unverified' and complete else
+                                   'pending' if relation == 'unverified' else 'complete'}}
 
 
 def alignment_report(kind='historical_exam', relation='lecture_supported'):
@@ -44,10 +51,12 @@ def alignment_report(kind='historical_exam', relation='lecture_supported'):
     item = {'id': 'q1', 'parentId': None, 'paperId': 'paper1' if kind == 'historical_exam' else None,
             'printedLabel': '1', 'itemType': 'question', 'text': 'Explain trees', 'sharedContextIds': [],
             'choices': [], 'givenData': [], 'printedMarks': None, 'requirements': [requirement], 'supportingSourceRefs': [ref]}
+    item['supportingSourceProofs'] = deepcopy(finding['supportingSourceProofs'])
     return {'version': 1, 'alignmentVersion': 1, 'sourceRevision': manifest['sourceRevision'],
             'scopeSnapshot': source_scope(['Trees are connected graphs.']),
             'extractionCoverage': {'unitIds': ['u1'], 'accountedUnitIds': ['u1'], 'unresolvedUnitIds': [], 'complete': True},
-            'alignmentCoverage': {'itemIds': ['q1'], 'checkedItemIds': ['q1'], 'unresolvedItemIds': [], 'complete': True},
+            'alignmentCoverage': {'itemIds': ['q1'], 'checkedItemIds': ['q1'], 'unresolvedItemIds': [],
+                                  'topicIds': [], 'checkedTopicIds': [], 'unresolvedTopicIds': [], 'complete': True},
             'items': [item], 'alignments': [aggregate_item_alignment([finding], item_id='q1')],
             'sharedContexts': [], 'topics': [],
             'papers': [{'paperId': 'paper1', 'title': 'Final', 'unitIds': ['u1'], 'questionIds': ['q1'],

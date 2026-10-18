@@ -20,6 +20,8 @@ def resolve(db, ids=None, library=None):
 
 
 def test_scope_preserves_order_deduplicates_and_ignores_guide_topic_omissions():
+    from src.utils.course_foundation import foundation_material_revision
+
     rows = [lecture_document('a'), lecture_document('b', 'Other')]
     rows[0]['analysis'] = None
     db = fixture_database(rows)
@@ -28,6 +30,7 @@ def test_scope_preserves_order_deduplicates_and_ignores_guide_topic_omissions():
     assert [(r['documentId'], r['unitId']) for r in scope['allowedRefs']] == [('b', 'b0001'), ('a', 'b0001')]
     assert scope == resolve(db, ['b', 'a'])
     assert scope['documents'][1]['guide'] == rows[0]['guide']
+    assert scope['foundationRevision'] == foundation_material_revision(rows)
     scope['manifests'][0]['units'][0]['text'] = 'mutated'
     assert 'mutated' not in resolve(db, ['b'])['manifests'][0]['units'][0]['text']
     assert 'sourceVersions' not in scope['documents'][0]

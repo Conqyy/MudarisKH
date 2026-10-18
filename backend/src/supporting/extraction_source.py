@@ -9,6 +9,7 @@ from src.supporting.contracts import (canonical_bytes, source_coverage, supporti
     validate_identity, validate_supporting_manifest, MAX_IMAGES_PER_CALL, MAX_TEXT_PER_CALL)
 from src.utils.document_sources import extract_source_units
 from src.utils.pdf_extract import image_to_image_uri
+from src.utils.source_context import navigation_guides
 
 
 def prepare_pages(identity, original, file_type):
@@ -57,26 +58,7 @@ def reference(manifest, unit):
 
 def _navigation_guides(reader, batch):
     """Select complete guide rows for supplied units; never redefine lecture scope."""
-    selected = {}
-    for entry in batch['evidence']:
-        selected.setdefault(entry['ref']['documentId'], set()).add(entry['ref']['unitId'])
-    documents = []
-    for source in reader.guide:
-        units = selected.get(source['id'])
-        if not units:
-            continue
-        document = deepcopy(source)
-        guide = document['guide']
-        for key in ('sections', 'concepts', 'visualReferences'):
-            guide[key] = [row for row in guide[key] if units.intersection(row['unitIds'])]
-        # This is a navigation view, not a newly published/validated source guide.
-        for key, value in guide.get('unitCoverage', {}).items():
-            if isinstance(value, list):
-                guide['unitCoverage'][key] = [u for u in value if u in units]
-        if 'unitCoverage' in guide:
-            guide['unitCoverage']['complete'] = False
-        documents.append(document)
-    return documents
+    return navigation_guides(reader.guide, batch)
 
 
 def lecture_context(reader, query, *, text_budget, image_budget):

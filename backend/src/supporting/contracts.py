@@ -11,6 +11,8 @@ import math
 import re
 from typing import Literal, NotRequired, TypedDict
 
+from src.supporting.alignment_evidence import context_components, proof_in_supplied, ref_key, validate_review_ledger
+
 MaterialKind = Literal['historical_exam', 'tutorial', 'audio', 'notes']
 Relation = Literal['lecture_supported', 'related_supplementary', 'outside_selected_scope', 'not_found', 'unverified', 'conflicting']
 MATERIAL_KINDS = frozenset(('historical_exam', 'tutorial', 'audio', 'notes'))
@@ -361,7 +363,7 @@ def validate_source_proof(value, *, ref, unit):
     return deepcopy(value)
 
 
-def _ledger(value, all_key, checked_key, unresolved_key, expected=None):
+def _ledger(value, all_key, checked_key, unresolved_key, expected=None, *, check_complete=True):
     _obj(value, 'coverage')
     for key in (all_key, checked_key, unresolved_key):
         for identifier in _unique(value.get(key), key): _id(identifier)
@@ -369,7 +371,8 @@ def _ledger(value, all_key, checked_key, unresolved_key, expected=None):
     if expected is not None and all_ids != set(expected): raise ValueError('Coverage inventory differs from source')
     if not checked <= all_ids or not unresolved <= all_ids: raise ValueError('Coverage contains unknown IDs')
     complete = checked == all_ids and not unresolved
-    if type(value.get('complete')) is not bool or value['complete'] != complete: raise ValueError('Coverage complete flag is inconsistent')
+    if type(value.get('complete')) is not bool or (check_complete and value['complete'] != complete):
+        raise ValueError('Coverage complete flag is inconsistent')
 
 
 def _review_coverage(value):
@@ -378,8 +381,12 @@ def _review_coverage(value):
     for key in ('allowedRefs', 'reviewedRefs', 'unresolvedRefs'): _refs(value.get(key), supporting=False)
     allowed, reviewed, unresolved = ({canonical_bytes(r) for r in value[k]} for k in ('allowedRefs', 'reviewedRefs', 'unresolvedRefs'))
     if not allowed or not reviewed <= allowed or not unresolved <= allowed: raise ValueError('Invalid lecture review coverage')
-    if type(value.get('complete')) is not bool or (value['complete'] and (reviewed != allowed or unresolved)):
+    if (type(value.get('complete')) is not bool or unresolved != allowed - reviewed
+            or value['complete'] != (reviewed == allowed and not unresolved)):
         raise ValueError('Incomplete lecture review cannot be complete')
+    supplied = validate_review_ledger(value)
+    if not {ref_key(ref) for ref in value['reviewedRefs']} <= set(supplied) | {ref_key(ref) for ref in value['excludedBlankRefs']}:
+        raise ValueError('Reviewed lecture refs lack supplied original evidence')
 
 
 def _requirement_alignment(row):
@@ -394,13 +401,48 @@ def _requirement_alignment(row):
     if not row['supportingSourceProofs']: raise ValueError('Every finding needs original supporting evidence')
     if relation in ('lecture_supported', 'conflicting') and (not anchors or not row['lectureSupportProofs']):
         raise ValueError('Lecture support requires anchors and proofs')
-    if relation == 'related_supplementary' and not anchors: raise ValueError('Supplementary teaching requires a lecture anchor')
+    if relation == 'related_supplementary' and (not anchors or not row['lectureSupportProofs']):
+        raise ValueError('Supplementary teaching requires an exact checked lecture anchor proof')
     _review_coverage(row.get('reviewCoverage'))
+    supplied = validate_review_ledger(row['reviewCoverage'])
+    for proof in row['lectureSupportProofs']:
+        proof_in_supplied(proof, supplied)
     if relation in ('not_found', 'outside_selected_scope') and not row['reviewCoverage']['complete']:
         raise ValueError('Negative finding requires complete lecture review')
+    excluded = row.get('excludedLectureEvidence')
+    if excluded is not None:
+        _obj(excluded, 'excluded original evidence')
+        if excluded.get('version') != 1: raise ValueError('Unknown excluded evidence version')
+        _hash(excluded.get('foundationRevision'))
+        documents = _list(excluded.get('documents'), 'excluded original documents')
+        if not documents: raise ValueError('Excluded evidence has no original documents')
+        ids = set()
+        for document in documents:
+            _obj(document, 'excluded original document')
+            if set(document) != {'id', 'sourceRevision', 'guideRevision'}:
+                raise ValueError('Excluded original document has unsupported descriptors')
+            _id(document.get('id'))
+            _hash(document.get('sourceRevision'))
+            _hash(document.get('guideRevision'))
+            if document['id'] in ids: raise ValueError('Duplicate excluded original document')
+            ids.add(document['id'])
+        proofs = _list(excluded.get('proofs'), 'excluded original proofs')
+        if not proofs: raise ValueError('Excluded original needs positive proof')
+        supplied = validate_review_ledger({'allowedRefs': [entry['ref'] for entry in
+            _list(excluded.get('suppliedEvidence'), 'excluded supplied evidence')],
+            'suppliedEvidence': excluded['suppliedEvidence'], 'excludedBlankRefs': [],
+            'checkState': 'complete'})
+        for proof in proofs:
+            _proof(proof, supporting=False)
+            if proof['ref']['documentId'] not in ids:
+                raise ValueError('Excluded proof is outside its document envelope')
+            proof_in_supplied(proof, supplied)
+        _text(excluded.get('reason'), 'excluded evidence reason')
+    if relation == 'outside_selected_scope' and not (excluded or row['lectureSupportProofs']):
+        raise ValueError('Outside scope needs independently checked positive evidence')
 
 
-def aggregate_item_alignment(requirements, *, item_id):
+def aggregate_item_alignment(requirements, *, item_id, context_dependencies=None):
     _id(item_id)
     _unique(requirements, 'requirement alignments', lambda r: _obj(r, 'alignment').get('requirementId'))
     for row in requirements: _requirement_alignment(row)
@@ -410,8 +452,13 @@ def aggregate_item_alignment(requirements, *, item_id):
     elif supported: status = 'partly_covered'
     elif all(r['relation'] in ('not_found', 'outside_selected_scope') for r in requirements): status = 'not_covered'
     else: status = 'needs_review'
+    dependencies = [] if context_dependencies is None else deepcopy(context_dependencies)
+    if any(dep['decision'] != 'not_required' and not dep['usable'] for dep in dependencies):
+        if status == 'covered':
+            status = 'needs_review'
     return {'itemId': item_id, 'status': status, 'requirements': deepcopy(requirements),
-            'unresolvedRequirementIds': [r['requirementId'] for r in requirements if r['relation'] in ('unverified', 'conflicting')]}
+            'unresolvedRequirementIds': [r['requirementId'] for r in requirements if r['relation'] in ('unverified', 'conflicting')],
+            'contextDependencies': dependencies}
 
 
 def validate_alignment_report(value):
@@ -423,6 +470,20 @@ def validate_alignment_report(value):
     _hash(scope.get('scopeRevision'))
     allowed = _refs(scope.get('allowedRefs'), supporting=False, nonempty=True)
     allowed_keys = {canonical_bytes(r) for r in allowed}
+    scope_units = None
+    if 'manifests' in scope:
+        scope_units = {}
+        for manifest in _list(scope['manifests'], 'lecture manifests'):
+            _obj(manifest, 'lecture manifest')
+            for unit in _list(manifest.get('units'), 'lecture units'):
+                ref = {'documentId': manifest['documentId'], 'sourceRevision': manifest['sourceRevision'],
+                       'unitId': unit['unitId']}
+                key = ref_key(ref)
+                if key in scope_units:
+                    raise ValueError('Duplicate selected lecture unit')
+                scope_units[key] = unit
+        if set(scope_units) != {ref_key(ref) for ref in allowed}:
+            raise ValueError('Lecture manifest units disagree with selected references')
     items = _unique(value.get('items'), 'items', lambda r: _obj(r, 'item').get('id'))
     item_ids = {_id(i.get('id')) for i in items}
     contexts = _unique(value.get('sharedContexts'), 'shared contexts', lambda r: _obj(r, 'context').get('id'))
@@ -497,12 +558,36 @@ def validate_alignment_report(value):
         _number(paper.get('totalQuestions'), integer=True)
         if paper['totalQuestions'] != len(questions): raise ValueError('Original paper question count disagrees')
         if paper.get('totalMarks') is not None: _number(paper['totalMarks'])
+    topic_ids, checked_topic_ids, unfinished_topics = set(), set(), set()
     for topic in _unique(value.get('topics'), 'topics', lambda r: _obj(r, 'topic').get('id')):
         _id(topic.get('id'))
+        topic_ids.add(topic['id'])
         _text(topic.get('text'), 'topic')
         origin_ids = _unique(topic.get('itemIds'), 'topic item IDs')
         if not origin_ids or not set(origin_ids) <= item_ids: raise ValueError('Topic requires originating items or a topic statement')
+        origin_requirements = _unique(topic.get('requirementIds'), 'topic requirement IDs')
+        if not origin_requirements or not set(origin_requirements) <= set().union(*(by_item[i] for i in origin_ids)):
+            raise ValueError('Topic requirements must belong to its actual origins')
         source_refs(topic.get('supportingSourceRefs'))
+        if topic.get('alignment') is None:
+            unfinished_topics.add(topic['id'])
+            continue
+        checked_topic_ids.add(topic['id'])
+        finding = _obj(topic['alignment'], 'topic alignment')
+        if finding.get('topicId') != topic['id'] or set(finding.get('originRequirementIds', [])) != set(origin_requirements):
+            raise ValueError('Topic alignment does not match original topic links')
+        ordinary = {**finding, 'requirementId': finding['topicId']}
+        _requirement_alignment(ordinary)
+        coverage = finding['reviewCoverage']
+        validate_review_ledger(coverage, units=scope_units)
+        if coverage['scopeRevision'] != scope['scopeRevision'] or {canonical_bytes(r) for r in coverage['allowedRefs']} != allowed_keys:
+            raise ValueError('Topic review narrowed selected lecture scope')
+        for proof in finding['supportingSourceProofs']:
+            if canonical_bytes(proof['ref']) not in {canonical_bytes(r) for r in topic['supportingSourceRefs']}:
+                raise ValueError('Topic proof is outside its original evidence')
+        if finding['relation'] == 'unverified' and coverage['checkState'] == 'pending':
+            unfinished_topics.add(topic['id'])
+    expected_contexts = context_components(items, contexts)
     alignments = _unique(value.get('alignments'), 'item alignments', lambda r: _obj(r, 'alignment').get('itemId'))
     checked = {a.get('itemId') for a in alignments}
     if not checked <= item_ids: raise ValueError('Alignment refers to unknown item')
@@ -510,7 +595,59 @@ def validate_alignment_report(value):
     unfinished_items = set()
     for alignment in alignments:
         findings = alignment.get('requirements')
-        expected = aggregate_item_alignment(findings, item_id=alignment['itemId'])
+        deps = _unique(alignment.get('contextDependencies'), 'context dependencies',
+                       lambda r: _obj(r, 'context dependency').get('componentId'))
+        expected_rows = {row['id']: row for row in expected_contexts[alignment['itemId']]}
+        if {dep.get('componentId') for dep in deps} != set(expected_rows):
+            raise ValueError('Item context dependencies omitted or invented original components')
+        for dep in deps:
+            component = expected_rows[dep['componentId']]
+            for key in ('ownerType', 'ownerId', 'field', 'index', 'contentDigest'):
+                if dep.get(key) != component[key]:
+                    raise ValueError('Context dependency identity differs from original inventory')
+            proofs = _list(dep.get('supportingSourceProofs'), 'context supporting proofs')
+            if not proofs or not {canonical_bytes(p) for p in proofs} <= {canonical_bytes(p) for p in component['supportingSourceProofs']}:
+                raise ValueError('Context dependency lacks exact original supporting proof')
+            for proof in proofs: _proof(proof, supporting=True)
+            decision, content_kind, relation = dep.get('decision'), dep.get('contentKind'), dep.get('relation')
+            if decision not in ('required', 'not_required', 'unresolved') or content_kind not in (
+                    'academic_claim', 'hypothetical_data', 'procedural_instruction', 'uncertain'):
+                raise ValueError('Invalid item context judgment')
+            certificate = dep.get('verification')
+            method_required = dep.get('methodRequired')
+            if certificate is None:
+                if decision != 'unresolved' or method_required is not None:
+                    raise ValueError('Context decision lacks independent original verification')
+            elif (not isinstance(certificate, dict) or type(method_required) is not bool
+                    or certificate.get('sourceProofs') != proofs
+                    or certificate.get('decision') != decision
+                    or certificate.get('contentKind') != content_kind
+                    or certificate.get('methodRequired') is not method_required
+                    or not isinstance(certificate.get('reason'), str) or not certificate['reason'].strip()):
+                raise ValueError('Context verification certificate differs from original judgment')
+            lecture_proofs = _list(dep.get('lectureSupportProofs'), 'context lecture proofs')
+            for proof in lecture_proofs: _proof(proof, supporting=False)
+            coverage = dep.get('reviewCoverage')
+            _review_coverage(coverage)
+            validate_review_ledger(coverage, units=scope_units)
+            if coverage['scopeRevision'] != scope['scopeRevision'] or {canonical_bytes(r) for r in coverage['allowedRefs']} != allowed_keys:
+                raise ValueError('Context dependency narrowed lecture scope')
+            for proof in lecture_proofs: proof_in_supplied(proof, validate_review_ledger(coverage))
+            if decision == 'not_required':
+                valid = certificate is not None and relation == 'not_applicable' and not lecture_proofs and dep.get('usable') is False
+            elif decision == 'unresolved':
+                valid = relation == 'unverified' and dep.get('usable') is False
+            elif content_kind in ('hypothetical_data', 'procedural_instruction') and method_required is False:
+                valid = certificate is not None and relation == 'source_only' and not lecture_proofs and dep.get('usable') is True
+            else:
+                valid = certificate is not None and relation in RELATIONS and dep.get('usable') is (relation == 'lecture_supported')
+                if relation == 'lecture_supported': valid &= bool(lecture_proofs)
+                if relation in ('not_found', 'outside_selected_scope'): valid &= coverage['complete']
+            if not valid:
+                raise ValueError('Context usability is not established by its original evidence')
+            if decision == 'unresolved' or (decision == 'required' and relation == 'unverified' and coverage['checkState'] == 'pending'):
+                unfinished_items.add(alignment['itemId'])
+        expected = aggregate_item_alignment(findings, item_id=alignment['itemId'], context_dependencies=deps)
         if expected != alignment: raise ValueError('Parent status disagrees with requirement findings')
         if {r['requirementId'] for r in findings} != by_item[alignment['itemId']]: raise ValueError('Missing or invented requirement alignment')
         for finding in findings:
@@ -520,6 +657,7 @@ def validate_alignment_report(value):
                 raise ValueError('Parent and child findings disagree')
             canonical_findings[rid] = encoded
             coverage = finding['reviewCoverage']
+            validate_review_ledger(coverage, units=scope_units)
             # A settled positive proof may stop its search early. Unverified
             # checks interrupted before review finished remain processing work,
             # including every ancestor carrying that requirement.
@@ -534,13 +672,27 @@ def validate_alignment_report(value):
             source_refs([p['ref'] for p in finding['supportingSourceProofs']])
             if any(canonical_bytes(p['ref']) not in requirement_refs[rid] for p in finding['supportingSourceProofs']):
                 raise ValueError('Proof is not from the requirement source locations')
-            if finding['relation'] == 'outside_selected_scope' and not finding['lectureSupportProofs']:
+            if finding['relation'] == 'outside_selected_scope' and not (
+                    finding['lectureSupportProofs'] or finding.get('excludedLectureEvidence')):
                 raise ValueError('Outside-scope finding needs positive evidence of exclusion')
             if material[0] == 'historical_exam' and finding['relation'] == 'related_supplementary':
                 raise ValueError('Historical questions cannot authorize supplementary teaching')
-    _ledger(value.get('alignmentCoverage'), 'itemIds', 'checkedItemIds', 'unresolvedItemIds', item_ids)
+    _ledger(value.get('alignmentCoverage'), 'itemIds', 'checkedItemIds', 'unresolvedItemIds', item_ids,
+            check_complete=False)
+    topic_coverage = value['alignmentCoverage']
+    for key in ('topicIds', 'checkedTopicIds', 'unresolvedTopicIds'):
+        for identifier in _unique(topic_coverage.get(key), key): _id(identifier)
+    if (set(topic_coverage['topicIds']) != topic_ids or set(topic_coverage['checkedTopicIds']) != checked_topic_ids
+            or not unfinished_topics <= set(topic_coverage['unresolvedTopicIds'])
+            or not set(topic_coverage['unresolvedTopicIds']) <= topic_ids):
+        raise ValueError('Topic alignment coverage is incomplete or inconsistent')
     if set(value['alignmentCoverage']['checkedItemIds']) != checked: raise ValueError('Alignment coverage differs from checked items')
     if not unfinished_items <= set(value['alignmentCoverage']['unresolvedItemIds']):
         raise ValueError('Unfinished requirement reviews must remain unresolved item coverage')
+    complete = (checked == item_ids and checked_topic_ids == topic_ids
+                and not value['alignmentCoverage']['unresolvedItemIds']
+                and not topic_coverage['unresolvedTopicIds'])
+    if value['alignmentCoverage']['complete'] != complete:
+        raise ValueError('Alignment completion disagrees with item/topic checks')
     canonical_bytes(value)
     return value

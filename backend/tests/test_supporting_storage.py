@@ -11,6 +11,7 @@ from tests.test_document_job_storage import job_db
 from tests.test_supporting_job_storage import repository, identity, queue_claim
 from tests.supporting_fixtures import supporting_manifest, alignment_report
 from src.supporting.contracts import supporting_revision, aggregate_item_alignment, digest, MAX_REPORT_CHUNK_BYTES
+from src.supporting.alignment_evidence import context_components
 from src.supporting.library import SupportingLibrary
 
 
@@ -63,6 +64,12 @@ def report_for(library, manifest, count=1, size=0):
     finding['lectureSupportProofs'] = [{'type': 'text_span', 'ref': scope['allowedRefs'][0],
         'field': 'text', 'start': 0, 'end': 7, 'quote': 'Lecture'}]
     finding['reviewCoverage'].update(scopeRevision=scope['scopeRevision'], allowedRefs=deepcopy(scope['allowedRefs']), reviewedRefs=deepcopy(scope['allowedRefs']))
+    finding['reviewCoverage']['suppliedEvidence'] = [
+        {'ref': deepcopy(ref), 'ranges': [
+            {'textField': field, 'start': 0, 'end': len(unit.get(field, ''))}
+            for field in ('text', 'visualText') if unit.get(field, '')],
+         'assetIds': sorted(asset['assetId'] for asset in unit['visualAssets'])}
+        for ref, unit in zip(scope['allowedRefs'], scope['manifests'][0]['units'])]
     report['items'], report['alignments'] = [], []
     for n in range(count):
         item, finding = deepcopy(original_item), deepcopy(original_alignment['requirements'][0])
@@ -285,13 +292,99 @@ def test_interrupted_review_cannot_publish_or_authorize_completed_evidence(libra
     report = report_for(library, manifest)
     finding = report['alignments'][0]['requirements'][0]
     finding.update(relation='unverified', lectureAnchorRefs=[], lectureSupportProofs=[])
-    finding['reviewCoverage'].update(reviewedRefs=[], unresolvedRefs=deepcopy(finding['reviewCoverage']['allowedRefs']), complete=False)
+    finding['reviewCoverage'].update(reviewedRefs=[], unresolvedRefs=deepcopy(finding['reviewCoverage']['allowedRefs']),
+                                     suppliedEvidence=[], checkState='pending', complete=False)
     report['alignments'][0] = aggregate_item_alignment([finding], item_id='q0')
     with pytest.raises(ValueError): library.save_report(identity(), claim, report)
     report['alignmentCoverage'].update(unresolvedItemIds=['q0'], complete=False)
     version = library.save_report(identity(), claim, report)
     assert library.repository.get_owned(identity())['status'] == 'incomplete'
     with pytest.raises(ValueError): library.repository.assert_snapshot(completed_snapshot(library, manifest, claim, version))
+
+
+def test_publication_rechecks_reviewed_intervals_against_owned_lecture_original(library):
+    manifest, claim = prepare(library)
+    report = report_for(library, manifest)
+    unit = report['scopeSnapshot']['manifests'][0]['units'][0]
+    unit['text'] += ' forged suffix'
+    report['alignments'][0]['requirements'][0]['reviewCoverage']['suppliedEvidence'][0]['ranges'][0]['end'] = len(unit['text'])
+    with pytest.raises(ValueError, match='(?i)original|interval|ledger|source'):
+        library.save_report(identity(), claim, report)
+
+
+def test_publication_rechecks_context_certificate_against_owned_supporting_original(library):
+    manifest, claim = prepare(library)
+    report = report_for(library, manifest)
+    ref = report['items'][0]['supportingSourceRefs'][0]
+    forged = {'type': 'text_span', 'ref': ref, 'field': 'text', 'start': 0, 'end': 5, 'quote': 'Wrong'}
+    report['sharedContexts'] = [{'id': 'stem', 'text': 'Given number 5',
+        'supportingSourceRefs': [ref], 'supportingSourceProofs': [forged]}]
+    report['items'][0]['sharedContextIds'] = ['stem']
+    component = context_components(report['items'], report['sharedContexts'])['q0'][0]
+    finding = report['alignments'][0]['requirements'][0]
+    certificate = {'sourceProofs': [forged], 'decision': 'required', 'contentKind': 'hypothetical_data',
+                   'methodRequired': False, 'reason': 'Original number is only hypothetical'}
+    dependency = {'componentId': component['id'],
+        **{key: component[key] for key in ('ownerType', 'ownerId', 'field', 'index', 'contentDigest')},
+        'supportingSourceProofs': [forged], 'decision': 'required', 'contentKind': 'hypothetical_data',
+        'methodRequired': False, 'verification': certificate, 'relation': 'source_only',
+        'lectureSupportProofs': [], 'reviewCoverage': deepcopy(finding['reviewCoverage']), 'usable': True}
+    report['alignments'][0] = aggregate_item_alignment([finding], item_id='q0', context_dependencies=[dependency])
+    with pytest.raises(ValueError, match='(?i)source|original|proof|quote'):
+        library.save_report(identity(), claim, report)
+
+
+@pytest.mark.parametrize('tamper', ['selected_overlap', 'stale_foundation'])
+def test_publication_rejects_unowned_or_stale_excluded_lecture_envelope(library, tamper):
+    manifest, claim = prepare(library)
+    report = report_for(library, manifest)
+    finding = report['alignments'][0]['requirements'][0]
+    proof = deepcopy(finding['lectureSupportProofs'][0])
+    selected_document = deepcopy(report['scopeSnapshot']['documents'][0])
+    envelope = {'version': 1,
+        'foundationRevision': claim['foundationRevision'] if tamper == 'selected_overlap' else 'e' * 64,
+        'documents': [{key: selected_document[key] for key in ('id', 'sourceRevision', 'guideRevision')}],
+        'proofs': [proof],
+        'suppliedEvidence': deepcopy(finding['reviewCoverage']['suppliedEvidence']),
+        'reason': 'Claims a removed lecture teaches the requirement'}
+    finding.update(relation='outside_selected_scope', lectureAnchorRefs=[], lectureSupportProofs=[],
+                   excludedLectureEvidence=envelope)
+    report['alignments'][0] = aggregate_item_alignment([finding], item_id='q0')
+    with pytest.raises(ValueError, match='(?i)excluded|foundation|selected|scope'):
+        library.save_report(identity(), claim, report)
+
+
+def test_publication_accepts_current_owned_excluded_lecture_proof_separate_from_selection(library):
+    from tests.foundation_fixtures import lecture_document
+
+    extra = lecture_document('extra', topic='Graphs', userId='u', courseId='c')
+    db = library.database
+    row = {key: value for key, value in extra.items() if not key.startswith('_') and key != 'id'}
+    if db.use_local:
+        local = db._read_local_db()
+        local['documents']['extra'] = row
+        db._write_local_db(local)
+    else:
+        db.db.rows['documents/extra'] = row
+    for path, original in extra['_artifactFiles'].items():
+        db.upload_file_to_storage(original.read_bytes(), path, 'u')
+    foundation = advance_foundation_attempt(library)
+    manifest, claim = prepare(library)
+    report = report_for(library, manifest)
+    unit = extra['_sourceManifest']['units'][0]
+    ref = {'documentId': 'extra', 'sourceRevision': extra['sourceRevision'], 'unitId': unit['unitId']}
+    proof = {'type': 'text_span', 'ref': deepcopy(ref), 'field': 'text', 'start': 0,
+             'end': len(unit['text']), 'quote': unit['text']}
+    finding = report['alignments'][0]['requirements'][0]
+    finding.update(relation='outside_selected_scope', lectureAnchorRefs=[], lectureSupportProofs=[],
+        excludedLectureEvidence={'version': 1, 'foundationRevision': foundation,
+            'documents': [{key: extra[key] for key in ('id', 'sourceRevision', 'guideRevision')}],
+            'proofs': [proof], 'suppliedEvidence': [{'ref': ref, 'ranges': [
+                {'textField': 'text', 'start': 0, 'end': len(unit['text'])}], 'assetIds': []}],
+            'reason': 'Current removed lecture independently teaches the requirement'})
+    report['alignments'][0] = aggregate_item_alignment([finding], item_id='q0')
+    version = library.save_report(identity(), claim, report)
+    assert version['foundationRevision'] == foundation
 
 
 @pytest.mark.parametrize('boundary', ['snapshot', 'reserve', 'publish'])

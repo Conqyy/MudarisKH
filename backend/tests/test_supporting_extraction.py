@@ -699,7 +699,9 @@ def test_same_atomic_requirement_continued_across_pages_unions_evidence_once(rec
     report = {**result, 'version': 1, 'alignmentVersion': 1, 'sourceRevision': manifest['sourceRevision'],
         'scopeSnapshot': reader().snapshot(), 'alignments': [], 'alignmentCoverage': {
             'itemIds': [i['id'] for i in result['items']], 'checkedItemIds': [],
-            'unresolvedItemIds': [i['id'] for i in result['items']], 'complete': False}}
+            'unresolvedItemIds': [i['id'] for i in result['items']],
+            'topicIds': [t['id'] for t in result['topics']], 'checkedTopicIds': [],
+            'unresolvedTopicIds': [t['id'] for t in result['topics']], 'complete': False}}
     assert validate_alignment_report(report)['items'][0]['requirements'] == requirements
 
 

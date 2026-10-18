@@ -8,7 +8,8 @@ import hashlib
 import json
 import re
 
-from src.utils.course_foundation import hydrate_document_source, build_foundation_status
+from src.utils.course_foundation import (hydrate_document_source, build_foundation_status,
+                                         foundation_material_revision)
 from src.utils.source_contracts import (
     validate_manifest, MAX_SOURCE_PLAN_BATCHES, MAX_SOURCE_PLAN_UNITS, SOURCE_SCOPE_STATUSES,
 )
@@ -37,6 +38,7 @@ def resolve_source_scope(database, library, user_id: str, course_id: str,
     """
     validate_component(user_id, 'user ID')
     validate_component(course_id, 'course ID')
+    foundation_rows = database.get_course_documents(course_id, user_id)
     if document_ids is not None:
         if not isinstance(document_ids, list):
             raise ValueError('Document selection must be a list or None')
@@ -45,7 +47,7 @@ def resolve_source_scope(database, library, user_id: str, course_id: str,
         if any(not row or row.get('id') != identifier for identifier, row in zip(ids, rows)):
             raise ValueError('Selected source is unavailable')
     else:
-        rows = database.get_course_documents(course_id, user_id)
+        rows = foundation_rows
     documents, manifests, refs = [], [], []
     seen = set()
     for row in rows:
@@ -72,7 +74,9 @@ def resolve_source_scope(database, library, user_id: str, course_id: str,
                     for u in manifest['units'])
     revision = hashlib.sha256(_json([{'id': d['id'], 'sourceRevision': d['sourceRevision'],
                                      'guideRevision': d['guideRevision']} for d in documents]).encode()).hexdigest()
-    return {'documents': documents, 'manifests': manifests, 'allowedRefs': refs, 'scopeRevision': revision}
+    return {'documents': documents, 'manifests': manifests, 'allowedRefs': refs,
+            'scopeRevision': revision,
+            'foundationRevision': foundation_material_revision(foundation_rows)}
 
 
 def _units(scope):
@@ -92,10 +96,11 @@ def _units(scope):
     return result
 
 
-def _entry(ref, unit, *, ranges=None, images=None):
+def _entry(ref, unit, *, ranges=None, images=None, include_blank_assets=False):
     return {'ref': deepcopy(ref), 'kind': unit['kind'], 'position': unit['position'], 'label': unit['label'],
             'ranges': ranges or [], 'images': images or [],
-            'disposition': 'excluded_blank' if unit['blank'] else 'candidate'}
+            'disposition': 'candidate' if include_blank_assets and images else
+                           'excluded_blank' if unit['blank'] else 'candidate'}
 
 
 def _bundle(scope, purpose, entries):
@@ -111,8 +116,32 @@ def _bundle(scope, purpose, entries):
                          'excludedRefs': [], 'unavailableRefs': [], 'complete': False}}
 
 
+def navigation_guides(documents, batch):
+    """Keep complete guide rows linked to supplied units as partial navigation."""
+    selected = {}
+    for entry in batch['evidence']:
+        selected.setdefault(entry['ref']['documentId'], set()).add(entry['ref']['unitId'])
+    result = []
+    for source in documents:
+        units = selected.get(source['id'])
+        if not units:
+            continue
+        document = deepcopy(source)
+        guide = document['guide']
+        for key in ('sections', 'concepts', 'visualReferences'):
+            guide[key] = [row for row in guide[key] if units.intersection(row['unitIds'])]
+        for key, value in guide.get('unitCoverage', {}).items():
+            if isinstance(value, list):
+                guide['unitCoverage'][key] = [unit for unit in value if unit in units]
+        if 'unitCoverage' in guide:
+            guide['unitCoverage']['complete'] = False
+        result.append(document)
+    return result
+
+
 def build_source_plan(scope: dict, purpose: str, query: str = '',
-                      text_budget: int = 30000, image_budget: int = 8) -> list[dict]:
+                      text_budget: int = 30000, image_budget: int = 8,
+                      include_blank_assets: bool = False) -> list[dict]:
     """Bound each canonical JSON bundle, including metadata, in characters.
 
     Broad purposes cover every character in both text fields and every original
@@ -121,7 +150,8 @@ def build_source_plan(scope: dict, purpose: str, query: str = '',
     """
     if purpose not in {'summary', 'exam', 'flashcards', 'focused'}:
         raise ValueError('Unknown source plan purpose')
-    if type(text_budget) is not int or text_budget <= 0 or type(image_budget) is not int or image_budget < 0:
+    if (type(text_budget) is not int or text_budget <= 0 or type(image_budget) is not int
+            or image_budget < 0 or type(include_blank_assets) is not bool):
         raise ValueError('Invalid source budget. Select fewer sources or split the file.')
     if len(scope['allowedRefs']) > MAX_SOURCE_PLAN_UNITS:
         raise ValueError(f"Source plan has {len(scope['allowedRefs'])} units; limit {MAX_SOURCE_PLAN_UNITS}. Select fewer sources or split the file.")
@@ -151,7 +181,13 @@ def build_source_plan(scope: dict, purpose: str, query: str = '',
     for ref in scope['allowedRefs']:
         unit = units[_key(ref)]
         if unit['blank']:
-            if purpose != 'focused': append(_entry(ref, unit))
+            if purpose != 'focused':
+                if include_blank_assets and unit['visualAssets']:
+                    for index, asset in enumerate(unit['visualAssets']):
+                        append(_entry(ref, unit, images=[{'ref': deepcopy(ref), 'assetIndex': index,
+                            'asset': deepcopy(asset)}], include_blank_assets=True))
+                else:
+                    append(_entry(ref, unit))
             continue
         for field in ('text', 'visualText'):
             text = unit.get(field, '')

@@ -5,20 +5,39 @@ from src.supporting.contracts import (
     validate_supporting_manifest, validate_alignment_report, aggregate_item_alignment,
     supporting_revision, validate_source_proof, source_coverage,
 )
+from src.supporting.alignment_evidence import context_components
 from tests.supporting_fixtures import supporting_manifest, supporting_ref, requirement_alignment, alignment_report
+
+
+def optional_parent_context(report, item_id):
+    components = context_components(report['items'], report['sharedContexts'])[item_id]
+    coverage = deepcopy(report['alignments'][0]['requirements'][0]['reviewCoverage'])
+    coverage['checkState'] = 'complete'
+    return [{**{key: component[key] for key in ('ownerType', 'ownerId', 'field', 'index', 'contentDigest')},
+             'componentId': component['id'], 'supportingSourceProofs': component['supportingSourceProofs'],
+             'decision': 'not_required', 'contentKind': 'procedural_instruction', 'relation': 'not_applicable',
+             'methodRequired': False,
+             'verification': {'sourceProofs': component['supportingSourceProofs'], 'decision': 'not_required',
+                              'contentKind': 'procedural_instruction', 'methodRequired': False,
+                              'reason': 'This child is independently usable'},
+             'lectureSupportProofs': [], 'reviewCoverage': deepcopy(coverage), 'usable': False}
+            for component in components]
 
 
 @pytest.mark.parametrize('parent', [False, True])
 def test_interrupted_unverified_review_requires_unresolved_item_coverage(parent):
     report = alignment_report(relation='unverified')
     finding = report['alignments'][0]['requirements'][0]
-    finding['reviewCoverage'].update(reviewedRefs=[], unresolvedRefs=deepcopy(finding['reviewCoverage']['allowedRefs']), complete=False)
+    finding['reviewCoverage'].update(reviewedRefs=[], unresolvedRefs=deepcopy(finding['reviewCoverage']['allowedRefs']),
+                                     suppliedEvidence=[], checkState='pending', complete=False)
     report['alignments'][0] = aggregate_item_alignment([finding], item_id='q1')
     if parent:
         heading = deepcopy(report['items'][0])
         heading.update(id='parent', requirements=[])
         report['items'][0]['parentId'] = 'parent'
         report['items'].append(heading)
+        report['alignments'][0] = aggregate_item_alignment([finding], item_id='q1',
+            context_dependencies=optional_parent_context(report, 'q1'))
         report['alignments'].append(aggregate_item_alignment([finding], item_id='parent'))
         report['alignmentCoverage']['itemIds'].append('parent')
         report['alignmentCoverage']['checkedItemIds'].append('parent')
@@ -34,8 +53,18 @@ def test_interrupted_unverified_review_requires_unresolved_item_coverage(parent)
 
 def test_positive_proof_can_complete_without_exhaustive_review():
     report = alignment_report()
-    report['alignments'][0]['requirements'][0]['reviewCoverage'].update(reviewedRefs=[], complete=False)
+    coverage = report['alignments'][0]['requirements'][0]['reviewCoverage']
+    coverage.update(reviewedRefs=[], unresolvedRefs=deepcopy(coverage['allowedRefs']), complete=False)
+    coverage['suppliedEvidence'][0]['ranges'][0]['end'] = 5
     assert validate_alignment_report(report)['alignmentCoverage']['complete'] is True
+
+
+def test_supplementary_relation_requires_an_exact_checked_lecture_anchor_proof():
+    report = alignment_report(kind='tutorial', relation='related_supplementary')
+    finding = report['alignments'][0]['requirements'][0]
+    finding['lectureSupportProofs'] = []
+    with pytest.raises(ValueError, match='(?i)supplementary|proof|anchor'):
+        validate_alignment_report(report)
 
 
 def test_one_supported_requirement_cannot_cover_another():
@@ -177,7 +206,8 @@ def test_parent_alignment_includes_unresolved_child_requirements():
     child['requirements'][0]['id'] = 'r2'
     report['items'].append(child)
     finding = requirement_alignment('unverified', requirement_id='r2')
-    report['alignments'].append(aggregate_item_alignment([finding], item_id='q1a'))
+    report['alignments'].append(aggregate_item_alignment([finding], item_id='q1a',
+        context_dependencies=optional_parent_context(report, 'q1a')))
     report['alignmentCoverage']['itemIds'].append('q1a')
     report['alignmentCoverage']['checkedItemIds'].append('q1a')
     with pytest.raises(ValueError): validate_alignment_report(report)
@@ -186,7 +216,8 @@ def test_parent_alignment_includes_unresolved_child_requirements():
 
 
 def test_outside_scope_requires_positive_evidence_not_just_failed_search():
-    report = alignment_report(relation='outside_selected_scope')
+    report = alignment_report(relation='not_found')
+    report['alignments'][0]['requirements'][0]['relation'] = 'outside_selected_scope'
     with pytest.raises(ValueError): validate_alignment_report(report)
 
 

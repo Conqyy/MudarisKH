@@ -5,12 +5,13 @@ submissions, renders exact assets, and rereads originals for factual validation.
 """
 from copy import deepcopy
 import hashlib
+import json
 
 from src.utils.ai_contracts import response_text
 from src.utils.ai_retry import chat_with_retry
 from src.utils.generation_context import source_bundle_text
 from src.utils.json_parse import extract_json_object
-from src.utils.source_context import build_source_plan, validate_source_refs, match_supporting_topics
+from src.utils.source_context import build_source_plan, validate_source_refs, match_supporting_topics, navigation_guides
 
 
 SOURCE_POLICY = (
@@ -91,18 +92,49 @@ class SourceEvidence:
         packet['imageParts'] = parts
         return packet
 
-    def _request(self, batch, policy, data=None):
+    def _request_messages(self, batch, policy, data=None, *, strict=False):
         packet = self._materialize(batch)
         images = packet.pop('imageParts')
+        if strict:
+            packet['guide'] = navigation_guides(self.guide, batch)
+            packet['navigationView'] = 'partial'
+            if not packet['guide'] or not packet.get('evidence'):
+                raise ValueError('Original lecture and partial guide are required')
         if data is not None:
-            packet['task'] = deepcopy(data)
+            task = deepcopy(data)
+            supporting_images = task.pop('imageParts', []) if strict else []
+            if strict:
+                if not isinstance(supporting_images, list) or any(
+                    not isinstance(part, dict) or part.get('type') != 'image_url'
+                    or not isinstance(part.get('image_url'), dict)
+                    or not isinstance(part['image_url'].get('url'), str)
+                    or not part['image_url']['url'].startswith('data:image/')
+                    for part in supporting_images
+                ):
+                    raise ValueError('Original supporting images are unavailable')
+                images.extend(supporting_images)
+            packet['task'] = task
         serialized = source_bundle_text(packet)
-        if len(serialized) > max(self.text_budget, 48000):
+        if strict:
+            if len(images) > min(self.image_budget, 8):
+                raise ValueError('Original image count exceeds eight; split the source request')
+            text_messages = [{'role': 'system', 'content': policy + SOURCE_POLICY},
+                {'role': 'user', 'content': [{'type': 'text', 'text': serialized},
+                    *[{'type': 'image_url', 'image_url': {'url': ''}} for _ in images]]}]
+            if len(json.dumps(text_messages, ensure_ascii=False, separators=(',', ':'))) > 24000:
+                raise ValueError('Original request exceeds 24,000 text characters; split the source request')
+        elif len(serialized) > max(self.text_budget, 48000):
             raise ValueError('Source reader request exceeds its budget; select fewer sources or split them.')
+        return [{'role': 'system', 'content': policy + SOURCE_POLICY},
+                {'role': 'user', 'content': [{'type': 'text', 'text': serialized}, *images]}]
+
+    def _request(self, batch, policy, data=None, *, on_response=None, strict=False):
+        messages = self._request_messages(batch, policy, data, strict=strict)
         answer = chat_with_retry(self.client, model=self.model,
-            messages=[{'role': 'system', 'content': policy + SOURCE_POLICY},
-                      {'role': 'user', 'content': [{'type': 'text', 'text': serialized}, *images]}],
+            messages=messages,
             temperature=0, max_tokens=8000)
+        if on_response is not None:
+            on_response()
         result = extract_json_object(response_text(answer))
         # This ledger is derived solely from the exact successful call above.
         supplied = deepcopy(batch['evidence'])
@@ -111,6 +143,24 @@ class SourceEvidence:
                 image['supplied'] = True
         self.supplied.extend(supplied)
         return result, supplied
+
+    def read_original_batch(self, batch: dict, *, policy: str, task: dict,
+                            on_response=None) -> tuple[dict, list[dict]]:
+        """Read bounded originals with a returned-completion accounting hook."""
+        if not isinstance(policy, str) or not isinstance(task, dict):
+            raise ValueError('Original read requires policy and task data')
+        return self._request(batch, policy, task, on_response=on_response, strict=True)
+
+    def original_batch_fits(self, batch: dict, *, policy: str, task: dict) -> bool:
+        """Measure the exact strict request without calling the provider."""
+        try:
+            self._request_messages(batch, policy, task, strict=True)
+        except ValueError as exc:
+            if str(exc).startswith(('Original image count exceeds eight',
+                                    'Original request exceeds 24,000 text characters')):
+                return False
+            raise
+        return True
 
     def prepare(self, purpose, query=''):
         self.plans = self._plan(purpose, query)
