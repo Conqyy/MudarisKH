@@ -386,6 +386,90 @@ class SupportingRepository:
                                 version_ids=[key, version['reservationId'], source_key])
         except DataConflict: return False
 
+    @staticmethod
+    def _scoped_cache_key(identity, expected, *, foundation_revision, scope_revision, alignment_version):
+        identity = validate_identity(identity)
+        for value in (expected.get('sourceRevision'), expected.get('reportRevision'),
+                      foundation_revision, scope_revision): _hash(value)
+        if not isinstance(expected.get('analysisId'), str) or not expected['analysisId']:
+            raise ValueError('Scoped cache needs the exact completed analysis')
+        if type(alignment_version) is not int or alignment_version < 1:
+            raise ValueError('Invalid scoped alignment version')
+        return digest({'identity': identity, 'sourceRevision': expected['sourceRevision'],
+                       'baselineReportRevision': expected['reportRevision'],
+                       'analysisId': expected['analysisId'], 'foundationRevision': foundation_revision,
+                       'scopeRevision': scope_revision, 'alignmentVersion': alignment_version})
+
+    def get_scoped_cache(self, identity, expected, *, foundation_revision, scope_revision, alignment_version):
+        identity = validate_identity(identity)
+        cache_revision = self._scoped_cache_key(identity, expected, foundation_revision=foundation_revision,
+            scope_revision=scope_revision, alignment_version=alignment_version)
+        cache_id = version_id(identity, 'scoped_cache', cache_revision)
+        try:
+            first = self._atomic(identity, lambda row, versions: (None, {}, versions[cache_id]),
+                                 foundation_revision=foundation_revision, version_ids=[cache_id])
+            if not first: return None
+            report_revision = _hash(first.get('scopedReportRevision'))
+            report_id = version_id(identity, 'report', report_revision)
+            source_id = version_id(identity, 'source', expected['sourceRevision'])
+
+            def read(row, versions):
+                cache = versions[cache_id]
+                report = versions[report_id]
+                baseline = versions[version_id(identity, 'report', expected['reportRevision'])]
+                if (not self._completed_source(identity, row, expected, versions[source_id])
+                        or not cache or cache.get('state') != 'adopted'
+                        or cache.get('revision') != cache_revision
+                        or cache.get('scopedReportRevision') != report_revision
+                        or cache.get('expected') != expected
+                        or not baseline or baseline.get('state') != 'adopted'
+                        or baseline.get('revision') != expected['reportRevision']
+                        or baseline.get('foundationRevision') != foundation_revision
+                        or not report or report.get('state') != 'adopted'
+                        or report.get('revision') != report_revision or not report.get('coverageComplete')
+                        or report.get('sourceRevision') != expected['sourceRevision']
+                        or report.get('foundationRevision') != foundation_revision
+                        or report.get('scopeRevision') != scope_revision):
+                    return None, {}, None
+                return None, {}, report_revision
+            return self._atomic(identity, read, foundation_revision=foundation_revision,
+                version_ids=[cache_id, report_id, source_id,
+                             version_id(identity, 'report', expected['reportRevision'])])
+        except (DataConflict, ValueError, KeyError):
+            return None
+
+    def save_scoped_cache(self, identity, expected, *, foundation_revision, scope_revision,
+                          alignment_version, scoped_report_revision):
+        identity = validate_identity(identity)
+        report_revision = _hash(scoped_report_revision)
+        cache_revision = self._scoped_cache_key(identity, expected, foundation_revision=foundation_revision,
+            scope_revision=scope_revision, alignment_version=alignment_version)
+        cache_id = version_id(identity, 'scoped_cache', cache_revision)
+        report_id = version_id(identity, 'report', report_revision)
+        source_id = version_id(identity, 'source', expected['sourceRevision'])
+        baseline_id = version_id(identity, 'report', expected['reportRevision'])
+        def save(row, versions):
+            report, baseline = versions[report_id], versions[baseline_id]
+            if (not self._completed_source(identity, row, expected, versions[source_id])
+                    or not report or report.get('state') != 'adopted' or not report.get('coverageComplete')
+                    or report.get('revision') != report_revision
+                    or report.get('sourceRevision') != expected['sourceRevision']
+                    or report.get('foundationRevision') != foundation_revision
+                    or report.get('scopeRevision') != scope_revision
+                    or not baseline or baseline.get('state') != 'adopted'
+                    or baseline.get('revision') != expected['reportRevision']
+                    or baseline.get('foundationRevision') != foundation_revision):
+                raise DataConflict('Scoped cache source or report changed')
+            entry = {**identity, 'versionKind': 'scoped_cache', 'revision': cache_revision,
+                     'state': 'adopted', 'expected': deepcopy(expected),
+                     'foundationRevision': foundation_revision, 'scopeRevision': scope_revision,
+                     'alignmentVersion': alignment_version, 'scopedReportRevision': report_revision}
+            if versions[cache_id] and versions[cache_id] != entry:
+                raise DataConflict('Scoped cache already binds another immutable report')
+            return None, {cache_id: entry}, report_revision
+        return self._atomic(identity, save, foundation_revision=foundation_revision,
+            version_ids=[cache_id, report_id, source_id, baseline_id])
+
     def assert_snapshot(self, snapshot, *, transaction=None, local=None, scope_revision=None):
         if not isinstance(snapshot, dict) or snapshot.get('version') != 1 or not isinstance(snapshot.get('materials'), list):
             raise DataConflict('Supporting snapshot is unavailable')

@@ -13,6 +13,7 @@ from tests.supporting_fixtures import supporting_manifest, alignment_report
 from src.supporting.contracts import supporting_revision, aggregate_item_alignment, digest, MAX_REPORT_CHUNK_BYTES
 from src.supporting.alignment_evidence import context_components
 from src.supporting.library import SupportingLibrary
+from src.supporting.context import SupportingContextCompiler
 
 
 @pytest.fixture
@@ -176,6 +177,43 @@ def test_scoped_report_does_not_overwrite_current_report_and_retry_fences_it(lib
     library.repository.queue(identity(), input_revision='b'*64, source_digest=manifest['originalDigest'],
         foundation_revision=library.repository.test_foundation_revision, now_ms=int(time.time()*1000))
     with pytest.raises(ValueError): library.save_scoped_report(identity(), expected, scoped)
+
+
+def test_scoped_cache_is_owned_fenced_by_baseline_and_deleted_with_material(library):
+    manifest, claim = prepare(library)
+    original = report_for(library, manifest)
+    baseline = library.save_report(identity(), claim, original)
+    expected = {key: library.repository.get_owned(identity())['supportingAnalysis'][key]
+                for key in ('sourceRevision', 'reportRevision', 'analysisId')}
+    scoped = deepcopy(original)
+    scoped['alignments'][0]['requirements'][0]['reason'] = 'Fresh scoped check'
+    adopted = library.save_scoped_report(identity(), expected, scoped)
+    key = {'foundation_revision': library.repository.test_foundation_revision,
+           'scope_revision': scoped['scopeSnapshot']['scopeRevision'], 'alignment_version': 1}
+    assert library.repository.get_scoped_cache(identity(), expected, **key) is None
+    library.repository.save_scoped_cache(identity(), expected, scoped_report_revision=adopted['revision'], **key)
+    assert library.repository.get_scoped_cache(identity(), expected, **key) == adopted['revision']
+    assert library.repository.get_owned(identity())['supportingAnalysis']['reportRevision'] == baseline['revision']
+    library.repository.queue(identity(), input_revision='b'*64, source_digest=manifest['originalDigest'],
+        foundation_revision=library.repository.test_foundation_revision, now_ms=int(time.time()*1000))
+    assert library.repository.get_scoped_cache(identity(), expected, **key) is None
+    library.repository.delete(identity())
+    assert not [row for row in library.database._flat_query_by_course('supporting_material_versions', 'c', 'u')
+                if row.get('versionKind') == 'scoped_cache']
+
+
+def test_compiler_reads_adopted_report_and_original_question_from_owned_storage(library):
+    manifest, claim = prepare(library)
+    report = report_for(library, manifest)
+    version = library.save_report(identity(), claim, report)
+    scope = deepcopy(report['scopeSnapshot'])
+    scope['foundationRevision'] = library.repository.test_foundation_revision
+    packet = SupportingContextCompiler(library.repository, library, None).compile(
+        user_id='u', course_id='c', scope=scope,
+        selected={'historical_ids': ['source'], 'tutorial_ids': [], 'audio_ids': []}, purpose='exam')
+    assert packet['academicItems'][0]['text'] == 'Explain trees'
+    assert packet['snapshot']['materials'][0]['scopedReportRevision'] == version['revision']
+    assert packet['academicItems'][0]['supportingSourceRefs'][0]['sourceRevision'] == manifest['sourceRevision']
 
 
 def test_captured_recording_digest_binds_only_after_verified_preserved_bytes(library):

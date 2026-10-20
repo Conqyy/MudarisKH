@@ -172,7 +172,7 @@ def build_exam_blueprint(historical_analysis: list, total_marks: int | None = No
     if total_marks is not None and (type(total_marks) is not int or total_marks < 1):
         raise ValueError("Exam marks must be a positive integer")
     detected = flatten_exam_papers(historical_analysis)
-    papers = [paper for paper in detected if _paper_count(paper) and _type_fractions(paper)]
+    papers = [paper for paper in detected if _paper_count(paper)]
     if not papers: return None
     requested = _exam_type(exam_type)
     matching = [paper for paper in papers if _exam_type(paper.get("examType")) == requested]
@@ -190,7 +190,17 @@ def build_exam_blueprint(historical_analysis: list, total_marks: int | None = No
     count = max(1, (typical + Fraction(1, 2)).numerator // (typical + Fraction(1, 2)).denominator)
     if total_marks is not None: count = min(count, total_marks)
     types = _average([_type_fractions(paper) for paper in cohort])
-    allocated = _allocation(types, count)
+    known_shares = []
+    for paper in cohort:
+        known_types = sum((_number(row.get('count')) for row in paper.get('questionTypes', [])
+                     if isinstance(row, dict) and _text(row.get('type')) in _QUESTION_TYPES), Fraction(0))
+        if not paper.get('unknownQuestionTypeIds') and _type_fractions(paper):
+            known_shares.append(Fraction(1))
+        else:
+            known_shares.append(min(Fraction(1), known_types / _paper_count(paper)))
+    known_share = median(known_shares) if known_shares else Fraction(0)
+    known_count = max(0, min(count, int(known_share * count + Fraction(1, 2))))
+    allocated = _allocation(types, known_count)
     topic_evidence = [_topic_fractions(paper) for paper in papers]
     topics = _average(topic_evidence)
     topic_labels = _topic_display_labels(papers)
@@ -217,10 +227,12 @@ def build_exam_blueprint(historical_analysis: list, total_marks: int | None = No
     sources = [{"sourceId": paper["_sourceId"], "sourceTitle": paper["_sourceTitle"],
                 "paperId": paper["paperId"], "examType": _text(paper.get("examType")) or "Unknown",
                 "totalQuestions": _paper_count(paper), "totalMarks": float(_number(paper.get("totalMarks"))) or None,
-                "legacyUncertain": paper["_legacy"], "usedForStructure": paper in cohort} for paper in papers]
+                "legacyUncertain": paper["_legacy"], "usedForStructure": paper in cohort,
+                "unknownQuestionTypeIds": deepcopy(paper.get('unknownQuestionTypeIds', []))} for paper in papers]
     return {
         "blueprintVersion": 1, "examType": exam_type, "targetMarks": total_marks,
         "totalQuestions": count,
+        "unknownQuestionCount": count - sum(allocated.values()),
         "questionTypes": question_types,
         "topicWeights": [{"topic": topic_labels[topic], "weight": float(weight), "questionCount": topic_counts[topic]}
                          for topic, weight in sorted(topics.items())],
