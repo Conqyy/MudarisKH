@@ -13,6 +13,54 @@ def source_bundle_text(bundle: dict) -> str:
     return json.dumps(bundle, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
+def supporting_packet_text(packet: dict) -> str:
+    """Keep checked supporting groups intact when sending them as model data."""
+    if not isinstance(packet, dict) or packet.get('version') != 1 or not isinstance(packet.get('academicItems'), list):
+        raise ValueError('Checked supporting packet is unavailable')
+    serialized = source_bundle_text(packet)
+    if len(serialized) > 90000:
+        raise ValueError('Checked supporting packet exceeds the budget; select fewer sources or split the request')
+    return serialized
+
+
+SUPPORTING_PROVENANCE_POLICY = """
+When CHECKED SUPPORTING EVIDENCE is supplied, ground academic content in selected
+lecture originals and the packet's eligible academicItems. Do not promote
+structuralPapers, qualifiedItems, upload names, topic labels, or analysis metadata
+into academic facts. Historical papers can determine exam format only through
+the supplied blueprint. If unknownQuestionCount is positive, obey totalQuestions
+and the known question-type counts; do not infer a type for the unknown remainder.
+
+For every academic output field, provide a provenance array of selectors. Each
+selector has: path (JSON Pointer into the final output), optional quote (an exact
+substring occurring exactly once in that field), authority (lecture,
+supplementary, or reported_note), relation, sourceRefs, supportingSourceRefs,
+supportingSourceProofs, and lectureAnchorRefs. Omit start/end: the backend
+calculates offsets from final output. A selector without quote covers its entire
+field. Cover every non-whitespace character; use multiple non-overlapping quotes
+for mixed authority. For lecture claims use relation lecture_supported and only
+sourceRefs. For supporting claims copy exact checked refs and proofs from an
+eligible item and cite its selected lecture anchor. Use relation
+related_supplementary unless the packet explicitly supports lecture_supported.
+Never describe student notes as direct professor speech; write 'student notes
+report ...' or equivalent in the attributed claim. Qualified unanchored items
+are for tutor discussion only and must explicitly state the scope or conflict
+qualification. Each section, term, card and question row's sourceRefs and
+supportingSourceRefs must include the union of its claims. The summary root
+covers overview and examFocus claims; the exam's shared refs cover only
+sharedContext claims. Never invent evidence or copy citations by topic.
+
+Paths: summary /overview, /sections/N/heading, /sections/N/content,
+/sections/N/keyPoints/N, /keyTerms/N/term, /keyTerms/N/definition,
+/examFocus/N. Flashcard each card has /front, /back, /topic. Tutor /reply.
+Exam selectors live inside secret-rubrics JSON and cover /sharedContext for
+academic TeX outside questions and /questions/qN/text for printed question
+text, plus /questions/qN/correct_answer, /questions/qN/criteria, and
+/questions/qN/explanation when present. Cite the question's complete
+supportingSourceRefs and sourceRefs. Preserve the exact selected source identity.
+"""
+
+
 def _as_text(item) -> str:
     """Coerce an analysis item to a display string. Some documents store
     topics / formulas / workedExamples as dicts (e.g. {"title":..,"solution":..})

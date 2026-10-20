@@ -444,9 +444,12 @@ def saved_question_identity(tex, rubrics):
         end = headings[i+1].start() if i+1 < len(headings) else clean.rfind('\\end{document}')
         body = clean[match.start():end].strip()
         rubric = questions[qid]
-        rows.append({'id': qid, 'type': rubric['question_type'], 'text': body, 'marks': rubric['max_score'],
-                     'sourceRefs': deepcopy(rubric.get('sourceRefs', [])),
-                     'identity': hashlib.sha256(body.encode()).hexdigest()})
+        row = {'id': qid, 'type': rubric['question_type'], 'text': body, 'marks': rubric['max_score'],
+               'sourceRefs': deepcopy(rubric.get('sourceRefs', [])),
+               'identity': hashlib.sha256(body.encode()).hexdigest()}
+        if 'supportingSourceRefs' in rubric:
+            row['supportingSourceRefs'] = deepcopy(rubric['supportingSourceRefs'])
+        rows.append(row)
     return {'version': 1, 'questions': rows,
             'sharedContext': {'revision': hashlib.sha256(exam_shared_context(tex).encode()).hexdigest(),
                               'sourceRefs': deepcopy(rubrics.get('sharedSourceRefs', []))},

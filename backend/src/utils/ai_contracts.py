@@ -219,7 +219,10 @@ def validate_exam_contract(tex: str, rubrics: dict, historical: list = None, tot
         reference = blueprint
         expected = Counter({item['type']: item['count'] for item in reference.get('questionTypes', [])})
         actual = Counter(row['question_type'] for row in questions.values())
-        if expected and actual != expected: raise ValueError('Exam question mix differs from the predicted blueprint')
+        unknown = reference.get('unknownQuestionCount', 0)
+        if expected and (any(actual[kind] < count for kind, count in expected.items())
+                         if unknown else actual != expected):
+            raise ValueError('Exam question mix differs from the predicted blueprint')
         if reference.get('totalQuestions') and len(questions) != reference['totalQuestions']:
             raise ValueError('Exam question count differs from the predicted blueprint')
     if total_marks is not None:

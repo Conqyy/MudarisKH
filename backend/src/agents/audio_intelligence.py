@@ -285,6 +285,11 @@ class AudioIntelligenceAgent:
     def analyze_transcript(self, transcript: str, course_title: str,
                            document_insights: list = None, *, lecture_evidence: dict | None = None) -> dict:
         logger.info("Analyzing transcript")
+        student_notes = transcript.startswith('[Student-reported typed notes')
+        notes_policy = ("\nThis input is student-reported notes, not a professor recording. "
+            "For summary, examHints, keyEmphasis and chapterMapping attribute every assertion "
+            "to the student's notes. A quote is an exact notes excerpt, never a verified "
+            "professor quote. Do not infer timestamps, speaker certainty, or direct promises.\n") if student_notes else ''
 
         # Feed (almost) the whole transcript so the summary covers the ENTIRE
         # lecture, not just the first ~15 min. Gemini Pro has a large context.
@@ -292,10 +297,11 @@ class AudioIntelligenceAgent:
         reference = build_foundation_context(document_insights)
         grounding = (
             '\n\nUse the lecture document reference to resolve academic terminology, '
-            'identify taught chapters, and relate professor hints to course concepts. '
-            'The transcript remains the primary evidence of what the professor actually said. '
-            'Preserve verbatim transcript quotes; never add document-only claims to the '
-            'professor\'s statements or invent exam hints. Describe unsupported or out-of-scope '
+            'identify taught chapters, and relate the source to course concepts. '
+            + ('The notes remain evidence only of what the student reported. '
+               if student_notes else 'The transcript remains the primary evidence of what the professor actually said. ')
+            + 'Preserve verbatim source excerpts; never add document-only claims to the '
+            'speaker or student report or invent exam hints. Describe unsupported or out-of-scope '
             'discussion honestly in the existing summary/chapter fields rather than forcing '
             'course alignment. Keep the existing output schema.\n\n' + reference
             if reference else ''
@@ -310,11 +316,11 @@ class AudioIntelligenceAgent:
                 messages=[
                     {
                         "role": "system",
-                        "content": prompts.AUDIO_INTELLIGENCE_SYSTEM_PROMPT + reminder + (SOURCE_POLICY if lecture_evidence is not None else ""),
+                        "content": prompts.AUDIO_INTELLIGENCE_SYSTEM_PROMPT + notes_policy + reminder + (SOURCE_POLICY if lecture_evidence is not None else ""),
                     },
                     {
                         "role": "user",
-                        "content": evidence_content(f"Course: {course_title}{grounding}\n\n---LECTURE TRANSCRIPT---\n{truncated}", lecture_evidence),
+                        "content": evidence_content(f"Course: {course_title}{grounding}\n\n---{'STUDENT-REPORTED NOTES' if student_notes else 'LECTURE TRANSCRIPT'}---\n{truncated}", lecture_evidence),
                     },
                 ],
                 temperature=0.1,

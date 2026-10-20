@@ -103,4 +103,6 @@ def test_tutor_valid_subset_and_deliberate_foundation_fallback(source_api, monke
         messages=[{'role': 'user', 'content': 'Explain sum'}]), uid='owner')
     turn = db.save_tutor_chat.call_args.args[2]['sourceTurns'][0]
     assert [d['id'] for d in turn['sourceScope']['documents']] == expected
-    assert [d['id'] for d in api.tutor_agent.reply_grounded.call_args.args[0]['documents']] == expected
+    checked = api.tutor_agent.reply_grounded.call_args.kwargs['supporting_context']
+    assert [d['id'] for d in checked['scopeSnapshot']['documents']] == expected
+    assert set(api.tutor_agent.reply_grounded.call_args.args[0]) == {'course'}

@@ -94,6 +94,10 @@ def source_api(monkeypatch, api_module):
     db.get_tutor_resources.return_value = {'documents': []}
     db.save_tutor_chat.return_value = 'chat'
     monkeypatch.setattr(api_module, 'db_client', db)
+    # The checked empty selection is still authorized through the packet compiler.
+    from types import SimpleNamespace
+    monkeypatch.setattr(api_module, 'supporting_repository',
+                        SimpleNamespace(database=db, assert_snapshot=lambda *a, **k: None))
     for name in ('ai_agent', 'summary_agent', 'tutor_agent', 'audio_agent', 'hist_analyzer', 'doc_processor'):
         agent = MagicMock(); agent.model_id = 'fake'
         monkeypatch.setattr(api_module, name, agent)
@@ -132,14 +136,15 @@ def test_api_sources_do_not_require_rich_analysis_and_save_validated_provenance(
         api.ai_agent.repair_latex.return_value = tex
         monkeypatch.setattr('src.utils.pdf_response.compile_temp_pdf', lambda *a, **kw: None)
         result = api.generate_enhanced_exam_endpoint(api.EnhancedExamGenerateRequest(course_id='course', user_id='owner', total_marks=5), uid='owner')
-        generated, saved = api.ai_agent.compile_enhanced_exam, db.save_exam_flat
+        generated, saved = api.ai_agent.compile_enhanced_exam, db.save_generated_exam_with_rubrics
         assert result['question_structure'][0]['sourceRefs'] == refs
+        assert result['sharedSupportingSourceRefs'] == []
         assert 'Compute sum' in result['question_structure'][0]['text']
-        assert saved.call_args.args[2]['questionIdentity']['questionRevision']
-        assert db.save_secret_rubrics.call_args.kwargs['expected_foundation_revision']
+        assert saved.call_args.args[3]['questionIdentity']['questionRevision']
+        assert saved.call_args.kwargs['expected_foundation_revision']
     packet = generated.call_args.kwargs['lecture_evidence']
     assert packet['guide'] and 'ORIGINAL_FORMULA' in str(packet['evidence'])
-    record = saved.call_args.args[2]
+    record = saved.call_args.args[3] if kind == 'exam' else saved.call_args.args[2]
     assert record['sourceScope']['allowedRefs'] == refs
     assert record['sourceScope']['documents'][0]['guide'] == docs[0]['guide']
     assert record['sourceCoverage']['complete'] is True
@@ -199,6 +204,26 @@ def test_invalid_selected_citation_cannot_be_saved(source_api):
         api.generate_flashcards_endpoint(api.FlashcardGenerateRequest(course_id='course', user_id='owner', count=1), uid='owner')
     assert exc.value.status_code == 422
     db.save_flashcard_set.assert_not_called()
+
+
+def test_selected_exam_missing_rubric_does_not_call_unchecked_fallback(source_api, monkeypatch):
+    api, db, docs, scope, calls = source_api
+    packet = {'version': 1, 'purpose': 'exam', 'scopeSnapshot': scope,
+              'snapshot': {'version': 1, 'materials': [{'identity': {'userId': 'owner',
+                  'courseId': 'course', 'kind': 'historical_exam', 'materialId': 'past'},
+                  'sourceRevision': 'a' * 64, 'reportRevision': 'b' * 64,
+                  'scopedReportRevision': 'c' * 64, 'analysisId': 'job'}]},
+              'academicItems': [], 'qualifiedItems': [], 'structuralPapers': []}
+    monkeypatch.setattr(api, '_compile_supporting_context', lambda *a, **kw: packet)
+    tex = r'\begin{document}\textbf{Question 1} Explain sum.\end{document}'
+    api.ai_agent.compile_enhanced_exam.return_value = tex
+    api.ai_agent.extract_and_save_exam_metadata.return_value = {'cleaned_tex': tex, 'rubrics': {}}
+    with pytest.raises(api.HTTPException) as exc:
+        api.generate_enhanced_exam_endpoint(api.EnhancedExamGenerateRequest(
+            course_id='course', user_id='owner', total_marks=5), uid='owner')
+    assert exc.value.status_code == 422
+    api.ai_agent.generate_rubrics_from_tex.assert_not_called()
+    db.save_generated_exam_with_rubrics.assert_not_called()
 
 
 def test_tutor_social_reply_has_no_invented_citation(source_api, monkeypatch):
@@ -338,7 +363,7 @@ def test_generation_repair_cannot_change_shared_semantics(source_api, monkeypatc
     monkeypatch.setattr('src.utils.pdf_response.compile_temp_pdf', compile_tex)
     monkeypatch.setattr('src.utils.pdf_response.cleanup_temp_pdf', lambda *args: None)
     result = api.generate_enhanced_exam_endpoint(api.EnhancedExamGenerateRequest(course_id='course', user_id='owner', total_marks=5), uid='owner')
-    saved = db.save_exam_flat.call_args.args[2]
+    saved = db.save_generated_exam_with_rubrics.call_args.args[3]
     assert result['has_pdf'] is (change == 'harmless')
     assert saved['texContent'] == (repaired if change == 'harmless' else tex)
     assert saved['questionIdentity']['texRevision'] == sha256(saved['texContent'].encode()).hexdigest()
@@ -397,8 +422,7 @@ def test_exam_shared_context_is_verified_before_publication(source_api, monkeypa
         with pytest.raises(HTTPException) as error:
             api.generate_enhanced_exam_endpoint(request, uid='owner')
         assert error.value.status_code == 422
-        db.save_exam_flat.assert_not_called()
-        db.save_secret_rubrics.assert_not_called()
+        db.save_generated_exam_with_rubrics.assert_not_called()
         if case == 'macro_rubric_mismatch':
             assert any('question' in j['row'] for j in judgments)
     else:
@@ -409,7 +433,7 @@ def test_exam_shared_context_is_verified_before_publication(source_api, monkeypa
         assert all(macro in '\n'.join(json.loads(j['sharedContext'])) and
                    preface in '\n'.join(json.loads(j['sharedContext'])) for j in question_checks)
         assert shared in '\n'.join(json.loads(shared_checks[0]['text']))
-        saved = db.save_exam_flat.call_args.args[2]
+        saved = db.save_generated_exam_with_rubrics.call_args.args[3]
         assert saved['sharedSourceRefs'] == refs
         assert saved['rubrics']['sharedSourceRefs'] == refs
         assert saved['questionIdentity']['sharedContext']['sourceRefs'] == refs

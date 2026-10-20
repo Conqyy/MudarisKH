@@ -200,6 +200,17 @@ def _source_summary(intelligence: dict) -> dict:
     }
 
 
+def _checked_source_summary(reader, supporting):
+    materials = supporting['snapshot']['materials']
+    return {'documentIds': [row['id'] for row in reader.scope['documents']],
+            'historicalExamIds': [row['identity']['materialId'] for row in materials
+                                  if row['identity']['kind'] == 'historical_exam'],
+            'tutorialIds': [row['identity']['materialId'] for row in materials
+                            if row['identity']['kind'] == 'tutorial'],
+            'audioIds': [row['identity']['materialId'] for row in materials
+                         if row['identity']['kind'] in ('audio', 'notes')]}
+
+
 def _require_sources(intelligence: dict, supplemental_text: str = "", require_documents: bool = False) -> None:
     source_scope = intelligence.get('source_scope')
     if require_documents and not (source_scope.get('allowedRefs') if source_scope is not None else intelligence.get('document_analyses')):
@@ -241,6 +252,22 @@ def _source_verify(reader, rows):
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+def _compile_supporting_context(reader, uid, course_id, *, historical_ids, audio_ids,
+                                tutorial_ids, purpose, discussion_query=None):
+    """Compile from the original selection, before legacy projections can drop a row."""
+    from src.supporting.context import SupportingContextCompiler
+    from src.supporting.alignment import SupportingAligner
+    compiler = SupportingContextCompiler(supporting_repository, supporting_library,
+                                          SupportingAligner(reader, supporting_library))
+    try:
+        return compiler.compile(user_id=uid, course_id=course_id, scope=reader.scope,
+            selected={'historical_ids': historical_ids, 'audio_ids': audio_ids,
+                      'tutorial_ids': tutorial_ids}, purpose=purpose,
+            discussion_query=discussion_query)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 _SAVED_SOURCE_UNAVAILABLE = ('The saved exam\'s exact original sources or identity are unavailable. '
                              'Restore the original source versions, or regenerate the exam from confirmed documents.')
 
@@ -250,6 +277,9 @@ def _load_saved_exam_evidence(exam: dict, uid: str) -> dict:
     from src.services.document_library import DocumentLibrary
     from src.services.source_evidence import SourceEvidence, saved_question_identity
     from src.database.firebase_client import saved_exam_revision
+    from src.supporting.contracts import validate_identity, validate_ref
+    from src.supporting.repository import SupportingRepository
+    from src.supporting.library import SupportingLibrary
     assert_owner(exam, uid, 'Exam')
     _require_course(exam.get('courseId', ''), uid)
     try:
@@ -264,14 +294,77 @@ def _load_saved_exam_evidence(exam: dict, uid: str) -> dict:
         for refs in [rubrics.get('sharedSourceRefs'), *[q['sourceRefs'] for q in identity['questions']]]:
             if not isinstance(refs, list) or not refs or any(ref not in scope['allowedRefs'] for ref in refs):
                 raise ValueError('Saved citations are outside the saved scope')
+        snapshot = exam.get('supportingSnapshot')
+        supporting = None
+        if snapshot is not None:
+            if not isinstance(snapshot, dict) or snapshot.get('version') != 1 or not isinstance(snapshot.get('materials'), list):
+                raise ValueError('Saved supporting snapshot is invalid')
+            repository = SupportingRepository(db_client)
+            source_library = SupportingLibrary(repository)
+            selected, restored_items = {}, []
+            for entry in snapshot['materials']:
+                material = validate_identity(entry['identity'])
+                if material['userId'] != uid or material['courseId'] != exam['courseId']:
+                    raise ValueError('Saved supporting source belongs to another owner or course')
+                marker = (material['kind'], material['materialId'], entry['sourceRevision'])
+                if marker in selected: raise ValueError('Duplicate saved supporting source')
+                selected[marker] = material
+                source_version = repository.get_version(material, 'source', entry['sourceRevision'])
+                manifest = source_library.load_source(material, entry['sourceRevision'])
+                if (manifest['identity'] != material or manifest['sourceRevision'] != entry['sourceRevision']
+                        or manifest['coverage']['complete'] is not True
+                        or source_version.get('coverageComplete') is not True):
+                    raise ValueError('Saved supporting original is unavailable')
+                for field in ('reportRevision', 'scopedReportRevision'):
+                    version = repository.get_version(material, 'report', entry[field])
+                    report = source_library.load_report(material, entry[field])
+                    if (version.get('coverageComplete') is not True
+                            or version.get('sourceRevision') != entry['sourceRevision']
+                            or version.get('foundationRevision') != exam.get('foundationRevision')
+                            or report.get('sourceRevision') != entry['sourceRevision']
+                            or report.get('extractionCoverage', {}).get('complete') is not True
+                            or report.get('alignmentCoverage', {}).get('complete') is not True):
+                        raise ValueError('Saved supporting report binding differs')
+                    if field == 'scopedReportRevision':
+                        if (version.get('scopeRevision') != scope['scopeRevision']
+                                or report.get('scopeSnapshot', {}).get('scopeRevision') != scope['scopeRevision']
+                                or report.get('scopeSnapshot', {}).get('allowedRefs') != scope['allowedRefs']):
+                            raise ValueError('Saved supporting selected scope differs')
+                        restored_items.extend({'materialIdentity': material, 'alignment': row}
+                                              for row in report.get('alignments', []))
+                        restored_items.extend({'materialIdentity': material, 'sourceItem': row}
+                                              for row in report.get('items', []))
+            for refs in [exam.get('sharedSupportingSourceRefs', []),
+                         *[q.get('supportingSourceRefs', []) for q in identity['questions']]]:
+                if not isinstance(refs, list): raise ValueError('Saved supporting citations are invalid')
+                for ref in refs:
+                    validate_ref(ref, supporting=True)
+                    marker = (ref['kind'], ref['materialId'], ref['sourceRevision'])
+                    if marker not in selected:
+                        raise ValueError('Saved supporting citation is outside its snapshot')
+                    source_library.read_refs(selected[marker], [ref])
+            if (rubrics.get('sharedSupportingSourceRefs', []) != exam.get('sharedSupportingSourceRefs', [])
+                    or rubrics.get('provenance', []) != exam.get('provenance', [])):
+                raise ValueError('Saved supporting provenance identity differs')
+            supporting = {'version': 1, 'purpose': 'exam', 'scopeSnapshot': scope,
+                          'snapshot': snapshot, 'academicItems': [], 'qualifiedItems': [],
+                          'restoredItems': restored_items}
         reader = SourceEvidence(scope, library, uid, exam['courseId'], ai_agent.client, ai_agent.model_id)
-        return {'reader': reader, 'identity': identity, 'revision': saved_exam_revision(exam)}
+        return {'reader': reader, 'identity': identity, 'revision': saved_exam_revision(exam),
+                'supporting': supporting}
     except (ValueError, OSError, KeyError, TypeError, AttributeError) as exc:
         raise HTTPException(status_code=409, detail=_SAVED_SOURCE_UNAVAILABLE) from exc
 
 
-def _verify_saved_exam(reader, exam):
-    rubrics = reader.verify_exam(exam['texContent'], deepcopy(exam['rubrics']))
+def _verify_saved_exam(reader, exam, supporting=None):
+    if supporting and supporting['snapshot']['materials']:
+        from src.supporting.verification import SupportingOutputVerifier
+        from src.supporting.repository import SupportingRepository
+        from src.supporting.library import SupportingLibrary
+        rubrics = SupportingOutputVerifier(reader, SupportingLibrary(SupportingRepository(db_client))).verify_exam(
+            exam['texContent'], deepcopy(exam['rubrics']), packet=supporting, saved=True)
+    else:
+        rubrics = reader.verify_exam(exam['texContent'], deepcopy(exam['rubrics']))
     if rubrics != exam['rubrics']:
         raise ValueError('Verification cannot rewrite authoritative saved rubrics or shared references')
 
@@ -1548,12 +1641,12 @@ def upload_lecture_notes(payload: LectureNotesRequest, uid: str = Depends(requir
 
 def _frame_notes(notes: str) -> str:
     """Wrap typed notes so the analyzer knows they're a student's account of the
-    lecture, not a verbatim transcript, and treats "the prof said X is on the
-    exam" as a first-hand exam hint."""
+    lecture, not a verbatim transcript or first-hand professor evidence."""
     return (
-        "[Student's typed notes about this lecture — not a verbatim transcript. "
-        "Statements about what the professor emphasized or promised for the exam "
-        "are first-hand exam hints.]\n\n" + notes
+        "[Student-reported typed notes about this lecture, not a verbatim recording. "
+        "Treat any statement about what the professor said, emphasized, or promised "
+        "as the student's report only. Attribute every summary, exam hint, quote, "
+        "and emphasis to these notes; never present it as verified professor speech.]\n\n" + notes
     )
 
 
@@ -1943,19 +2036,11 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
     _require_sources(intelligence, payload.transcripts, require_documents=True)
     reader = _source_reader(payload.course_id, uid, ai_agent, payload.document_ids)
     lecture_evidence = _source_prepare(reader, "exam")
-
-    selected_past_ids = set(intelligence.get('source_ids', {}).get('historical_exam_ids', []))
-    if _ensure_historical_paper_analysis(payload.course_id, uid,
-            sorted(selected_past_ids),
-            foundation['document_insights'], foundation['revision'], lecture_evidence=lecture_evidence, source_reader=reader):
-        intelligence = db_client.get_course_intelligence(payload.course_id,
-            document_ids=payload.document_ids, historical_exam_ids=payload.historical_exam_ids,
-            tutorial_ids=payload.tutorial_ids, audio_ids=payload.audio_ids, user_id=uid)
-        refreshed_past_ids = set(intelligence.get('source_ids', {}).get('historical_exam_ids', []))
-        if not selected_past_ids.issubset(refreshed_past_ids):
-            raise HTTPException(status_code=409, detail='A selected past exam is no longer available. Select the sources again and retry.')
-        _require_sources(intelligence, payload.transcripts, require_documents=True)
-    historical = retag_topic_weights(intelligence.get('historical_analyses', []), intelligence.get('document_analyses', []), source_scope=reader.scope, read_evidence=reader.read_evidence)
+    supporting = _compile_supporting_context(reader, uid, payload.course_id,
+        historical_ids=payload.historical_exam_ids, audio_ids=payload.audio_ids,
+        tutorial_ids=payload.tutorial_ids, purpose='exam')
+    from src.supporting.context import historical_projection
+    historical = historical_projection(supporting)
     exam_blueprint = build_exam_blueprint(historical, payload.total_marks, payload.exam_type)
     if historical and not exam_blueprint:
         raise HTTPException(status_code=422, detail='The selected past papers do not have enough reliable structure to predict an exam. Re-analyze or re-upload them.')
@@ -1983,16 +2068,17 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
         user_id=payload.user_id,
         course_id=payload.course_id,
         document_insights=intelligence.get("document_analyses", []),
-        audio_insights=intelligence.get("audio_insights", []),
-        historical_analysis=historical,
+        audio_insights=[],
+        historical_analysis=[],
         document_texts=intelligence.get("document_texts", []),
-        historical_texts=intelligence.get("historical_texts", []),
-        tutorial_insights=intelligence.get("tutorial_analyses", []),
-        tutorial_texts=intelligence.get("tutorial_texts", []),
+        historical_texts=[],
+        tutorial_insights=[],
+        tutorial_texts=[],
         total_marks=payload.total_marks,
         exam_type=payload.exam_type,
         exam_blueprint=exam_blueprint,
         lecture_evidence=lecture_evidence,
+        supporting_context=supporting,
     )
 
     extraction = ai_agent.extract_and_save_exam_metadata(
@@ -2005,6 +2091,8 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
     # generation got truncated before reaching it), derive rubrics from the
     # exam text so the student still gets an answer sheet + grading.
     if not rubrics or not rubrics.get("questions"):
+        if supporting['snapshot']['materials']:
+            raise HTTPException(status_code=422, detail='The generated exam is missing complete grading and supporting provenance. Retry generation.')
         logger.warning(f"Rubrics missing for {exam_id}; deriving from exam text.")
         rubrics = ai_agent.generate_rubrics_from_tex(cleaned_tex, exam_id, lecture_evidence=lecture_evidence)
 
@@ -2022,10 +2110,6 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
     _require_document_foundation(payload.course_id, uid, foundation['revision'])
 
     from src.services.source_evidence import saved_question_identity, validate_exam_repair
-    try:
-        reader.verify_exam(cleaned_tex, rubrics)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
     identity = saved_question_identity(cleaned_tex, rubrics)
     question_structure = identity['questions']
 
@@ -2057,14 +2141,25 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
         logger.warning(f"PDF compilation skipped: {e}")
 
     _require_document_foundation(payload.course_id, uid, foundation['revision'])
+    try:
+        if supporting['snapshot']['materials']:
+            from src.supporting.verification import SupportingOutputVerifier
+            SupportingOutputVerifier(reader, supporting_library).verify_exam(cleaned_tex, rubrics,
+                packet=supporting)
+        else:
+            reader.verify_exam(cleaned_tex, rubrics)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     identity = saved_question_identity(cleaned_tex, rubrics)
-    db_client.save_secret_rubrics(payload.user_id, payload.course_id, exam_id, rubrics, expected_foundation_revision=foundation['revision'])
-    doc_db_id = db_client.save_exam_flat(payload.user_id, payload.course_id, {
+    question_structure = identity['questions']
+    doc_db_id = db_client.save_generated_exam_with_rubrics(payload.user_id, payload.course_id, exam_id, {
         "examId": exam_id,
         "texContent": cleaned_tex,
         "questionStructure": question_structure,
         "questionIdentity": identity,
         "sharedSourceRefs": rubrics['sharedSourceRefs'],
+        "sharedSupportingSourceRefs": rubrics.get('sharedSupportingSourceRefs', []),
+        "provenance": rubrics.get('provenance', []),
         "rubrics": rubrics,
         "totalMarks": payload.total_marks,
         "examType": payload.exam_type,
@@ -2072,14 +2167,15 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
         "foundationRevision": foundation['revision'],
         "status": "generated",
         "pdfStatus": "ready" if pdf_base64 else "retry_required",
-        "sourceSummary": _source_summary(intelligence),
+        "sourceSummary": _checked_source_summary(reader, supporting),
         "contextCoverage": reader.coverage(),
         "sourceScope": reader.snapshot(),
         "sourceCoverage": reader.coverage(),
         "modelId": settings.OPENROUTER_MODEL,
         "promptVersion": "2026-10-09",
         "createdAt": int(_time.time() * 1000),
-    }, expected_foundation_revision=foundation['revision'])
+    }, rubrics, expected_foundation_revision=foundation['revision'],
+       expected_supporting_snapshot=supporting['snapshot'], scope_revision=reader.scope['scopeRevision'])
 
     # NOTE: the model-answer key is intentionally NOT generated here — it's built
     # on demand the first time the student reveals it (kept separate from exam
@@ -2093,6 +2189,7 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
         "pdf_base64": pdf_base64,
         "has_pdf": pdf_base64 is not None,
         "question_structure": question_structure,
+        "sharedSupportingSourceRefs": rubrics.get('sharedSupportingSourceRefs', []),
         "intelligence_used": intelligence.get("counts", {}),
         "exam_blueprint": exam_blueprint,
     }
@@ -2124,10 +2221,26 @@ def _public_exam(exam):
                 for row in values or [] if isinstance(row, dict)
                 and all(isinstance(row.get(key), str) for key in ('documentId', 'sourceRevision', 'unitId'))]
 
+    def supporting_refs(values):
+        return [{key: row[key] for key in ('kind', 'materialId', 'sourceRevision', 'unitId')}
+                for row in values or [] if isinstance(row, dict)
+                and all(isinstance(row.get(key), str) for key in ('kind', 'materialId', 'sourceRevision', 'unitId'))]
+
     result['questionStructure'] = [{**{key: row[key] for key in ('id', 'type', 'text', 'marks', 'identity') if key in row},
-                                    'sourceRefs': refs(row.get('sourceRefs'))}
+                                    'sourceRefs': refs(row.get('sourceRefs')),
+                                    'supportingSourceRefs': supporting_refs(row.get('supportingSourceRefs'))}
                                    for row in exam.get('questionStructure', []) or [] if isinstance(row, dict)]
     result['sharedSourceRefs'] = refs(exam.get('sharedSourceRefs'))
+    result['sharedSupportingSourceRefs'] = supporting_refs(exam.get('sharedSupportingSourceRefs'))
+    snapshot = exam.get('supportingSnapshot')
+    if isinstance(snapshot, dict) and snapshot.get('version') == 1:
+        result['supportingSnapshot'] = {'version': 1, 'materials': [
+            {'identity': {key: row['identity'][key] for key in ('kind', 'materialId')},
+             **{key: row[key] for key in ('sourceRevision', 'reportRevision', 'scopedReportRevision')
+                if isinstance(row.get(key), str)}}
+            for row in snapshot.get('materials', []) if isinstance(row, dict)
+            and isinstance(row.get('identity'), dict)
+            and all(isinstance(row['identity'].get(key), str) for key in ('kind', 'materialId'))]}
     scope = exam.get('sourceScope')
     if isinstance(scope, dict):
         # Guides are private restoration input; display needs only versioned identities.
@@ -2194,11 +2307,20 @@ def get_exam_pdf(doc_id: str, uid: str = Depends(require_uid)):
             foundation = _require_document_foundation(exam.get('courseId', ''), uid)
             reader = restored['reader']
             evidence = _source_prepare(reader, 'exam')
-            _verify_saved_exam(reader, exam)
+            _verify_saved_exam(reader, exam, restored['supporting'])
             repaired = ai_agent.repair_latex(exam['texContent'], lecture_evidence=evidence)
             if repaired and repaired.strip() != exam['texContent'].strip():
                 repaired = validate_exam_repair(exam['texContent'], repaired, exam['rubrics'])
                 validate_exam_contract(repaired, exam['rubrics'], total_marks=exam.get('totalMarks'), blueprint=exam.get('examBlueprint'))
+                if restored['supporting'] and restored['supporting']['snapshot']['materials']:
+                    from src.supporting.verification import SupportingOutputVerifier
+                    from src.supporting.repository import SupportingRepository
+                    from src.supporting.library import SupportingLibrary
+                    checked_rubrics = SupportingOutputVerifier(reader,
+                        SupportingLibrary(SupportingRepository(db_client))).verify_exam(
+                            repaired, deepcopy(exam['rubrics']), packet=restored['supporting'], saved=True)
+                    if checked_rubrics != exam['rubrics']:
+                        raise ValueError('Repair changed saved supporting provenance or citations')
                 path = compile_temp_pdf(repaired, exam_name)
                 if path:
                     _publish_saved_exam(doc_id, exam, {'texContent': repaired, 'pdfStatus': 'ready',
@@ -2257,7 +2379,7 @@ def get_exam_answer_key_pdf(doc_id: str, uid: str = Depends(require_uid)):
                 foundation_revision = _require_document_foundation(exam.get('courseId', ''), uid)['revision']
                 reader = restored['reader']
                 evidence = _source_prepare(reader, 'exam')
-                _verify_saved_exam(reader, exam)
+                _verify_saved_exam(reader, exam, restored['supporting'])
                 generated = _make_compilable_answer_key(exam, reader=reader, lecture_evidence=evidence)
                 answer_tex, mapping = generated['tex'], generated['mapping']
                 path = _compile_answer_tex(answer_tex, exam_name)
@@ -2386,28 +2508,37 @@ def generate_flashcards_endpoint(payload: FlashcardGenerateRequest, uid: str = D
     _require_sources(intelligence, require_documents=True)
     reader = _source_reader(payload.course_id, uid, ai_agent, payload.document_ids)
     lecture_evidence = _source_prepare(reader, "flashcards")
-
-    scoped_hist = retag_topic_weights(intelligence.get('historical_analyses', []), intelligence.get('document_analyses', []),
-                                      source_scope=reader.scope, read_evidence=reader.read_evidence)
+    supporting = _compile_supporting_context(reader, uid, payload.course_id,
+        historical_ids=payload.historical_exam_ids, audio_ids=payload.audio_ids,
+        tutorial_ids=payload.tutorial_ids, purpose='flashcards')
     cards = ai_agent.generate_flashcards(
         academic_data={},
         topics=payload.topics,
         document_insights=intelligence.get("document_analyses", []),
-        audio_insights=intelligence.get("audio_insights", []),
-        historical_analysis=scoped_hist,
+        audio_insights=[],
+        historical_analysis=[],
         document_texts=intelligence.get("document_texts", []),
-        historical_texts=intelligence.get("historical_texts", []),
-        tutorial_insights=intelligence.get("tutorial_analyses", []),
-        tutorial_texts=intelligence.get("tutorial_texts", []),
+        historical_texts=[],
+        tutorial_insights=[],
+        tutorial_texts=[],
         count=payload.count,
         lecture_evidence=lecture_evidence,
+        supporting_context=supporting,
     )
 
     if not cards:
         raise HTTPException(status_code=422, detail="Could not generate flashcards. Make sure documents are analyzed.")
 
     _require_document_foundation(payload.course_id, uid, foundation['revision'])
-    _source_verify(reader, cards)
+    if supporting['snapshot']['materials']:
+        from src.supporting.verification import SupportingOutputVerifier
+        try:
+            SupportingOutputVerifier(reader, supporting_library).verify_rows(cards, packet=supporting,
+                                                                            purpose='flashcards')
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    else:
+        _source_verify(reader, cards)
     title = f"{len(cards)} cards · {_time.strftime('%b %d')}"
     _require_document_foundation(payload.course_id, uid, foundation['revision'])
     doc_db_id = db_client.save_flashcard_set(payload.user_id, payload.course_id, {
@@ -2415,14 +2546,15 @@ def generate_flashcards_endpoint(payload: FlashcardGenerateRequest, uid: str = D
         "title": title,
         "cards": cards,
         "foundationRevision": foundation['revision'],
-        "sourceSummary": _source_summary(intelligence),
+        "sourceSummary": _checked_source_summary(reader, supporting),
         "contextCoverage": reader.coverage(),
         "sourceScope": reader.snapshot(),
         "sourceCoverage": reader.coverage(),
         "modelId": settings.OPENROUTER_MODEL,
         "promptVersion": "2026-10-09",
         "createdAt": int(_time.time() * 1000),
-    }, expected_foundation_revision=foundation['revision'])
+    }, expected_foundation_revision=foundation['revision'],
+       expected_supporting_snapshot=supporting['snapshot'], scope_revision=reader.scope['scopeRevision'])
 
     return {
         "status": "success",
@@ -2709,21 +2841,26 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depend
     _require_sources(intelligence, require_documents=True)
     reader = _source_reader(payload.course_id, uid, summary_agent, payload.document_ids)
     lecture_evidence = _source_prepare(reader, "summary")
-
-    scoped_hist = retag_topic_weights(intelligence.get('historical_analyses', []), intelligence.get('document_analyses', []),
-                                      source_scope=reader.scope, read_evidence=reader.read_evidence)
+    supporting = _compile_supporting_context(reader, uid, payload.course_id,
+        historical_ids=payload.historical_exam_ids, audio_ids=payload.audio_ids,
+        tutorial_ids=payload.tutorial_ids, purpose='summary')
+    from src.supporting.context import historical_projection
+    projection = historical_projection(supporting)
+    checked_blueprint = build_exam_blueprint(projection)
+    scoped_hist = [checked_blueprint] if checked_blueprint else []
     summary = summary_agent.generate_summary(
         academic_data={},
         topics=payload.topics,
         document_insights=intelligence.get("document_analyses", []),
-        audio_insights=intelligence.get("audio_insights", []),
-        historical_analysis=scoped_hist,
+        audio_insights=[],
+        historical_analysis=[],
         document_texts=intelligence.get("document_texts", []),
-        historical_texts=intelligence.get("historical_texts", []),
-        tutorial_insights=intelligence.get("tutorial_analyses", []),
-        tutorial_texts=intelligence.get("tutorial_texts", []),
+        historical_texts=[],
+        tutorial_insights=[],
+        tutorial_texts=[],
         instructions=payload.instructions,
         lecture_evidence=lecture_evidence,
+        supporting_context=supporting,
     )
 
     if not summary or not summary.get("sections"):
@@ -2731,11 +2868,19 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depend
 
     # Safety net: strip any topic the user asked to exclude, in case the model
     # still included it despite the instruction.
+    prior_summary = deepcopy(summary) if supporting['snapshot']['materials'] else None
     summary = _apply_summary_exclusions(summary, payload.instructions)
+    if prior_summary is not None:
+        from src.supporting.verification import rebase_summary_provenance
+        try:
+            rebase_summary_provenance(prior_summary, summary)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # Safety net: strip sections about material outside the SELECTED documents
     # (e.g. chapters the past exams cover but the student didn't pick).
-    summary = _apply_summary_scope(summary, intelligence.get("document_analyses", []), source_reader=reader)
+    if not supporting['snapshot']['materials']:
+        summary = _apply_summary_scope(summary, intelligence.get("document_analyses", []), source_reader=reader)
     if not summary.get("sections"):
         raise HTTPException(status_code=422, detail="No topics remain after applying your selection and exclusions.")
 
@@ -2755,6 +2900,14 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depend
     title = _compose_summary_title(doc_titles, summary.get("title"))
     summary["title"] = title
 
+    if supporting['snapshot']['materials']:
+        from src.supporting.verification import SupportingOutputVerifier
+        try:
+            SupportingOutputVerifier(reader, supporting_library).verify_rows([summary], packet=supporting,
+                                                                            purpose='summary')
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     _require_document_foundation(payload.course_id, uid, foundation['revision'])
     doc_db_id = db_client.save_summary(payload.user_id, payload.course_id, {
         "summaryId": summary_id,
@@ -2763,15 +2916,19 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depend
         "sections": summary.get("sections", []),
         "keyTerms": summary.get("keyTerms", []),
         "examFocus": summary.get("examFocus", []),
+        "provenance": summary.get("provenance", []),
+        "sourceRefs": summary.get("sourceRefs", []),
+        "supportingSourceRefs": summary.get("supportingSourceRefs", []),
         "foundationRevision": foundation['revision'],
-        "sourceSummary": _source_summary(intelligence),
+        "sourceSummary": _checked_source_summary(reader, supporting),
         "contextCoverage": reader.coverage(),
         "sourceScope": reader.snapshot(),
         "sourceCoverage": reader.coverage(),
         "modelId": settings.OPENROUTER_MODEL,
         "promptVersion": "2026-10-09",
         "createdAt": int(_time.time() * 1000),
-    }, expected_foundation_revision=foundation['revision'])
+    }, expected_foundation_revision=foundation['revision'],
+       expected_supporting_snapshot=supporting['snapshot'], scope_revision=reader.scope['scopeRevision'])
 
     return {"status": "success", "summary_id": summary_id, "doc_id": doc_db_id, **summary}
 
@@ -2916,6 +3073,7 @@ def _audio_to_latex(rec: dict) -> str:
     from src.utils.pdf_response import unicode_font_preamble
     insights = rec.get("insights") or {}
     title = rec.get("title", "Lecture Recording")
+    notes = rec.get('sourceType') == 'notes'
 
     # Escape that PRESERVES non-ASCII (Arabic etc.) so XeLaTeX can render quotes.
     esc = lambda x: _latex_escape(x, keep_unknown_unicode=True)
@@ -2951,20 +3109,21 @@ def _audio_to_latex(rec: dict) -> str:
         r"\AddToShipoutPictureFG{\AtPageLowerLeft{\put(28,20){\textcolor{gray}{\small Mudaris}}}}",
         r"\begin{document}",
         r"\begin{center}{\LARGE\bfseries " + aw(title) + r"}\\[0.3em]"
-        + r"{\small\itshape Lecture analysis}\end{center}",
+        + (r"{\small\itshape Student-reported notes}" if notes else r"{\small\itshape Lecture analysis}")
+        + r"\end{center}",
         r"\vspace{0.5em}",
     ]
 
     summary = insights.get("summary") or ""
     if summary.strip():
-        parts.append(r"\section*{Lecture Summary}")
+        parts.append(r"\section*{Student-reported summary}" if notes else r"\section*{Lecture Summary}")
         for para in re.split(r"\n\n+", summary):
             if para.strip():
                 parts.append(aw(para.strip()) + r"\par\vspace{0.3em}")
 
     hints = insights.get("examHints") or []
     if hints:
-        parts.append(r"\section*{Exam Hints}")
+        parts.append(r"\section*{Student-reported exam hints}" if notes else r"\section*{Exam Hints}")
         parts.append(r"\begin{itemize}[leftmargin=*]")
         for h in hints:
             line = aw(h.get("hint", ""))
@@ -2972,26 +3131,26 @@ def _audio_to_latex(rec: dict) -> str:
             if isinstance(conf, (int, float)) and conf:
                 line += r"\hfill {\small\itshape (" + str(int(conf * 100)) + r"\% confidence)}"
             if h.get("source"):
-                line += r"\\{\small\itshape " + quoted(h["source"]) + r"}"
+                line += r"\\{\small\itshape " + ("Notes excerpt: " if notes else "") + quoted(h["source"]) + r"}"
             parts.append(r"\item " + line)
         parts.append(r"\end{itemize}")
 
     emphasis = insights.get("keyEmphasis") or []
     if emphasis:
-        parts.append(r"\section*{Key Emphasis}")
+        parts.append(r"\section*{Student-reported emphasis}" if notes else r"\section*{Key Emphasis}")
         parts.append(r"\begin{itemize}[leftmargin=*]")
         for e in emphasis:
             level = (e.get("emphasisLevel") or "").strip()
             lbl = f"[{esc(level)}] " if level else ""
             line = r"\textbf{" + lbl + aw(e.get("topic", "")) + r"}"
             if e.get("quote"):
-                line += r"\\{\small\itshape " + quoted(e["quote"]) + r"}"
+                line += r"\\{\small\itshape " + ("Notes excerpt: " if notes else "") + quoted(e["quote"]) + r"}"
             parts.append(r"\item " + line)
         parts.append(r"\end{itemize}")
 
     chapters = insights.get("chapterMapping") or []
     if chapters:
-        parts.append(r"\section*{Chapter Breakdown}")
+        parts.append(r"\section*{Student-reported chapter breakdown}" if notes else r"\section*{Chapter Breakdown}")
         for ch in chapters:
             parts.append(r"\subsection*{" + aw(ch.get("chapter", "")) + r"}")
             segs = ch.get("segments") or []
@@ -3012,6 +3171,8 @@ def get_audio_pdf(rec_id: str, uid: str = Depends(require_uid)):
     from src.utils.pdf_response import compile_pdf_response
     rec = assert_owner(db_client.get_audio_recording(rec_id), uid, "Recording")
     if not rec.get("insights"):
+        if rec.get('supportingAnalysis'):
+            raise HTTPException(status_code=409, detail="This managed source uses the supporting material report. Open its report for the analyzed content; a legacy analysis PDF is unavailable.")
         raise HTTPException(status_code=409, detail="This recording has not been analyzed yet. Retry its analysis first.")
     return compile_pdf_response(_audio_to_latex(rec), rec.get("title") or rec_id, engine="xelatex")
 
@@ -3193,29 +3354,27 @@ def tutor_chat(payload: TutorChatRequest, uid: str = Depends(require_uid)):
     selected_documents = payload.document_ids or [d['id'] for d in foundation['documents']]
     reader = _source_reader(payload.course_id, uid, tutor_agent, selected_documents)
 
-    # The tutor reads its resources DIRECTLY from the DBs, restricted to the
-    # specific lectures and past exams the student selected.
-    resources = db_client.get_tutor_resources(
-        payload.course_id,
-        document_ids=payload.document_ids,
-        recording_ids=payload.recording_ids,
-        historical_exam_ids=payload.historical_exam_ids,
-        tutorial_ids=payload.tutorial_ids,
-        user_id=payload.user_id,
-    )
-    if not resources.get('documents'):
-        resources['documents'] = foundation['documents']
-    resources['course'] = foundation['course']
-
+    resources = {'course': foundation['course']}
+    supporting = _compile_supporting_context(reader, uid, payload.course_id,
+        historical_ids=payload.historical_exam_ids, audio_ids=payload.recording_ids,
+        tutorial_ids=payload.tutorial_ids, purpose='tutor',
+        discussion_query=payload.messages[-1]['content'])
     lecture_evidence = _source_prepare(reader, 'focused', '\n'.join(m['content'] for m in payload.messages[-12:]))
     try:
-        grounded = tutor_agent.reply_grounded(resources, payload.messages, lecture_evidence=lecture_evidence)
+        grounded = tutor_agent.reply_grounded(resources, payload.messages, lecture_evidence=lecture_evidence,
+                                              supporting_context=supporting)
         reply = grounded['reply']
-        refs = reader.validate_refs(grounded['sourceRefs'])
-        if refs:
-            _source_verify(reader, [{'reply': reply, 'sourceRefs': refs}])
+        if supporting['snapshot']['materials']:
+            from src.supporting.verification import SupportingOutputVerifier
+            grounded = SupportingOutputVerifier(reader, supporting_library).verify_tutor_reply(grounded,
+                                                                                               packet=supporting)
+            refs = grounded.get('sourceRefs', [])
         else:
-            reader.verify_nonacademic_reply(reply)
+            refs = reader.validate_refs(grounded['sourceRefs'])
+            if refs:
+                _source_verify(reader, [{'reply': reply, 'sourceRefs': refs}])
+            else:
+                reader.verify_nonacademic_reply(reply)
     except HTTPException:
         raise
     except ValueError as exc:
@@ -3232,6 +3391,9 @@ def tutor_chat(payload: TutorChatRequest, uid: str = Depends(require_uid)):
     _require_document_foundation(payload.course_id, uid, foundation['revision'])
     now = int(_time.time() * 1000)
     source_turn = {'messageIndex': len(payload.messages), 'sourceRefs': refs,
+                   'supportingSourceRefs': grounded.get('supportingSourceRefs', []),
+                   'provenance': grounded.get('provenance', []),
+                   'supportingSnapshot': supporting['snapshot'],
                    'sourceScope': reader.snapshot(), 'sourceCoverage': reader.coverage()}
     if payload.chat_id:
         from src.database.firebase_client import DataConflict
@@ -3239,7 +3401,9 @@ def tutor_chat(payload: TutorChatRequest, uid: str = Depends(require_uid)):
             db_client.append_tutor_messages(uid, payload.course_id, payload.chat_id, saved_messages,
                                            [payload.messages[-1], {"role": "assistant", "content": reply}], now,
                                            foundation_revision=foundation['revision'],
-                                           expected_foundation_revision=foundation['revision'], source_turn=source_turn)
+                                            expected_foundation_revision=foundation['revision'], source_turn=source_turn,
+                                            expected_supporting_snapshot=supporting['snapshot'],
+                                            scope_revision=reader.scope['scopeRevision'])
         except DataConflict as exc:
             raise HTTPException(status_code=409, detail="This conversation changed. Reopen it before sending again.") from exc
         chat_id = payload.chat_id
@@ -3253,9 +3417,11 @@ def tutor_chat(payload: TutorChatRequest, uid: str = Depends(require_uid)):
             "foundationRevision": foundation['revision'],
             "createdAt": now,
             "updatedAt": now,
-        }, expected_foundation_revision=foundation['revision'])
+        }, expected_foundation_revision=foundation['revision'],
+           expected_supporting_snapshot=supporting['snapshot'], scope_revision=reader.scope['scopeRevision'])
 
-    return {"status": "success", "reply": reply, "chat_id": chat_id, "sourceRefs": refs}
+    return {"status": "success", "reply": reply, "chat_id": chat_id, "sourceRefs": refs,
+            "supportingSourceRefs": grounded.get('supportingSourceRefs', [])}
 
 
 @app.get("/api/tutor/chats/{user_id}/{course_id}")

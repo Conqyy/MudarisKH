@@ -39,7 +39,12 @@ def saved_exam_revision(exam: dict) -> str:
     keys = ('userId', 'courseId', 'examId', 'texContent', 'rubrics', 'questionStructure',
             'questionIdentity', 'sharedSourceRefs', 'sourceScope', 'totalMarks',
             'examBlueprint', 'foundationRevision')
-    body = json.dumps({key: exam.get(key) for key in keys}, ensure_ascii=False,
+    authoritative = {key: exam.get(key) for key in keys}
+    # Old saved exams retain their existing revision and cached answer/PDF keys.
+    for key in ('supportingSnapshot', 'sharedSupportingSourceRefs', 'provenance'):
+        if key in exam:
+            authoritative[key] = exam[key]
+    body = json.dumps(authoritative, ensure_ascii=False,
                       sort_keys=True, separators=(',', ':'), allow_nan=False)
     return hashlib.sha256(body.encode('utf-8')).hexdigest()
 
@@ -196,7 +201,10 @@ class FirebaseClient:
     # ──────────────────────────────────────────────────
 
     @local_locked
-    def _flat_save(self, collection_name: str, data: dict, *, expected_foundation_revision=None) -> str:
+    def _flat_save(self, collection_name: str, data: dict, *, expected_foundation_revision=None,
+                   expected_supporting_snapshot=None, scope_revision=None) -> str:
+        if expected_supporting_snapshot is not None:
+            data = {**data, 'supportingSnapshot': deepcopy(expected_supporting_snapshot)}
         validate_record_size(data)
         user_id = data.get('userId') or data.get('uid')
         course_id = data.get('courseId') or None
@@ -209,6 +217,8 @@ class FirebaseClient:
             self._assert_write_allowed(user_id, course_id)
             local = self._read_local_db()
             self._assert_foundation_current(user_id, course_id, expected_foundation_revision, local=local)
+            self._assert_supporting_snapshot(user_id, course_id, expected_supporting_snapshot,
+                                             local=local, scope_revision=scope_revision)
             local.setdefault(collection_name, {})
             doc_id = f"{collection_name}_{uuid.uuid4().hex}"
             if collection_name == 'courses':
@@ -226,6 +236,8 @@ class FirebaseClient:
             self._assert_write_allowed(user_id, doc_ref.id if collection_name == 'courses' else course_id,
                                        transaction, parent_required=collection_name != 'courses')
             self._assert_foundation_current(user_id, course_id, expected_foundation_revision, transaction=transaction)
+            self._assert_supporting_snapshot(user_id, course_id, expected_supporting_snapshot,
+                                             transaction=transaction, scope_revision=scope_revision)
             foundation_ref, foundation = None, None
             if collection_name == 'documents':
                 foundation_ref = self.db.collection('document_foundations').document(course_id)
@@ -490,9 +502,69 @@ class FirebaseClient:
         self._flat_delete("tutorials", tut_id)
 
     # --- Generated Exams (flat, for enhanced generator) ---
-    def save_exam_flat(self, user_id: str, course_id: str, data: dict, *, expected_foundation_revision=None) -> str:
+    def save_exam_flat(self, user_id: str, course_id: str, data: dict, *, expected_foundation_revision=None,
+                       expected_supporting_snapshot=None, scope_revision=None) -> str:
         data.update({"userId": user_id, "courseId": course_id})
-        return self._flat_save("exams", data, expected_foundation_revision=expected_foundation_revision)
+        return self._flat_save("exams", data, expected_foundation_revision=expected_foundation_revision,
+            expected_supporting_snapshot=expected_supporting_snapshot, scope_revision=scope_revision)
+
+    @local_locked
+    def save_generated_exam_with_rubrics(self, user_id: str, course_id: str, exam_id: str,
+                                         exam_data: dict, rubrics: dict, *, expected_foundation_revision,
+                                         expected_supporting_snapshot, scope_revision) -> str:
+        """Publish the generated exam and its hidden rubric under one authorization fence."""
+        for value, label in ((user_id, 'user ID'), (course_id, 'course ID'), (exam_id, 'exam ID')):
+            validate_component(value, label)
+        if not isinstance(exam_data, dict) or not isinstance(rubrics, dict):
+            raise ValueError('Invalid generated exam')
+        if exam_data.get('examId', exam_id) != exam_id:
+            raise DataConflict('Generated exam identity changed')
+        if exam_data.get('userId', user_id) != user_id or exam_data.get('courseId', course_id) != course_id:
+            raise DataConflict('Generated exam owner or course changed')
+        if 'rubrics' in exam_data and exam_data['rubrics'] != rubrics:
+            raise ValueError('Generated exam and hidden rubric differ')
+        exam = {**exam_data, 'examId': exam_id, 'userId': user_id, 'courseId': course_id}
+        if expected_supporting_snapshot is not None:
+            exam['supportingSnapshot'] = deepcopy(expected_supporting_snapshot)
+        validate_record_size(exam)
+        validate_record_size(rubrics)
+        if self.use_local:
+            self._assert_write_allowed(user_id, course_id)
+            local = self._read_local_db()
+            self._assert_foundation_current(user_id, course_id, expected_foundation_revision, local=local)
+            self._assert_supporting_snapshot(user_id, course_id, expected_supporting_snapshot,
+                                             local=local, scope_revision=scope_revision)
+            secret = (local.setdefault('users', {}).setdefault(user_id, {})
+                      .setdefault('courses', {}).setdefault(course_id, {}).setdefault('exams', {}))
+            if exam_id in secret:
+                raise DataConflict('Generated exam already exists')
+            flat_id = f'exams_{uuid.uuid4().hex}'
+            secret[exam_id] = deepcopy(rubrics)
+            local.setdefault('exams', {})[flat_id] = exam
+            self._write_local_db(local)
+            return flat_id
+
+        from google.cloud import firestore
+        flat_ref = self.db.collection('exams').document()
+        secret_ref = (self.db.collection('users').document(user_id).collection('courses')
+                      .document(course_id).collection('exams').document(exam_id))
+        secret = {'exam_id': exam_id, 'rubrics': deepcopy(rubrics),
+                  'created_at': firestore.SERVER_TIMESTAMP}
+        validate_record_size(secret)
+
+        @firestore.transactional
+        def save(transaction):
+            self._assert_write_allowed(user_id, course_id, transaction)
+            self._assert_foundation_current(user_id, course_id, expected_foundation_revision,
+                                            transaction=transaction)
+            self._assert_supporting_snapshot(user_id, course_id, expected_supporting_snapshot,
+                                             transaction=transaction, scope_revision=scope_revision)
+            if secret_ref.get(transaction=transaction).exists:
+                raise DataConflict('Generated exam already exists')
+            transaction.set(secret_ref, secret)
+            transaction.set(flat_ref, exam)
+            return flat_ref.id
+        return save(self.db.transaction())
 
     def update_exam(self, doc_id: str, data: dict, *, expected_foundation_revision=None, expected_exam_revision=None):
         return self._flat_update("exams", doc_id, data, expected_foundation_revision=expected_foundation_revision,
@@ -508,9 +580,11 @@ class FirebaseClient:
         self._flat_delete("exams", doc_id)
 
     # --- Flashcard Sets ---
-    def save_flashcard_set(self, user_id: str, course_id: str, data: dict, *, expected_foundation_revision=None) -> str:
+    def save_flashcard_set(self, user_id: str, course_id: str, data: dict, *, expected_foundation_revision=None,
+                           expected_supporting_snapshot=None, scope_revision=None) -> str:
         data.update({"userId": user_id, "courseId": course_id})
-        return self._flat_save("flashcard_sets", data, expected_foundation_revision=expected_foundation_revision)
+        return self._flat_save("flashcard_sets", data, expected_foundation_revision=expected_foundation_revision,
+            expected_supporting_snapshot=expected_supporting_snapshot, scope_revision=scope_revision)
 
     def get_flashcard_set(self, doc_id: str) -> dict:
         return self._flat_get("flashcard_sets", doc_id)
@@ -522,9 +596,11 @@ class FirebaseClient:
         self._flat_delete("flashcard_sets", doc_id)
 
     # --- Summaries ---
-    def save_summary(self, user_id: str, course_id: str, data: dict, *, expected_foundation_revision=None) -> str:
+    def save_summary(self, user_id: str, course_id: str, data: dict, *, expected_foundation_revision=None,
+                     expected_supporting_snapshot=None, scope_revision=None) -> str:
         data.update({"userId": user_id, "courseId": course_id})
-        return self._flat_save("summaries", data, expected_foundation_revision=expected_foundation_revision)
+        return self._flat_save("summaries", data, expected_foundation_revision=expected_foundation_revision,
+            expected_supporting_snapshot=expected_supporting_snapshot, scope_revision=scope_revision)
 
     def get_summary(self, doc_id: str) -> dict:
         return self._flat_get("summaries", doc_id)
@@ -622,9 +698,11 @@ class FirebaseClient:
             ],
         }
 
-    def save_tutor_chat(self, user_id: str, course_id: str, data: dict, *, expected_foundation_revision=None) -> str:
+    def save_tutor_chat(self, user_id: str, course_id: str, data: dict, *, expected_foundation_revision=None,
+                        expected_supporting_snapshot=None, scope_revision=None) -> str:
         data.update({"userId": user_id, "courseId": course_id})
-        return self._flat_save("tutor_chats", data, expected_foundation_revision=expected_foundation_revision)
+        return self._flat_save("tutor_chats", data, expected_foundation_revision=expected_foundation_revision,
+            expected_supporting_snapshot=expected_supporting_snapshot, scope_revision=scope_revision)
 
     def get_tutor_chat(self, chat_id: str) -> dict:
         return self._flat_get("tutor_chats", chat_id)
@@ -635,7 +713,8 @@ class FirebaseClient:
     @local_locked
     def append_tutor_messages(self, user_id: str, course_id: str, chat_id: str,
                               expected_messages: list, new_messages: list, updated_at: int,
-                              *, foundation_revision: str = None, expected_foundation_revision=None, source_turn=None) -> dict:
+                              *, foundation_revision: str = None, expected_foundation_revision=None, source_turn=None,
+                              expected_supporting_snapshot=None, scope_revision=None) -> dict:
         """Atomically append one turn only to the exact authorized prior history."""
         validate_component(user_id, 'user ID')
         validate_component(course_id, 'course ID')
@@ -659,13 +738,18 @@ class FirebaseClient:
             if foundation_revision is not None:
                 data['foundationRevision'] = foundation_revision
             if source_turn is not None:
-                data['sourceTurns'] = [*chat.get('sourceTurns', []), deepcopy(source_turn)]
+                turn = deepcopy(source_turn)
+                if expected_supporting_snapshot is not None:
+                    turn['supportingSnapshot'] = deepcopy(expected_supporting_snapshot)
+                data['sourceTurns'] = [*chat.get('sourceTurns', []), turn]
             return data
 
         if self.use_local:
             self._assert_write_allowed(user_id, course_id)
             local = self._read_local_db()
             self._assert_foundation_current(user_id, course_id, expected_foundation_revision, local=local)
+            self._assert_supporting_snapshot(user_id, course_id, expected_supporting_snapshot,
+                                             local=local, scope_revision=scope_revision)
             course = local.get('courses', {}).get(course_id, {})
             chat = local.get('tutor_chats', {}).get(chat_id, {})
             data = authorize(course, chat)
@@ -682,6 +766,8 @@ class FirebaseClient:
         def append(transaction):
             self._assert_write_allowed(user_id, course_id, transaction)
             self._assert_foundation_current(user_id, course_id, expected_foundation_revision, transaction=transaction)
+            self._assert_supporting_snapshot(user_id, course_id, expected_supporting_snapshot,
+                                             transaction=transaction, scope_revision=scope_revision)
             course = course_ref.get(transaction=transaction)
             chat = chat_ref.get(transaction=transaction)
             current = chat.to_dict() or {} if chat.exists else {}
@@ -835,7 +921,21 @@ class FirebaseClient:
 
         completed_audio = [a for a in audio if a.get("status") == "completed" and a.get("insights")]
         completed_audio = self._select_sources(completed_audio, audio_ids)
-        audio_insights = [a.get("insights", {}) for a in completed_audio]
+        audio_insights = []
+        for recording in completed_audio:
+            insight = deepcopy(recording.get('insights', {}))
+            if recording.get('sourceType') == 'notes':
+                insight['sourceType'] = 'notes'
+                insight['sourceAttribution'] = 'student_reported'
+                if isinstance(insight.get('summary'), str) and insight['summary'].strip():
+                    insight['summary'] = 'Student notes report: ' + insight['summary']
+                for hint in insight.get('examHints', []):
+                    if isinstance(hint, dict) and isinstance(hint.get('hint'), str):
+                        hint['hint'] = 'Student notes report: ' + hint['hint']
+                for emphasis in insight.get('keyEmphasis', []):
+                    if isinstance(emphasis, dict) and isinstance(emphasis.get('topic'), str):
+                        emphasis['topic'] = 'Student notes report: ' + emphasis['topic']
+            audio_insights.append(insight)
 
         completed_hist = [h for h in historical if h.get("status") == "completed" and h.get("analysis")]
         completed_hist = self._select_sources(completed_hist, historical_exam_ids)
@@ -1409,6 +1509,24 @@ class FirebaseClient:
                                or confirmation.get('courseId') != course_id
                                or confirmation.get('revision') != revision):
             raise DataConflict('Lecture foundation confirmation changed. Confirm again and retry.')
+
+    def _assert_supporting_snapshot(self, user_id, course_id, snapshot, *, local=None,
+                                    transaction=None, scope_revision=None):
+        """Fence only selected supporting evidence in the caller's write transaction."""
+        if snapshot is None:
+            return  # Compatibility seam for internal writes not yet using supporting evidence.
+        if not scope_revision:
+            raise DataConflict('Selected lecture scope is required for a supporting snapshot')
+        if not isinstance(snapshot, dict) or not isinstance(snapshot.get('materials'), list):
+            raise DataConflict('Supporting snapshot is unavailable')
+        for entry in snapshot['materials']:
+            identity = entry.get('identity') if isinstance(entry, dict) else None
+            if (not isinstance(identity, dict) or identity.get('userId') != user_id
+                    or identity.get('courseId') != course_id):
+                raise DataConflict('Supporting snapshot belongs to another course')
+        from src.supporting.repository import SupportingRepository
+        SupportingRepository(self).assert_snapshot(snapshot, local=local, transaction=transaction,
+                                                    scope_revision=scope_revision)
 
     @local_locked
     def confirm_document_foundation(self, user_id: str, course_id: str, revision: str, *, require_current_documents=False) -> bool:
