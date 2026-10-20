@@ -119,6 +119,12 @@ const GEN_STEPS = [
 ];
 
 export default function SummaryPage() {
+  const { user } = useAuth();
+  const params = useParams();
+  return <SummaryPageContent key={JSON.stringify([user?.uid, params.id])} />;
+}
+
+function SummaryPageContent() {
   const { user, loading } = useAuth();
   const router = useRouter();
   const params = useParams();

@@ -12,11 +12,9 @@ export default function SupportingMaterialAction({ kind, materialId, courseId }:
   const { status, error, retry } = useSupportingAnalysis({ kind, materialId, courseId });
   const active = status && ["queued", "processing", "preparing", "extracting", "aligning"].includes(status.status);
   const retryable = status && (status.legacy || status.stale || ["failed", "incomplete"].includes(status.status));
-  const stage = status?.stage === "extracting" ? "Extracting source content…" : status?.stage === "aligning" ? "Comparing with lectures…" : status?.stage === "queued" ? "Uploaded; analysis is queued." : status?.status === "completed" ? "Analyzed" : "Processing";
+  const stage = status?.legacy ? "Legacy analysis is unverified." : status?.stale ? "Report is out of date. Reanalyze this material." : status?.status === "failed" ? "Failed" : status?.status === "incomplete" ? "Analysis incomplete" : status?.status === "completed" ? "Analyzed" : status?.stage === "extracting" ? "Extracting source content…" : status?.stage === "aligning" ? "Comparing with lectures…" : status?.stage === "queued" ? "Uploaded; analysis is queued." : active ? "Processing" : "Unknown";
   return <span className="inline-flex flex-wrap gap-2 items-center text-xs" onClick={event => event.stopPropagation()}>
-    {status && <span className={retryable ? "text-accent" : active ? "text-gold" : "text-sage"}>{t(stage)}{status.progress?.totalUnits !== null ? ` · ${status.progress.completedUnits}/${status.progress.totalUnits}` : ""}</span>}
-    {status?.stale && <span className="text-gold">{t("Report is out of date. Reanalyze this material.")}</span>}
-    {status?.status === "incomplete" && <span className="text-gold">{t("Analysis incomplete")}</span>}
+    {status && <span className={retryable ? "text-accent" : active ? "text-gold" : "text-sage"}>{t(stage)}{status.progress?.totalUnits != null ? ` · ${status.progress.completedUnits}/${status.progress.totalUnits}` : ""}</span>}
     {error && <span role="alert" className="text-accent">{error}</span>}
     {retryable && <button type="button" className="underline" onClick={() => void retry()}>{t(status?.legacy ? "Prepare material" : "Retry analysis")}</button>}
     {status?.reportRevision && <button type="button" className="underline" onClick={() => setOpen(true)}>{t("Supporting material report")}</button>}

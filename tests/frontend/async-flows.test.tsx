@@ -3,13 +3,14 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DocumentViewer from "../../src/components/DocumentViewer";
 import ExamPage from "../../src/app/course/[id]/exam/[examId]/page";
+import ExamGenerationPage from "../../src/app/course/[id]/exam/page";
 import TutorPage from "../../src/app/course/[id]/tutor/page";
 import SummaryPage from "../../src/app/course/[id]/summary/page";
 import FlashcardsPage from "../../src/app/course/[id]/flashcards/page";
 import ReorderableList from "../../src/components/ReorderableList";
 import CoursePage from "../../src/app/course/[id]/page";
 
-const mocks = vi.hoisted(() => ({ api: vi.fn(), file: vi.fn(), object: vi.fn(), recent: vi.fn(), updateCourse: vi.fn(), user: { uid: "u1" }, course: { id: "c1", userId: "u1", code: "CS", name: "Course", color: "sage" } }));
+const mocks = vi.hoisted(() => ({ api: vi.fn(), file: vi.fn(), object: vi.fn(), recent: vi.fn(), updateCourse: vi.fn(), user: { uid: "u1" }, routeId: "c1", course: { id: "c1", userId: "u1", code: "CS", name: "Course", color: "sage" } }));
 vi.mock("@/lib/api", () => ({ apiFetch: mocks.api, apiJson: async (url: string, init?: RequestInit) => {
   // These regressions exercise saved content and asynchronous work in a course
   // whose document prerequisite has already been satisfied.
@@ -22,7 +23,7 @@ vi.mock("@/lib/activity", () => ({ useTrackRecent: mocks.recent }));
 vi.mock("@/components/Navbar", () => ({ default: () => null }));
 vi.mock("@/components/Sidebar", () => ({ default: () => null }));
 vi.mock("@/components/BookmarkButton", () => ({ default: () => null }));
-vi.mock("next/navigation", () => ({ useParams: () => ({ id: "c1", examId: "e1" }), useSearchParams: () => new URLSearchParams(), useRouter: () => ({ push: vi.fn() }) }));
+vi.mock("next/navigation", () => ({ useParams: () => ({ id: mocks.routeId, examId: "e1" }), useSearchParams: () => new URLSearchParams(), useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("next/link", () => ({ default: ({ children, ...props }: any) => <a {...props}>{children}</a> }));
 
 const response = (data: unknown, ok = true) => ({ ok, status: ok ? 200 : 500, json: async () => data });
@@ -31,6 +32,7 @@ function deferred<T>() { let resolve!: (v: T) => void; const promise = new Promi
 
 beforeEach(() => {
   vi.resetAllMocks();
+  mocks.routeId = "c1"; mocks.user = { uid: "u1" }; mocks.course = { id: "c1", userId: "u1", code: "CS", name: "Course", color: "sage" };
   vi.stubGlobal("alert", vi.fn()); vi.stubGlobal("confirm", () => true);
   URL.revokeObjectURL = vi.fn();
   HTMLElement.prototype.scrollTo = vi.fn();
@@ -106,6 +108,25 @@ describe("authenticated previews", () => {
 });
 
 describe("tutor request ownership", () => {
+  it("keeps a real pending tutor request alive through an unchanged supporting status refresh", async () => {
+    const pending = deferred<any>(); let sendSignal: AbortSignal | undefined;
+    mocks.api.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes("historical-exams/")) return response({ historical_exams: [{ id: "h1", title: "Pending exam", status: "queued", jobId: "j1" }] });
+      if (init?.method === "POST") { sendSignal = init.signal as AbortSignal; return pending.promise; }
+      return response({});
+    });
+    render(<TutorPage />);
+    await screen.findByRole("button", { name: /pending exam/i });
+    fireEvent.click(await screen.findByRole("button", { name: "Explain the hardest concept simply." }));
+    await waitFor(() => expect(sendSignal).toBeDefined());
+    fireEvent.click(screen.getByRole("button", { name: /pending exam/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh material status" }));
+    await waitFor(() => expect(mocks.api.mock.calls.filter(([url]) => String(url).includes("historical-exams/")).length).toBeGreaterThan(1));
+    expect(sendSignal?.aborted).toBe(false);
+    await act(async () => pending.resolve(response({ reply: "Reply after refresh", chat_id: "chat1" })));
+    await screen.findByText("Reply after refresh");
+    expect(sendSignal?.aborted).toBe(false);
+  });
   it("discards a pending reply after opening a different saved conversation", async () => {
     const pending = deferred<any>();
     mocks.api.mockImplementation(async (url: string, init?: RequestInit) => {
@@ -216,6 +237,26 @@ describe("tutor request ownership", () => {
 });
 
 describe("study loaders", () => {
+  it.each([["summary", SummaryPage], ["exam", ExamGenerationPage], ["flashcards", FlashcardsPage], ["tutor", TutorPage]] as const)("clears %s supporting rows immediately on a course switch", async (_, Page) => {
+    mocks.api.mockImplementation(async (url: string) => {
+      if (url.includes("historical-exams/")) return response({ historical_exams: [{ id: mocks.routeId === "c1" ? "old" : "new", title: mocks.routeId === "c1" ? "Old private exam" : "New course exam", status: "queued", jobId: "j1" }] });
+      return response({});
+    });
+    const view = render(<Page />);
+    await screen.findByText("Old private exam");
+    mocks.routeId = "c2"; mocks.course = { id: "c2", userId: "u1", code: "CS", name: "New course", color: "sage" };
+    view.rerender(<Page />);
+    expect(screen.queryByText("Old private exam")).toBeNull();
+    await screen.findByText("New course exam");
+  });
+  it("clears a summary source from the previous account before the next load resolves", async () => {
+    mocks.api.mockImplementation(async (url: string) => url.includes("historical-exams/") ? response({ historical_exams: [{ id: "old", title: "Old account exam", status: "queued", jobId: "j1" }] }) : response({}));
+    const view = render(<SummaryPage />);
+    await screen.findByText("Old account exam");
+    mocks.user = { uid: "u2" }; mocks.course = { id: "c1", userId: "u2", code: "CS", name: "Course", color: "sage" };
+    view.rerender(<SummaryPage />);
+    expect(screen.queryByText("Old account exam")).toBeNull();
+  });
   it.each([["summary", SummaryPage], ["flashcards", FlashcardsPage]] as const)("tracks a saved %s opened with the keyboard", async (kind, Page) => {
     mocks.api.mockImplementation(async (url: string) => {
       if (url.includes("/detail/")) return response(kind === "summary" ? { summary: { title: "Saved study", sections: [] } } : { set: { title: "Saved study", cards: [{ front: "Question", back: "Answer" }] } });

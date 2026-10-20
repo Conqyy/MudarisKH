@@ -84,6 +84,12 @@ const GEN_STEPS = [
 ];
 
 export default function FlashcardsPage() {
+  const { user } = useAuth();
+  const params = useParams();
+  return <FlashcardsPageContent key={JSON.stringify([user?.uid, params.id])} />;
+}
+
+function FlashcardsPageContent() {
   const { user, loading } = useAuth();
   const router = useRouter();
   const params = useParams();

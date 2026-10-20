@@ -80,6 +80,12 @@ const GEN_STEPS = [
 ];
 
 export default function ExamPage() {
+  const { user } = useAuth();
+  const params = useParams();
+  return <ExamPageContent key={JSON.stringify([user?.uid, params.id])} />;
+}
+
+function ExamPageContent() {
   const { user, loading } = useAuth();
   const router = useRouter();
   const params = useParams();

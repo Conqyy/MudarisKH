@@ -18,13 +18,13 @@ it('discards a late result when material changes while a status request is pendi
   expect(view.result.current.report).toBeNull();
 });
 
-it('polls a queued job without touching an independent generation request', async () => {
+it('polls a queued job and stops when it reaches a terminal status', async () => {
   vi.useFakeTimers();
-  const generation = new AbortController();
   mocks.status.mockResolvedValueOnce(state('t1')).mockResolvedValueOnce(state('t1', 'completed'));
   const view = renderHook(() => useSupportingAnalysis({ kind: 'tutorial', materialId: 't1', courseId: 'c1' }));
   await act(async () => { await Promise.resolve(); await Promise.resolve(); });
   await act(async () => { await vi.advanceTimersByTimeAsync(2500); });
   expect(view.result.current.status?.status).toBe('completed');
-  expect(generation.signal.aborted).toBe(false);
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(mocks.status).toHaveBeenCalledTimes(2);
 });

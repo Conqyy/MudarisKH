@@ -81,6 +81,12 @@ const SUGGESTIONS = [
 ];
 
 export default function TutorPage() {
+  const { user } = useAuth();
+  const params = useParams();
+  return <TutorPageContent key={JSON.stringify([user?.uid, params.id])} />;
+}
+
+function TutorPageContent() {
   const { user, loading } = useAuth();
   const router = useRouter();
   const params = useParams();
