@@ -408,6 +408,7 @@ class SupportingLibrary:
             except ValueError:
                 pass
         return {'materialId': identity['materialId'], 'kind': identity['kind'],
+            'jobId': job.get('id') if not legacy else None,
             'status': analysis.get('state', 'legacy'), 'stage': stage, 'progress': progress,
             'sourceRevision': source_revision, 'reportRevision': report_revision,
             'scopeRevision': analysis.get('scopeRevision'), 'coverage': coverage,

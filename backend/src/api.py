@@ -1089,15 +1089,19 @@ def _run_audio_pipeline(rec_id, course_id, *, file_bytes=None, audio_ext=None,
         foundation = _require_document_foundation(course_id, owner, record.get('foundationRevision'))
     except HTTPException:
         if db_client.audio_job_exists(owner, rec_id):
-            db_client.update_audio_recording(rec_id, {'status': 'failed',
-                'errorMessage': 'Upload and confirm all lecture documents, then retry this recording.'})
+            try:
+                db_client.update_audio_recording(rec_id, {'status': 'failed',
+                    'errorMessage': 'Upload and confirm all lecture documents, then retry this recording.'},
+                    expected_legacy_audio=True)
+            except DataConflict:
+                pass  # An upgraded managed job owns the row now.
         return False
 
     def checkpoint(data):
         if not db_client.audio_job_exists(owner, rec_id):
             raise FileNotFoundError("The recording or course was deleted.")
         kwargs = {'expected_foundation_revision': foundation['revision']} if data.get('status') == 'completed' else {}
-        db_client.update_audio_recording(rec_id, data, **kwargs)
+        db_client.update_audio_recording(rec_id, data, expected_legacy_audio=True, **kwargs)
 
     if not _AUDIO_WORK_SLOTS.acquire(timeout=1200):
         return False
@@ -1144,13 +1148,16 @@ def _run_audio_pipeline(rec_id, course_id, *, file_bytes=None, audio_ext=None,
                     "foundationRevision": foundation['revision'],
                     "errorMessage": "", "processedAt": int(_time.time() * 1000)})
         return True
-    except FileNotFoundError:
-        # A purge wins over an in-flight model request. Never recreate its row.
+    except (FileNotFoundError, DataConflict):
+        # A purge or managed upgrade wins over an in-flight legacy worker.
         return False
     except Exception:
         logger.exception("Audio processing failed")
         if db_client.audio_job_exists(owner, rec_id):
-            checkpoint({"status": "failed", "errorMessage": "Processing failed. Your saved text can be retried."})
+            try:
+                checkpoint({"status": "failed", "errorMessage": "Processing failed. Your saved text can be retried."})
+            except (FileNotFoundError, DataConflict):
+                pass
         return False
     finally:
         if workdir:
@@ -1233,15 +1240,41 @@ def _supporting_projection(row, kind):
     if row.get('supportingAnalysis'):
         status = supporting_library.public_status(identity)
     else:
-        status = {'materialId': row['id'], 'kind': kind, 'status': 'legacy',
+        status = {'materialId': row['id'], 'kind': kind, 'jobId': None, 'status': 'legacy',
             'stage': 'upgrade_required',
             'progress': {'completedUnits': 0, 'totalUnits': None,
                          'completedRequirements': 0, 'totalRequirements': None},
             'sourceRevision': None, 'reportRevision': None, 'scopeRevision': None,
             'coverage': None, 'legacy': True, 'stale': True,
             'errorMessage': row.get('errorMessage')}
-    return {**status, **{key: row.get(key) for key in
+    return {**status, 'id': row['id'], 'courseId': row['courseId'], **{key: row.get(key) for key in
         ('title', 'fileSize', 'uploadedAt', 'processedAt', 'sourceType', 'lectureId') if key in row}}
+
+
+def _legacy_public_content(value):
+    """Retain saved teaching content without exporting internal storage metadata."""
+    if isinstance(value, list):
+        return [_legacy_public_content(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _legacy_public_content(item) for key, item in value.items()
+                if isinstance(key, str) and not any(part in key.lower() for part in
+                    ('path', 'url', 'token', 'checkpoint', 'artifact', 'workerid', 'jobid'))
+                and key.lower() not in ('processingjob', 'supportinganalysis')}
+    return value
+
+
+@app.get('/api/supporting/{kind}/{material_id}/legacy-analysis')
+def get_supporting_legacy_analysis(kind: str, material_id: str, course_id: str = None,
+                                   uid: str = Depends(require_uid)):
+    identity = _supporting_identity(kind, material_id, uid, course_id)
+    try:
+        row = supporting_repository.get_owned(identity)
+    except (DataConflict, ValueError) as exc:
+        raise HTTPException(status_code=404, detail='Supporting material not found') from exc
+    return {'id': material_id, 'materialId': material_id, 'courseId': identity['courseId'],
+            'kind': kind, 'legacy': True, 'verified': False,
+            **{key: _legacy_public_content(row[key]) for key in
+               ('title', 'sourceType', 'analysis', 'insights', 'transcript') if key in row}}
 
 
 @app.post('/api/supporting/{kind}/{material_id}/prepare', status_code=202)
@@ -1284,9 +1317,49 @@ def get_supporting_source(kind: str, material_id: str, revision: str, unit_id: s
     ref = {'kind': kind, 'materialId': material_id, 'sourceRevision': revision, 'unitId': unit_id}
     try:
         unit = supporting_library.read_refs(identity, [ref])[0]
+        manifest = supporting_library.load_source(identity, revision)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail='Supporting source not found') from exc
-    return {'ref': ref, 'unit': unit}
+    page = unit.get('position') if (manifest['fileType'] == 'pdf' and unit.get('kind') == 'page') else None
+    return {'ref': ref, 'unit': unit, 'originalPage': page if type(page) is int and page > 0 else None}
+
+
+def _supporting_original_media(file_type: str, body: bytes):
+    """Label the immutable original from its bytes, falling back to a neutral type."""
+    if file_type == 'notes':
+        return 'text/plain; charset=utf-8', 'txt'
+    if file_type == 'pdf' and body.startswith(b'%PDF-'):
+        return 'application/pdf', 'pdf'
+    if file_type in ('docx', 'pptx') and body.startswith(b'PK'):
+        return ({'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                 'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation'}[file_type], file_type)
+    if file_type == 'image':
+        if body.startswith(b'\x89PNG\r\n\x1a\n'):
+            return 'image/png', 'png'
+        if body.startswith(b'\xff\xd8\xff'):
+            return 'image/jpeg', 'jpg'
+        if body.startswith((b'GIF87a', b'GIF89a')):
+            return 'image/gif', 'gif'
+        if body[:4] == b'RIFF' and body[8:12] == b'WEBP':
+            return 'image/webp', 'webp'
+        if body.startswith(b'BM'):
+            return 'image/bmp', 'bmp'
+        if body[4:8] == b'ftyp' and body[8:12] in (b'heic', b'heix', b'hevc', b'hevx', b'mif1'):
+            return 'image/heic', 'heic'
+    if file_type == 'audio':
+        if body[:4] == b'RIFF' and body[8:12] == b'WAVE':
+            return 'audio/wav', 'wav'
+        if body.startswith(b'ID3') or (len(body) > 1 and body[0] == 0xff and body[1] & 0xe0 == 0xe0):
+            return 'audio/mpeg', 'mp3'
+        if body[4:8] == b'ftyp':
+            brand = body[8:12]
+            if brand in (b'M4A ', b'M4B '):
+                return 'audio/mp4', 'm4a'
+            if brand == b'qt  ':
+                return 'video/quicktime', 'mov'
+            if brand in (b'isom', b'iso2', b'mp41', b'mp42'):
+                return 'video/mp4', 'mp4'
+    return 'application/octet-stream', 'bin'
 
 
 @app.get('/api/supporting/{kind}/{material_id}/original')
@@ -1298,12 +1371,11 @@ def get_supporting_original(kind: str, material_id: str, revision: str, course_i
         body = supporting_library.original_bytes(identity, revision)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail='Supporting original not found') from exc
-    media = {'pdf': 'application/pdf', 'image': 'image/png', 'docx':
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'pptx':
-        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-        'audio': 'audio/mpeg', 'notes': 'text/plain; charset=utf-8'}.get(manifest['fileType'], 'application/octet-stream')
+    media, extension = _supporting_original_media(manifest['fileType'], body)
+    disposition = ('inline' if media == 'application/pdf' or media.startswith(
+        ('image/', 'audio/', 'video/')) else 'attachment')
     return Response(body, media_type=media, headers={
-        'Content-Disposition': f'attachment; filename="{material_id}.{manifest["fileType"]}"'})
+        'Content-Disposition': f'{disposition}; filename="{material_id}.{extension}"'})
 
 
 def _run_document_pipeline(doc_id):
@@ -1509,7 +1581,8 @@ def reanalyze_audio_recording(rec_id: str, uid: str = Depends(require_uid)):
         _supporting_runner.submit(identity)
         return accepted
     foundation = _require_document_foundation(rec.get('courseId', ''), uid)
-    db_client.update_audio_recording(rec_id, {'foundationRevision': foundation['revision']})
+    db_client.update_audio_recording(rec_id, {'foundationRevision': foundation['revision']},
+                                     expected_legacy_audio=True)
 
     transcript = (rec.get("transcript") or "").strip()
     if len(transcript) < 20:
@@ -1526,7 +1599,8 @@ def reanalyze_audio_recording(rec_id: str, uid: str = Depends(require_uid)):
             ),
         )
 
-    db_client.update_audio_recording(rec_id, {"status": "analyzing", "errorMessage": ""})
+    db_client.update_audio_recording(rec_id, {"status": "analyzing", "errorMessage": ""},
+                                     expected_legacy_audio=True)
 
     is_notes = rec.get("sourceType") == "notes"
     text = _frame_notes(transcript) if is_notes else transcript
@@ -1547,15 +1621,19 @@ def reanalyze_audio_recording(rec_id: str, uid: str = Depends(require_uid)):
             "status": "completed",
             "errorMessage": "",
             "processedAt": int(_time.time() * 1000),
-        }, expected_foundation_revision=foundation['revision'])
+        }, expected_foundation_revision=foundation['revision'], expected_legacy_audio=True)
         logger.info(f"Audio/notes record {rec_id} re-analyzed successfully.")
         return {"status": "success", "recording_id": rec_id, "insights": insights}
     except HTTPException as exc:
-        db_client.update_audio_recording(rec_id, {'status': 'failed', 'errorMessage': str(exc.detail)})
+        db_client.update_audio_recording(rec_id, {'status': 'failed', 'errorMessage': str(exc.detail)},
+                                         expected_legacy_audio=True)
+        raise
+    except DataConflict:
         raise
     except Exception as e:
         logger.error(f"Re-analysis failed for {rec_id}: {e}")
-        db_client.update_audio_recording(rec_id, {"status": "failed", "errorMessage": "Processing failed. Your saved material is available to retry."})
+        db_client.update_audio_recording(rec_id, {"status": "failed", "errorMessage": "Processing failed. Your saved material is available to retry."},
+                                         expected_legacy_audio=True)
         raise HTTPException(status_code=500, detail="Processing could not finish. Please retry or check backend configuration.")
 
 

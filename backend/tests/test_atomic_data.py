@@ -63,6 +63,33 @@ def cloud_database(monkeypatch):
     return client
 
 
+@pytest.mark.parametrize('database_fixture', ['database', 'cloud_database'])
+@pytest.mark.parametrize('changes', [
+    {'status': 'completed', 'insights': {'summary': 'old'}},
+    {'status': 'failed', 'errorMessage': 'old worker failed'},
+    {'status': 'analyzing', 'transcript': 'old transcript'},
+])
+def test_legacy_audio_update_rechecks_managed_marker_inside_transaction(request, database_fixture, changes):
+    from src.database.firebase_client import DataConflict
+
+    db = request.getfixturevalue(database_fixture)
+    original = {'userId': 'u', 'courseId': 'c', 'status': 'processing'}
+    if db.use_local:
+        local = db._read_local_db()
+        local['audio_recordings'] = {'recording': original}
+        db._write_local_db(local)
+    else:
+        db.db.rows['audio_recordings/recording'] = original.copy()
+    assert db.get_audio_recording('recording')['status'] == 'processing'
+    db.update_audio_recording('recording', {'status': 'transcribing'}, expected_legacy_audio=True)
+    db.update_audio_recording('recording', {'supportingAnalysis': {'version': 1, 'state': 'queued'}})
+    with pytest.raises(DataConflict, match='managed|legacy'):
+        db.update_audio_recording('recording', changes, expected_legacy_audio=True)
+    row = db.get_audio_recording('recording')
+    assert row['status'] == 'transcribing' and row['supportingAnalysis']['version'] == 1
+    assert not set(changes) - {'status'} & set(row)
+
+
 @pytest.fixture
 def database():
     with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:

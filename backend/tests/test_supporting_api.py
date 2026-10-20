@@ -52,6 +52,35 @@ def test_source_echoes_complete_typed_reference(api_module, monkeypatch):
     api.app.dependency_overrides.clear()
 
 
+def test_pdf_source_exposes_verified_original_page_locator(api_module, monkeypatch):
+    api = api_module
+    _auth(monkeypatch, api)
+    api.db_client.get_historical_exam.return_value = {
+        'id': 'm', 'userId': 'owner', 'courseId': 'course'}
+    api.supporting_library = MagicMock()
+    api.supporting_library.read_refs.return_value = [{
+        'unitId': 'p0007', 'position': 7, 'kind': 'page', 'text': '',
+        'visualText': '', 'visualAssets': [], 'disposition': 'readable', 'timing': None}]
+    api.supporting_library.load_source.return_value = {'fileType': 'pdf'}
+    with TestClient(api.app) as client:
+        response = client.get('/api/supporting/historical_exam/m/source?course_id=course&revision=' +
+                              'a'*64 + '&unit_id=p0007')
+    assert response.status_code == 200
+    assert response.json()['originalPage'] == 7
+    api.app.dependency_overrides.clear()
+
+
+def test_legacy_worker_failure_update_requests_atomic_legacy_fence(api_module, monkeypatch):
+    api = api_module
+    api.db_client.get_audio_recording.return_value = {
+        'id': 'm', 'userId': 'owner', 'courseId': 'course'}
+    api.db_client.audio_job_exists.return_value = True
+    monkeypatch.setattr(api, '_require_document_foundation', lambda *args: (_ for _ in ()).throw(
+        api.HTTPException(status_code=409, detail='locked')))
+    assert api._run_audio_pipeline('m', 'course') is False
+    assert api.db_client.update_audio_recording.call_args.kwargs['expected_legacy_audio'] is True
+
+
 def test_report_page_requires_owned_exact_revision_and_caps_limit(api_module, monkeypatch):
     api = api_module
     _auth(monkeypatch, api)
@@ -74,15 +103,41 @@ def test_original_read_returns_exact_adopted_bytes_without_current_foundation(ap
         "id": "m", "userId": "owner", "courseId": "course"}
     api.supporting_library = MagicMock()
     api.supporting_library.load_source.return_value = {"fileType": "pdf"}
-    api.supporting_library.original_bytes.return_value = b"%PDF exact adopted bytes"
+    api.supporting_library.original_bytes.return_value = b"%PDF-1.4 exact adopted bytes"
     with TestClient(api.app) as client:
         response = client.get(
             f"/api/supporting/tutorial/m/original?course_id=course&revision={revision}")
     assert response.status_code == 200
-    assert response.content == b"%PDF exact adopted bytes"
+    assert response.content == b"%PDF-1.4 exact adopted bytes"
     assert response.headers["content-type"] == "application/pdf"
+    assert response.headers['content-disposition'].startswith('inline;')
     api.supporting_library.original_bytes.assert_called_once_with({
         "userId": "owner", "courseId": "course", "kind": "tutorial", "materialId": "m"}, revision)
+    api.app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize('kind,file_type,body,mime,extension', [
+    ('historical_exam', 'image', b'\xff\xd8\xff\xe0' + b'jpeg', 'image/jpeg', '.jpg'),
+    ('audio', 'audio', b'RIFF\x04\x00\x00\x00WAVEfmt ', 'audio/wav', '.wav'),
+    ('audio', 'audio', b'unknown exact bytes', 'application/octet-stream', '.bin'),
+])
+def test_original_read_labels_verified_bytes_honestly(api_module, monkeypatch, kind, file_type,
+                                                      body, mime, extension):
+    api = api_module
+    _auth(monkeypatch, api)
+    row = {'id': 'm', 'userId': 'owner', 'courseId': 'course', 'audioExt': 'mp3'}
+    getter = api.db_client.get_historical_exam if kind == 'historical_exam' else api.db_client.get_audio_recording
+    getter.return_value = row
+    api.supporting_library = MagicMock()
+    api.supporting_library.load_source.return_value = {'fileType': file_type}
+    api.supporting_library.original_bytes.return_value = body
+    with TestClient(api.app) as client:
+        response = client.get('/api/supporting/' + kind + '/m/original?course_id=course&revision=' + 'a'*64)
+    assert response.status_code == 200
+    assert response.content == body and response.headers['content-type'] == mime
+    assert response.headers['content-disposition'].endswith(f'm{extension}"')
+    if mime.startswith(('image/', 'audio/')):
+        assert response.headers['content-disposition'].startswith('inline;')
     api.app.dependency_overrides.clear()
 
 
@@ -107,6 +162,99 @@ def test_managed_list_projection_does_not_expose_private_row_fields(api_module, 
     assert result["title"] == "Practice"
     assert "storagePath" not in result and "fileUrl" not in result
     assert "processingJob" not in result and "supportingAnalysis" not in result
+
+
+@pytest.mark.parametrize('route,method,kind', [
+    ('/api/historical-exams/course', 'get_course_historical_exams', 'historical_exam'),
+    ('/api/tutorials/course', 'get_course_tutorials', 'tutorial'),
+    ('/api/audio/course', 'get_course_audio_recordings', 'audio'),
+])
+def test_compact_lists_preserve_safe_identity_and_job_aliases(api_module, monkeypatch, route, method, kind):
+    api = api_module
+    _auth(monkeypatch, api)
+    getter = {'historical_exam': 'get_course_historical_exams',
+              'tutorial': 'get_course_tutorials', 'audio': 'get_course_audio_recordings'}[kind]
+    monkeypatch.setattr(api.db_client, getter, lambda course_id, user_id=None: [{
+        'id': 'm', 'userId': 'owner', 'courseId': 'course', 'title': 'Saved',
+        'processingJob': {'id': 'opaque-job', 'claimToken': 'secret'},
+        'supportingAnalysis': {'version': 1}, 'storagePath': 'private/path',
+        'analysis': {'private': 'large'}, 'insights': {'private': 'large'},
+    }])
+    api.supporting_library = MagicMock()
+    api.supporting_library.public_status.return_value = {
+        'materialId': 'm', 'kind': kind, 'jobId': 'opaque-job', 'status': 'processing',
+        'stage': 'extracting', 'progress': {}, 'sourceRevision': None,
+        'reportRevision': None, 'scopeRevision': None, 'coverage': None,
+        'legacy': False, 'stale': False, 'errorMessage': None}
+    with TestClient(api.app) as client:
+        response = client.get(route)
+    assert response.status_code == 200
+    item = next(value for value in response.json().values() if isinstance(value, list))[0]
+    assert (item['id'], item['courseId'], item['materialId'], item['jobId']) == (
+        'm', 'course', 'm', 'opaque-job')
+    assert not {'storagePath', 'analysis', 'insights', 'processingJob', 'claimToken'} & set(item)
+    api.app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize('kind,getter,payload', [
+    ('historical_exam', 'get_historical_exam', {'analysis': {'topicWeights': [{'topic': 'Trees'}]}}),
+    ('tutorial', 'get_tutorial', {'analysis': {'problems': [{'text': 'Explain trees'}]}}),
+    ('notes', 'get_audio_recording', {'insights': {'keyEmphasis': [{'quote': 'The lecturer said trees matter'}]},
+                                      'transcript': '  The lecturer said trees matter  ', 'sourceType': 'notes'}),
+])
+def test_legacy_analysis_is_owned_readable_when_foundation_locked(api_module, monkeypatch, kind, getter, payload):
+    api = api_module
+    _auth(monkeypatch, api)
+    row = {'id': 'm', 'userId': 'owner', 'courseId': 'course', 'title': 'Saved',
+           'storagePath': 'private/path', 'processingJob': {'claimToken': 'secret'}, **payload}
+    monkeypatch.setattr(api.db_client, getter, lambda material_id: row)
+    api.supporting_repository = MagicMock()
+    api.supporting_repository.get_owned.side_effect = lambda identity: row.copy()
+    monkeypatch.setattr(api, '_require_document_foundation', lambda *args: (_ for _ in ()).throw(
+        AssertionError('saved legacy reads must not require current foundation')))
+    with TestClient(api.app) as client:
+        response = client.get(f'/api/supporting/{kind}/m/legacy-analysis?course_id=course')
+        wrong_course = client.get(f'/api/supporting/{kind}/m/legacy-analysis?course_id=other')
+        row['userId'] = 'other'
+        foreign = client.get(f'/api/supporting/{kind}/m/legacy-analysis?course_id=course')
+    assert response.status_code == 200
+    body = response.json()
+    assert body['legacy'] is True and body['verified'] is False
+    assert body['id'] == body['materialId'] == 'm' and body['courseId'] == 'course'
+    assert body['title'] == 'Saved'
+    for field, value in payload.items():
+        assert body[field] == value
+    assert not {'storagePath', 'processingJob', 'claimToken', 'userId'} & set(body)
+    assert wrong_course.status_code == 404 and foreign.status_code == 404
+    api.app.dependency_overrides.clear()
+
+
+def test_legacy_analysis_drops_nested_internal_paths_and_claims(api_module, monkeypatch):
+    api = api_module
+    _auth(monkeypatch, api)
+    api.db_client.get_tutorial.return_value = {
+        'id': 'm', 'userId': 'owner', 'courseId': 'course',
+        'analysis': {'topic': 'Trees', 'storagePath': 'private/path',
+                     'nested': [{'claimToken': 'secret', 'jobId': 'private-old-job', 'text': 'Keep'}]}}
+    api.supporting_repository = MagicMock()
+    api.supporting_repository.get_owned.return_value = api.db_client.get_tutorial.return_value
+    with TestClient(api.app) as client:
+        response = client.get('/api/supporting/tutorial/m/legacy-analysis?course_id=course')
+    assert response.status_code == 200
+    assert response.json()['analysis'] == {'topic': 'Trees', 'nested': [{'text': 'Keep'}]}
+    api.app.dependency_overrides.clear()
+
+
+def test_legacy_analysis_rejects_row_replaced_after_owned_lookup(api_module, monkeypatch):
+    api = api_module
+    _auth(monkeypatch, api)
+    api.db_client.get_tutorial.return_value = {'id': 'm', 'userId': 'owner', 'courseId': 'course'}
+    api.supporting_repository = MagicMock()
+    api.supporting_repository.get_owned.side_effect = api.DataConflict('material changed')
+    with TestClient(api.app) as client:
+        response = client.get('/api/supporting/tutorial/m/legacy-analysis?course_id=course')
+    assert response.status_code == 404
+    api.app.dependency_overrides.clear()
 
 
 def test_prepare_returns_accepted_job_metadata(api_module, monkeypatch):

@@ -265,7 +265,7 @@ def test_public_status_reports_real_unit_and_requirement_progress(monkeypatch):
     row = {
         "supportingAnalysis": {"version": 1, "state": "completed", "sourceRevision": "a" * 64,
             "reportRevision": "b" * 64, "scopeRevision": "c" * 64, "analysisId": "private"},
-        "processingJob": {"stage": "completed", "cursor": {"units": 9}},
+        "processingJob": {"id": "opaque-job", "stage": "completed", "cursor": {"units": 9}},
         "error": None,
     }
     library = SupportingLibrary(SimpleNamespace(get_owned=lambda identity: deepcopy(row), database=None))
@@ -282,8 +282,9 @@ def test_public_status_reports_real_unit_and_requirement_progress(monkeypatch):
             "checkedTopicIds": ["t1"], "unresolvedTopicIds": []},
     })
     status = library.public_status(IDENTITY)
-    assert set(status) == {"materialId", "kind", "status", "stage", "progress", "sourceRevision",
+    assert set(status) == {"materialId", "kind", "jobId", "status", "stage", "progress", "sourceRevision",
                            "reportRevision", "scopeRevision", "coverage", "legacy", "stale", "errorMessage"}
+    assert status['jobId'] == 'opaque-job'
     assert status["progress"] == {"completedUnits": 2, "totalUnits": 2,
                                   "completedRequirements": 3, "totalRequirements": 3}
 

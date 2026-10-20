@@ -9,6 +9,7 @@ from tests.test_document_job_storage import job_db
 from tests.foundation_fixtures import lecture_document
 from src.utils.course_foundation import foundation_material_revision
 from src.supporting.repository import SupportingRepository
+from src.supporting.library import SupportingLibrary
 from src.supporting.contracts import CLAIM_LEASE_MS
 
 
@@ -69,6 +70,18 @@ def test_retry_preserves_foundation_and_fences_old_claim(repository):
     assert retry['id'] != job['id']
     assert not repository.checkpoint(identity(), claim, changes={}, now_ms=now+2)
     assert repository.database.get_document_foundation('u', 'c')['revision'] == repository.test_foundation_revision
+
+
+def test_public_job_id_rotates_on_same_source_retry_without_claim_details(repository):
+    first, claim, now = queue_claim(repository)
+    library = SupportingLibrary(repository)
+    initial = library.public_status(identity())
+    retry = repository.queue(identity(), input_revision='b'*64, source_digest='a'*64,
+                             foundation_revision=repository.test_foundation_revision, now_ms=now+1)
+    current = library.public_status(identity())
+    assert initial['jobId'] == first['id']
+    assert current['jobId'] == retry['id'] != first['id']
+    assert not {'claimToken', 'checkpointRevision', 'inventoryRevision', 'analysisId'} & set(current)
 
 
 @pytest.mark.parametrize('change', ['foundation', 'course', 'account', 'source'])
