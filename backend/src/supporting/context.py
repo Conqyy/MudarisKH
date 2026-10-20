@@ -4,7 +4,7 @@ import re
 import unicodedata
 
 from src.supporting.alignment_evidence import context_components
-from src.supporting.contracts import digest, validate_identity
+from src.supporting.contracts import canonical_bytes, digest, validate_identity
 from src.utils.storage_paths import validate_component
 
 
@@ -30,7 +30,14 @@ def _qualified_request(query):
                and re.search(r'\b(conflict|contradict|outside|out.of.scope|unsupported|uncertain|unverified)\b', query, re.I))
     arabic = (any(word in query for word in ('ناقش', 'اشرح', 'قارن', 'حلل', 'وضح'))
               and any(word in query for word in ('تعارض', 'تناقض', 'خارج', 'غير مؤكد', 'غير موثق')))
-    return bool(english or arabic)
+    english_question = (re.search(r'\b(is|does|has)\b', query, re.I)
+                        and re.search(r'\b(this|that|the)\s+(past\s+)?(question|exam|item)\b', query, re.I)
+                        and re.search(r'\b(contradict\w*|conflict\w*)\b', query, re.I)
+                        and re.search(r'\b(lecture|course|source)\b', query, re.I))
+    arabic_question = ('هل' in query and any(word in query for word in ('السؤال', 'الاختبار'))
+                       and any(word in query for word in ('المحاضرة', 'المقرر', 'المصدر'))
+                       and any(word in query for word in ('يتعارض', 'يتناقض')))
+    return bool(english or arabic or english_question or arabic_question)
 
 
 def _scope_snapshot(scope):
@@ -40,6 +47,55 @@ def _scope_snapshot(scope):
                            ('id', 'title', 'sourceRevision', 'guideRevision')}
                           for document in scope.get('documents', [])],
             'allowedRefs': deepcopy(scope.get('allowedRefs', []))}
+
+
+def _scope_refs(refs):
+    if not isinstance(refs, list): raise ValueError('Selected lecture scope references are missing')
+    keys = [canonical_bytes(ref) for ref in refs]
+    if len(keys) != len(set(keys)):
+        raise ValueError('Selected lecture scope has duplicate references')
+    return set(keys)
+
+
+def _scope_revision(documents):
+    if not isinstance(documents, list) or not documents:
+        raise ValueError('Selected lecture scope documents are missing')
+    try:
+        ids = [document['id'] for document in documents]
+        revision = digest([{key: document[key] for key in
+                            ('id', 'sourceRevision', 'guideRevision')} for document in documents])
+    except (KeyError, TypeError) as exc:
+        raise ValueError('Selected lecture scope identity is incomplete') from exc
+    if len(ids) != len(set(ids)):
+        raise ValueError('Selected lecture scope has duplicate documents')
+    return revision
+
+
+def _checked_scope(scope, report, descriptor, expected, job, *, match_selected):
+    reported = report.get('scopeSnapshot')
+    if not isinstance(reported, dict): raise ValueError('Selected supporting report scope is missing')
+    documents = reported.get('documents')
+    revision = _scope_revision(documents)
+    if (reported.get('scopeRevision') != revision or descriptor is None
+            or descriptor.get('versionKind') != 'report' or descriptor.get('state') != 'adopted'
+            or descriptor.get('coverageComplete') is not True
+            or report.get('sourceRevision') != expected['sourceRevision']
+            or descriptor.get('sourceRevision') != expected['sourceRevision']
+            or descriptor.get('scopeRevision') != revision
+            or descriptor.get('foundationRevision') != job.get('foundationRevision')
+            or (reported.get('foundationRevision') is not None
+                and reported['foundationRevision'] != descriptor.get('foundationRevision'))):
+        raise ValueError('Selected supporting report scope binding changed')
+    reported_refs = _scope_refs(reported.get('allowedRefs'))
+    if match_selected:
+        selected_documents = scope.get('documents')
+        if (scope.get('foundationRevision') != descriptor['foundationRevision']
+                or scope.get('scopeRevision') != revision
+                or _scope_revision(selected_documents) != revision
+                or selected_documents != documents
+                or _scope_refs(scope.get('allowedRefs')) != reported_refs):
+            raise ValueError('Selected lecture scope differs from adopted supporting report')
+    return {**reported, 'foundationRevision': descriptor['foundationRevision']}
 
 
 def _structural_paper(original):
@@ -124,6 +180,11 @@ class SupportingContextCompiler:
             if value is not None:
                 if not isinstance(value, list): raise ValueError('Supporting selection must be a list or None')
                 for identifier in value: validate_component(identifier, 'source ID')
+        if any(value != [] for value in selected.values()):
+            if (_scope_revision(scope.get('documents')) != scope['scopeRevision']
+                    or not scope.get('foundationRevision')):
+                raise ValueError('Selected lecture scope or foundation identity is invalid')
+            _scope_refs(scope.get('allowedRefs'))
         db = self.repository.database
         readers = {'historical_ids': db.get_course_historical_exams,
                    'audio_ids': db.get_course_audio_recordings,
@@ -161,42 +222,79 @@ class SupportingContextCompiler:
             baseline = self.library.load_report(identity, expected['reportRevision'])
             if baseline['sourceRevision'] != expected['sourceRevision'] or not _complete(baseline):
                 raise ValueError('Selected supporting report is incomplete or changed')
+            baseline_version = self.repository.get_version(identity, 'report', expected['reportRevision'])
+            _checked_scope(scope, baseline, baseline_version, expected, job, match_selected=False)
             prepared.append((identity, expected, job, baseline))
         snapshot, academic, qualified, papers, exclusions = [], [], [], [], []
+        packet_scope = None
         for identity, expected, job, baseline in prepared:
             scoped_revision = expected['reportRevision']
             report = baseline
+            adopted = None
+            new_scope_cache = False
             if baseline['scopeSnapshot']['scopeRevision'] != scope['scopeRevision']:
-                foundation = scope.get('foundationRevision') or job['foundationRevision']
+                foundation = scope.get('foundationRevision')
+                if foundation != job['foundationRevision']:
+                    raise ValueError('Selected lecture foundation differs from supporting report')
                 cached = (self.repository.get_scoped_cache(identity, expected, foundation_revision=foundation,
                     scope_revision=scope['scopeRevision'], alignment_version=baseline['alignmentVersion'])
                     if hasattr(self.repository, 'get_scoped_cache') else None)
                 if cached:
                     scoped_revision = cached
                     report = self.library.load_report(identity, scoped_revision)
+                    adopted = self.repository.get_version(identity, 'report', scoped_revision)
                 else:
                     if self.aligner is None: raise ValueError('Scoped supporting alignment is unavailable')
                     report = self.aligner.rescope(identity, baseline, scope=scope, checkpoint=lambda state: None)
                     if not _complete(report): raise ValueError('Selected supporting rescope is incomplete')
                     adopted = self.library.save_scoped_report(identity, expected, report)
                     scoped_revision = adopted['revision']
-                    self.repository.save_scoped_cache(identity, expected, foundation_revision=foundation,
-                        scope_revision=scope['scopeRevision'], alignment_version=baseline['alignmentVersion'],
-                        scoped_report_revision=scoped_revision)
-            if report['scopeSnapshot']['scopeRevision'] != scope['scopeRevision'] or not _complete(report):
+                    new_scope_cache = True
+            if scoped_revision == expected['reportRevision']:
+                adopted = self.repository.get_version(identity, 'report', scoped_revision)
+            if not _complete(report):
                 raise ValueError('Selected supporting scope is incomplete or changed')
+            checked_scope = _checked_scope(scope, report, adopted, expected, job, match_selected=True)
+            if new_scope_cache:
+                self.repository.save_scoped_cache(identity, expected, foundation_revision=foundation,
+                    scope_revision=scope['scopeRevision'], alignment_version=baseline['alignmentVersion'],
+                    scoped_report_revision=scoped_revision)
+            if packet_scope is None:
+                packet_scope = checked_scope
+            elif (packet_scope['documents'] != checked_scope['documents']
+                    or _scope_refs(packet_scope['allowedRefs']) != _scope_refs(checked_scope['allowedRefs'])):
+                raise ValueError('Selected supporting reports disagree on lecture scope')
             snapshot.append({'identity': deepcopy(identity), **expected, 'scopedReportRevision': scoped_revision})
             alignments = {a['itemId']: a for a in report['alignments']}
             components = context_components(report['items'], report['sharedContexts'])
+            candidates = {}
             for item in report['items']:
                 alignment = alignments[item['id']]
                 context = _context_for(item, alignment, components[item['id']])
-                included = _academic_item(item, alignment, context, identity, purpose)
+                candidates[item['id']] = (_academic_item(item, alignment, context, identity, purpose), context)
+            by_id = {item['id']: item for item in report['items']}
+            unusable_ancestors = set()
+            for item in report['items']:
+                if (item['itemType'] in ('nonacademic', 'topic_statement')
+                        or candidates[item['id']][0] is not None):
+                    continue
+                parent_id, seen = item.get('parentId'), set()
+                while parent_id is not None and parent_id not in seen:
+                    seen.add(parent_id)
+                    unusable_ancestors.add(parent_id)
+                    parent_id = by_id[parent_id].get('parentId')
+            for item in report['items']:
+                alignment = alignments[item['id']]
+                included, context = candidates[item['id']]
+                blocked_parent = item['id'] in unusable_ancestors
+                if blocked_parent: included = None
                 if included:
                     academic.append(included)
                 else:
                     exclusions.append({'identity': deepcopy(identity), 'itemId': item['id'],
-                                       'reason': alignment['status'] if context is not None else 'required_context_unusable'})
+                                       'reason': ('required_descendant_unusable' if blocked_parent else
+                                                  alignment['status'] if context is not None else
+                                                  'required_context_unusable')})
                     if purpose == 'tutor' and _qualified_request(discussion_query):
                         relations = sorted({finding['relation'] for finding in alignment['requirements']}
                                            | {dep['relation'] for dep in alignment.get('contextDependencies', [])})
@@ -240,7 +338,7 @@ class SupportingContextCompiler:
                                        if item.get('paperId') == paper['paperId']}})
         snap = {'version': 1, 'materials': snapshot}
         self.repository.assert_snapshot(snap, scope_revision=scope['scopeRevision'])
-        return {'version': 1, 'purpose': purpose, 'scopeSnapshot': _scope_snapshot(scope), 'snapshot': snap,
+        return {'version': 1, 'purpose': purpose, 'scopeSnapshot': _scope_snapshot(packet_scope or scope), 'snapshot': snap,
                 'academicItems': academic, 'qualifiedItems': qualified, 'structuralPapers': papers,
                 'coverage': {'selectedMaterialCount': len(snapshot), 'excludedItems': exclusions}}
 

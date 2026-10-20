@@ -25,10 +25,12 @@ class CourseRows:
 
 
 class CheckedRepository:
-    def __init__(self, rows):
+    def __init__(self, rows, reports=None):
         self.database = CourseRows(rows)
         self.rows = rows
+        self.reports = reports or {}
         self.cache = {}
+        self.scoped_revisions = {}
 
     def get_owned(self, identity):
         for row in self.rows:
@@ -51,6 +53,18 @@ class CheckedRepository:
 
     def save_scoped_cache(self, identity, expected, *, scoped_report_revision, **fields):
         self.cache[self._key(identity, expected, **fields)] = scoped_report_revision
+        self.scoped_revisions[scoped_report_revision] = fields['scope_revision']
+
+    def get_version(self, identity, kind, revision):
+        assert kind == 'report'
+        baseline = self.reports[identity['materialId']]
+        scope_revision = baseline['scopeSnapshot']['scopeRevision']
+        if revision in self.scoped_revisions:
+            scope_revision = self.scoped_revisions[revision]
+        row = self.get_owned(identity)
+        return {'versionKind': 'report', 'revision': revision, 'state': 'adopted',
+                'coverageComplete': True, 'sourceRevision': row['supportingAnalysis']['sourceRevision'],
+                'scopeRevision': scope_revision, 'foundationRevision': row['processingJob']['foundationRevision']}
 
 
 class CheckedLibrary:
@@ -70,7 +84,9 @@ class CheckedLibrary:
     def save_scoped_report(self, identity, expected, report):
         revision = digest({'foundationRevision': 'f'*64, 'report': report})
         self.scoped_reports[revision] = deepcopy(report)
-        return {'revision': revision}
+        return {'versionKind': 'report', 'revision': revision, 'state': 'adopted',
+                'coverageComplete': True, 'sourceRevision': expected['sourceRevision'],
+                'scopeRevision': report['scopeSnapshot']['scopeRevision'], 'foundationRevision': 'f'*64}
 
 
 def _setup(kind='historical_exam', *, status='completed'):
@@ -83,6 +99,14 @@ def _setup(kind='historical_exam', *, status='completed'):
     report['items'][0]['requirements'][0]['supportingSourceRefs'][0]['materialId'] = material_id
     report['alignments'][0]['requirements'][0]['supportingSourceProofs'][0]['ref']['materialId'] = material_id
     report['scopeSnapshot']['foundationRevision'] = 'f'*64
+    report['scopeSnapshot']['scopeRevision'] = digest([
+        {key: document[key] for key in ('id', 'sourceRevision', 'guideRevision')}
+        for document in report['scopeSnapshot']['documents']])
+    for alignment in report['alignments']:
+        for finding in alignment['requirements']:
+            finding['reviewCoverage']['scopeRevision'] = report['scopeSnapshot']['scopeRevision']
+        for dependency in alignment.get('contextDependencies', []):
+            dependency['reviewCoverage']['scopeRevision'] = report['scopeSnapshot']['scopeRevision']
     identity = {'userId': 'owner', 'courseId': 'course', 'kind': kind, 'materialId': material_id}
     row = {'id': material_id, 'kind': kind, 'userId': 'owner', 'courseId': 'course',
            'sourceType': 'notes' if kind == 'notes' else 'file', 'status': status,
@@ -97,7 +121,7 @@ def _setup(kind='historical_exam', *, status='completed'):
 def _compiler(*entries):
     rows = [entry[1] for entry in entries]
     reports = {entry[0]['materialId']: entry[2] for entry in entries}
-    return SupportingContextCompiler(CheckedRepository(rows), CheckedLibrary(reports), None)
+    return SupportingContextCompiler(CheckedRepository(rows, reports), CheckedLibrary(reports), None)
 
 
 class RescopeAligner:
@@ -113,6 +137,18 @@ class RescopeAligner:
 
 def _scope(report):
     return deepcopy(report['scopeSnapshot'])
+
+
+def _second_scope(report):
+    scope = _scope(report)
+    document = deepcopy(scope['documents'][0])
+    document['id'] = 'selected2'
+    scope['documents'].append(document)
+    scope['allowedRefs'].extend({**ref, 'documentId': 'selected2'} for ref in deepcopy(scope['allowedRefs']))
+    scope['scopeRevision'] = digest([
+        {key: document[key] for key in ('id', 'sourceRevision', 'guideRevision')}
+        for document in scope['documents']])
+    return scope
 
 
 def _selected(**kwargs):
@@ -190,12 +226,12 @@ def test_notes_are_student_attributed_and_supplementary_only_in_summary_and_tuto
 
 def test_selected_chapter_rescopes_every_kind_and_reuses_only_same_baseline_cache():
     entries = [_setup('historical_exam'), _setup('tutorial'), _setup('notes')]
-    repository = CheckedRepository([entry[1] for entry in entries])
-    library = CheckedLibrary({entry[0]['materialId']: entry[2] for entry in entries})
+    reports = {entry[0]['materialId']: entry[2] for entry in entries}
+    repository = CheckedRepository([entry[1] for entry in entries], reports)
+    library = CheckedLibrary(reports)
     aligner = RescopeAligner()
     compiler = SupportingContextCompiler(repository, library, aligner)
-    scope = _scope(entries[0][2])
-    scope['scopeRevision'] = 'c'*64
+    scope = _second_scope(entries[0][2])
     selection = _selected(historical_ids=['past'], tutorial_ids=['tutorial'], audio_ids=['note'])
     first = compiler.compile(user_id='owner', course_id='course', scope=scope,
                              selected=selection, purpose='summary')
@@ -211,15 +247,75 @@ def test_selected_chapter_rescopes_every_kind_and_reuses_only_same_baseline_cach
     assert aligner.calls.count('historical_exam') == 2
 
 
+@pytest.mark.parametrize('change', ('document_id', 'source_revision', 'guide_revision',
+                                   'guide_content', 'title', 'allowed_ref', 'foundation'))
+def test_same_revision_altered_scope_cannot_relabel_baseline_report(change):
+    entry = _setup()
+    scope = _scope(entry[2])
+    if change == 'document_id': scope['documents'][0]['id'] = 'forged'
+    elif change == 'source_revision': scope['documents'][0]['sourceRevision'] = 'c'*64
+    elif change == 'guide_revision': scope['documents'][0]['guideRevision'] = 'c'*64
+    elif change == 'guide_content': scope['documents'][0]['guide']['sections'][0]['label'] = 'Forged'
+    elif change == 'title': scope['documents'][0]['title'] = 'Forged'
+    elif change == 'allowed_ref': scope['allowedRefs'][0]['unitId'] = 'forged'
+    elif change == 'foundation': scope['foundationRevision'] = 'c'*64
+    with pytest.raises(ValueError, match='(?i)scope|foundation|ready'):
+        _compiler(entry).compile(user_id='owner', course_id='course', scope=scope,
+            selected=_selected(historical_ids=['past']), purpose='exam')
+
+
+def test_cached_scope_checks_full_identity_and_returns_adopted_ref_order():
+    entry = _setup()
+    reports = {entry[0]['materialId']: entry[2]}
+    compiler = SupportingContextCompiler(CheckedRepository([entry[1]], reports), CheckedLibrary(reports), RescopeAligner())
+    scope = _second_scope(entry[2])
+    selected = _selected(historical_ids=['past'])
+    packet = compiler.compile(user_id='owner', course_id='course', scope=scope,
+                              selected=selected, purpose='exam')
+    assert packet['scopeSnapshot']['allowedRefs'] == scope['allowedRefs']
+    reordered = deepcopy(scope)
+    reordered['allowedRefs'].reverse()
+    packet = compiler.compile(user_id='owner', course_id='course', scope=reordered,
+                              selected=selected, purpose='exam')
+    assert packet['scopeSnapshot']['allowedRefs'] == scope['allowedRefs']
+    forged = deepcopy(scope)
+    forged['documents'].reverse()
+    with pytest.raises(ValueError, match='(?i)scope'):
+        compiler.compile(user_id='owner', course_id='course', scope=forged,
+                         selected=selected, purpose='exam')
+    forged = deepcopy(scope)
+    forged['allowedRefs'][1]['documentId'] = 'forged'
+    with pytest.raises(ValueError, match='(?i)scope'):
+        compiler.compile(user_id='owner', course_id='course', scope=forged,
+                         selected=selected, purpose='exam')
+
+
+def test_rescoped_report_cannot_relabel_different_selected_metadata():
+    entry = _setup()
+    reports = {entry[0]['materialId']: entry[2]}
+
+    class AlteringAligner(RescopeAligner):
+        def rescope(self, identity, baseline, *, scope, checkpoint):
+            report = super().rescope(identity, baseline, scope=scope, checkpoint=checkpoint)
+            report['scopeSnapshot']['documents'][0]['title'] = 'Forged report title'
+            return report
+
+    compiler = SupportingContextCompiler(CheckedRepository([entry[1]], reports),
+                                         CheckedLibrary(reports), AlteringAligner())
+    with pytest.raises(ValueError, match='(?i)scope'):
+        compiler.compile(user_id='owner', course_id='course', scope=_second_scope(entry[2]),
+                         selected=_selected(historical_ids=['past']), purpose='exam')
+    assert compiler.repository.cache == {}
+
+
 def test_unready_later_selection_blocks_all_scoped_alignment_work():
     historical = _setup('historical_exam')
     tutorial = _setup('tutorial', status='queued')
-    repository = CheckedRepository([historical[1], tutorial[1]])
-    library = CheckedLibrary({historical[0]['materialId']: historical[2],
-                              tutorial[0]['materialId']: tutorial[2]})
+    reports = {historical[0]['materialId']: historical[2], tutorial[0]['materialId']: tutorial[2]}
+    repository = CheckedRepository([historical[1], tutorial[1]], reports)
+    library = CheckedLibrary(reports)
     aligner = RescopeAligner()
-    scope = _scope(historical[2])
-    scope['scopeRevision'] = 'c'*64
+    scope = _second_scope(historical[2])
     compiler = SupportingContextCompiler(repository, library, aligner)
     with pytest.raises(ValueError, match='(?i)ready|upgrade'):
         compiler.compile(user_id='owner', course_id='course', scope=scope,
@@ -272,14 +368,12 @@ def test_required_unsupported_shared_context_blocks_child_but_verified_omission_
     for item in report['items']:
         decision = 'required' if item['id'] == 'dependent' else 'not_required'
         dependencies = [dependency(component, decision) for component in components[item['id']]]
-        item_findings = [finding]
-        if item['id'] == 'parent':
-            uncovered = deepcopy(finding)
-            uncovered.update(requirementId='r-untaught', relation='not_found',
-                             lectureSupportProofs=[], lectureAnchorRefs=[])
-            item_findings.append(uncovered)
-        alignments.append(aggregate_item_alignment(item_findings, item_id=item['id'], context_dependencies=dependencies))
+        alignments.append(aggregate_item_alignment([finding], item_id=item['id'], context_dependencies=dependencies))
     report['alignments'] = alignments
+    report['papers'][0]['questionIds'] = ['parent']
+    report['topics'] = [{'id': 'parent-topic', 'text': 'Unsafe parent vote', 'itemIds': ['parent'],
+                         'requirementIds': ['r1'], 'alignment': {'relation': 'lecture_supported',
+                         'originRequirementIds': ['r1']}}]
     report['alignmentCoverage'].update(itemIds=[i['id'] for i in report['items']],
                                         checkedItemIds=[i['id'] for i in report['items']])
     packet = _compiler((identity, row, report)).compile(user_id='owner', course_id='course',
@@ -287,6 +381,8 @@ def test_required_unsupported_shared_context_blocks_child_but_verified_omission_
     assert [item['id'] for item in packet['academicItems']] == ['independent']
     assert packet['academicItems'][0]['text'] == 'Explain trees: independent'
     assert packet['academicItems'][0]['requiredContext'] == []
+    assert packet['structuralPapers'][0]['topics'] == []
+    assert historical_projection(packet)[0]['papers'][0]['topicWeights'] == []
 
 
 def test_projection_normalizes_verified_topics_per_paper_and_preserves_structure():
@@ -346,6 +442,15 @@ def test_only_explicit_tutor_conflict_discussion_receives_qualified_original():
         selected=_selected(historical_ids=['past']), purpose='tutor',
         discussion_query='ناقش التعارض في السؤال السابق')
     assert arabic['qualifiedItems'][0]['relation'] == 'conflicting'
+    for query in ('Is this question contradicted by the lecture?',
+                  'هل يتعارض هذا السؤال مع المحاضرة؟'):
+        direct = compiler.compile(user_id='owner', course_id='course', scope=_scope(report),
+            selected=_selected(historical_ids=['past']), purpose='tutor', discussion_query=query)
+        assert direct['qualifiedItems'][0]['relation'] == 'conflicting'
+    for query in ('What is a contradiction in general?', 'هل تعرف معنى التناقض؟'):
+        general = compiler.compile(user_id='owner', course_id='course', scope=_scope(report),
+            selected=_selected(historical_ids=['past']), purpose='tutor', discussion_query=query)
+        assert general['qualifiedItems'] == []
     for purpose in ('summary', 'exam', 'flashcards'):
         packet = compiler.compile(user_id='owner', course_id='course', scope=_scope(report),
             selected=_selected(historical_ids=['past']), purpose=purpose,
