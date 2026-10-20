@@ -1,5 +1,5 @@
 import React from "react";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DocumentViewer from "../../src/components/DocumentViewer";
 import ExamPage from "../../src/app/course/[id]/exam/[examId]/page";
@@ -313,21 +313,103 @@ it("retains the persisted material order when saving a reorder fails", async () 
 });
 
 const citation = { documentId: 'd1', sourceRevision: 'rev1', unitId: 'page-1', label: 'Lecture page 1' };
+const supporting = (unitId: string) => ({ kind: 'historical_exam', materialId: 'h1', sourceRevision: 'support-rev', unitId });
+const claim = (path: string, unitId: string, sourceRefs: unknown[] = []) => ({ path, start: 0, end: 1, authority: 'supplementary', relation: 'related_supplementary', sourceRefs, supportingSourceRefs: [supporting(unitId)], supportingSourceProofs: [{ ref: supporting(unitId) }], lectureAnchorRefs: [citation] });
 describe('saved output source citations', () => {
+  it('renders exact supporting refs from a new summary POST response', async () => {
+    mocks.api.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST' && url.includes('/summaries/')) return response({ doc_id: 's1', title: 'New summary', overview: 'Overview claim', examFocus: ['Focus claim'], sections: [{ heading: 'Heading', content: 'Section claim', supportingSourceRefs: [supporting('section')] }], keyTerms: [{ term: 'Term', definition: 'Definition', supportingSourceRefs: [supporting('term')] }], supportingSourceRefs: ['overview', 'focus', 'section', 'term'].map(supporting), provenance: [claim('/overview', 'overview'), claim('/examFocus/0', 'focus'), claim('/sections/0/content', 'section'), claim('/keyTerms/0/definition', 'term')] });
+      if (url.includes('/documents/')) return response({ documents: [{ ...doc, status: 'completed' }] });
+      return response({});
+    });
+    render(<SummaryPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /generate summary/i }));
+    const overview = (await screen.findByText('Overview claim')).closest('div')!;
+    expect(within(overview).getByRole('button', { name: 'overview' })).toBeTruthy();
+    expect(within(screen.getByText('Focus claim').closest('li')!).getByRole('button', { name: 'focus' })).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'section' })).toHaveLength(1);
+    expect(screen.getAllByRole('button', { name: 'term' })).toHaveLength(1);
+  });
+  it('renders distinct front and back refs from a new card POST response', async () => {
+    const card = { front: 'Front claim', back: 'Back claim', sourceRefs: [], supportingSourceRefs: [supporting('front'), supporting('back')], provenance: [claim('/front', 'front'), claim('/back', 'back')] };
+    mocks.api.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST' && url.includes('/flashcards/generate')) return response({ doc_id: 'f1', cards: [card] });
+      if (url.includes('/documents/')) return response({ documents: [{ ...doc, status: 'completed' }] });
+      return response({});
+    });
+    render(<FlashcardsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /generate flashcards/i }));
+    await screen.findByRole('button', { name: 'front' });
+    expect(screen.queryByRole('button', { name: 'back' })).toBeNull();
+    fireEvent.click(document.querySelector('.flashcard-scene')!);
+    await screen.findByRole('button', { name: 'back' });
+  });
+  it('uses exact saved summary provenance for overview and focus while retaining section and term citations', async () => {
+    const refs = ['overview', 'focus', 'section', 'term'].map(supporting);
+    const summary = { title: 'Saved cited summary', overview: 'Overview claim', examFocus: ['Focus line'], sourceRefs: [citation], supportingSourceRefs: refs,
+      provenance: [claim('/overview', 'overview'), claim('/examFocus/0', 'focus'), claim('/sections/0/content', 'section'), claim('/keyTerms/0/definition', 'term')],
+      sections: [{ heading: 'Section heading', content: 'Section claim', sourceRefs: [], supportingSourceRefs: [supporting('section')] }],
+      keyTerms: [{ term: 'Term', definition: 'Definition', sourceRefs: [], supportingSourceRefs: [supporting('term')] }], supportingSnapshot: { version: 1, materials: [] } };
+    mocks.api.mockImplementation(async (url: string) => url.includes('/summaries/detail/') ? response({ summary }) : url.includes('/summaries/list/') ? response({ summaries: [{ id: 's1', title: summary.title, sectionCount: 1 }] }) : response({}));
+    render(<SummaryPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /saved cited summary/i }));
+    const overview = (await screen.findByText('Overview claim')).closest('div')!;
+    expect(within(overview).getByRole('button', { name: 'overview' })).toBeTruthy();
+    expect(within(overview).queryByRole('button', { name: 'section' })).toBeNull();
+    expect(within(screen.getByText('Focus line').closest('li')!).getByRole('button', { name: 'focus' })).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'section' })).toHaveLength(1);
+    expect(screen.getAllByRole('button', { name: 'term' })).toHaveLength(1);
+  });
+  it('shows the saved card topic and only the currently visible side citations', async () => {
+    const card = { front: 'Front claim', back: 'Back claim', topic: 'Topic claim', sourceRefs: [], supportingSourceRefs: ['front', 'back', 'topic'].map(supporting),
+      provenance: [claim('/front', 'front'), claim('/back', 'back'), claim('/topic', 'topic')] };
+    mocks.api.mockImplementation(async (url: string) => url.includes('/flashcards/detail/') ? response({ set: { title: 'Saved cited cards', cards: [card], supportingSnapshot: { version: 1, materials: [] } } }) : url.includes('/flashcards/list/') ? response({ sets: [{ id: 'f1', title: 'Saved cited cards', cardCount: 1 }] }) : response({}));
+    render(<FlashcardsPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /saved cited cards/i }));
+    await screen.findByRole('button', { name: 'front' });
+    expect(screen.getByRole('button', { name: 'topic' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'back' })).toBeNull();
+    fireEvent.click(document.querySelector('.flashcard-scene')!);
+    await screen.findByRole('button', { name: 'back' });
+    expect(screen.queryByRole('button', { name: 'front' })).toBeNull();
+  });
   it.each([['summary', SummaryPage], ['flashcards', FlashcardsPage]] as const)('preserves exact citations in a saved %s', async (kind, Page) => {
     mocks.api.mockImplementation(async (url: string) => {
-      if (url.includes('/detail/')) return response(kind === 'summary' ? { summary: { title: 'Saved cited study', sections: [{ heading: 'Evidence section', content: 'Content', sourceRefs: [citation] }] } } : { set: { title: 'Saved cited study', cards: [{ front: 'Question', back: 'Answer', sourceRefs: [citation] }] } });
+      if (url.includes('/detail/')) return response(kind === 'summary' ? { summary: { title: 'Saved cited study', overview: 'Lecture overview', provenance: [], sourceRefs: [citation], sections: [{ heading: 'Evidence section', content: 'Content', sourceRefs: [citation] }] } } : { set: { title: 'Saved cited study', cards: [{ front: 'Question', back: 'Answer', sourceRefs: [citation] }] } });
       if (url.includes('/list/')) return response(kind === 'summary' ? { summaries: [{ id: 's1', title: 'Saved cited study', createdAt: 1, sectionCount: 1 }] } : { sets: [{ id: 's1', title: 'Saved cited study', createdAt: 1, cardCount: 1 }] });
       return response({});
     });
     render(<Page />);
     fireEvent.click(await screen.findByRole('button', { name: /saved cited study/i }));
-    await screen.findByRole('button', { name: 'Lecture page 1' });
+    await screen.findAllByRole('button', { name: 'Lecture page 1' });
+    if (kind === 'summary') expect(screen.getAllByRole('button', { name: 'Lecture page 1' })).toHaveLength(2);
   });
   it('renders saved exam question citations in the normal child route', async () => {
     mocks.api.mockResolvedValue(response({ exam: { id: 'e1', courseId: 'c1', examId: 'Cited exam', questionStructure: [{ id: 'q1', type: 'short', sourceRefs: [citation] }], status: 'ready' } }));
     render(<ExamPage />);
     await screen.findByRole('button', { name: 'Lecture page 1' });
+  });
+  it('reads safe saved exam shared and question supporting refs from their distinct fields', async () => {
+    const exam = { id: 'e1', courseId: 'c1', examId: 'Cited exam', status: 'ready', texContent: 'Exam text',
+      sharedSupportingSourceRefs: [supporting('shared')], questionStructure: [{ id: 'q1', type: 'short', supportingSourceRefs: [supporting('question')] }],
+      supportingSnapshot: { version: 1, materials: [{ identity: { kind: 'historical_exam', materialId: 'h1' }, sourceRevision: 'support-rev', reportRevision: 'report-rev', scopedReportRevision: 'scope-rev' }] } };
+    mocks.api.mockImplementation(async (url: string) => url.includes('/exams/detail/') ? response({ exam }) : response({}));
+    render(<ExamPage />);
+    const shared = await screen.findByText('Shared context');
+    expect(within(shared.parentElement!).getByRole('button', { name: 'shared' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'question' })).toBeTruthy();
+    expect(screen.queryByText('report-rev')).toBeNull();
+  });
+  it('shows the shared supporting citation in the inline POST exam fallback', async () => {
+    mocks.api.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'POST' && url.includes('/exams/generate-enhanced')) return response({ exam_id: 'New exam', question_structure: [{ id: 'q1', type: 'short', supportingSourceRefs: [supporting('question')] }], sharedSupportingSourceRefs: [supporting('shared')] });
+      if (url.includes('/documents/')) return response({ documents: [{ ...doc, status: 'completed' }] });
+      return response({});
+    });
+    render(<ExamGenerationPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /generate exam/i }));
+    expect(await screen.findByRole('button', { name: 'shared' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'question' })).toBeTruthy();
   });
   it('attaches saved tutor sourceTurns only to their assistant message and strips display metadata from POST', async () => {
     let sent: any;
@@ -346,6 +428,30 @@ describe('saved output source citations', () => {
     await screen.findByText('New cited reply');
     expect(sent.messages[1]).toEqual({ role: 'assistant', content: 'Saved reply' });
     expect(screen.getAllByRole('button', { name: 'Lecture page 1' })).toHaveLength(2);
+  });
+  it('uses saved tutor reply provenance and live response supporting refs without sending snapshot metadata', async () => {
+    let sent: any;
+    const snapshot = { version: 1, materials: [{ identity: { userId: 'u1', courseId: 'c1', kind: 'historical_exam', materialId: 'h1' }, sourceRevision: 'support-rev', reportRevision: 'report-rev', scopedReportRevision: 'scope-rev', analysisId: 'job1' }] };
+    mocks.api.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes('/tutor/chats')) return response({ chats: [{ id: 'chat1', title: 'Saved chat' }] });
+      if (url.includes('/tutor/chat/chat1')) return response({ chat: { messages: [{ role: 'user', content: 'Saved question' }, { role: 'assistant', content: 'Saved reply' }], sourceTurns: [
+        { messageIndex: 1, supportingSourceRefs: [supporting('saved'), supporting('unrelated')], provenance: [claim('/reply', 'saved')], supportingSnapshot: snapshot },
+        { messageIndex: 0, supportingSourceRefs: [supporting('wrong-user-turn')], supportingSnapshot: snapshot },
+      ] } });
+      if (url.endsWith('/tutor/chat') && init?.method === 'POST') { sent = JSON.parse(init.body as string); return response({ reply: 'New reply', chat_id: 'chat1', supportingSourceRefs: [supporting('live')] }); }
+      return response({});
+    });
+    render(<TutorPage />);
+    fireEvent.click((await screen.findAllByRole('button', { name: /saved chat/i }))[0]);
+    await screen.findByRole('button', { name: 'saved' });
+    expect(screen.queryByRole('button', { name: 'unrelated' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'wrong-user-turn' })).toBeNull();
+    fireEvent.change(screen.getByPlaceholderText(/ask/i), { target: { value: 'Follow up' } });
+    fireEvent.keyDown(screen.getByPlaceholderText(/ask/i), { key: 'Enter' });
+    await screen.findByText('New reply');
+    expect(screen.getByRole('button', { name: 'live' })).toBeTruthy();
+    expect(sent.messages).toEqual([{ role: 'user', content: 'Saved question' }, { role: 'assistant', content: 'Saved reply' }, { role: 'user', content: 'Follow up' }]);
+    expect(JSON.stringify(sent)).not.toContain('supportingSnapshot');
   });
 });
 

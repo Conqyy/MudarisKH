@@ -8,7 +8,7 @@ import remarkGfm from "remark-gfm";
 import SourceCitation, { SourceRef, validatedSourceRefs } from "@/components/SourceCitation";
 import SupportingCitation from "@/components/SupportingCitation";
 import { SupportingRef, validatedSupportingRefs } from "@/lib/supporting-materials";
-import { firstSupportingBlocker, retainSelectedRows, supportingPresentation } from "@/lib/supporting-materials";
+import { citationsForPath, firstSupportingBlocker, retainSelectedRows, supportingPresentation } from "@/lib/supporting-materials";
 import SupportingSelectionNotice from "@/components/SupportingSelectionNotice";
 import Navbar from "@/components/Navbar";
 import Sidebar from "@/components/Sidebar";
@@ -323,7 +323,8 @@ function TutorPageContent() {
       const turns = Array.isArray(data.chat?.sourceTurns) ? data.chat.sourceTurns : [];
       setMessages(savedMessages.map((message: ChatMessage, index: number) => {
         const turn = turns.find((entry: { messageIndex?: number }) => entry.messageIndex === index);
-        return { role: message.role, content: message.content, ...(message.role === "assistant" ? { sourceRefs: validatedSourceRefs(turn?.sourceRefs), supportingSourceRefs: validatedSupportingRefs(turn?.supportingSourceRefs) } : {}) };
+        const citations = citationsForPath(turn?.provenance, "/reply", turn);
+        return { role: message.role, content: message.content, ...(message.role === "assistant" ? { sourceRefs: validatedSourceRefs(citations.sourceRefs), supportingSourceRefs: validatedSupportingRefs(citations.supportingSourceRefs) } : {}) };
       }));
       activeChatId.current = id;
       setChatId(id);

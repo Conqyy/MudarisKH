@@ -18,7 +18,7 @@ import { getCourse, getUserCourses, Course } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 
 import { apiFetch, apiJson } from "@/lib/api";
-import { firstSupportingBlocker, retainSelectedRows, supportingPresentation, SupportingRow } from "@/lib/supporting-materials";
+import { citationsForPath, CanonicalProvenance, firstSupportingBlocker, retainSelectedRows, supportingPresentation, SupportingRow } from "@/lib/supporting-materials";
 import SupportingSelectionNotice from "@/components/SupportingSelectionNotice";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
@@ -37,6 +37,7 @@ interface DocItem {
 interface Flashcard {
   sourceRefs?: SourceRef[];
   supportingSourceRefs?: SupportingRef[];
+  provenance?: CanonicalProvenance[];
   front: string;
   back: string;
   topic?: string;
@@ -811,9 +812,7 @@ function FlashcardsPageContent() {
               </span>
             )}
             {card.topic && (
-              <span className="text-xs font-mono bg-sage/10 text-sage px-3 py-1 rounded-full">
-                {card.topic}
-              </span>
+              <div><span className="text-xs font-mono bg-sage/10 text-sage px-3 py-1 rounded-full">{card.topic}</span><SourceCitation courseId={courseId} sourceRefs={citationsForPath(card.provenance, "/topic").sourceRefs} /><SupportingCitation courseId={courseId} sourceRefs={citationsForPath(card.provenance, "/topic").supportingSourceRefs} /></div>
             )}
           </div>
           <button
@@ -834,8 +833,8 @@ function FlashcardsPageContent() {
           />
         </div>
 
-        <SourceCitation key={current} courseId={courseId} sourceRefs={card.sourceRefs} />
-        <SupportingCitation key={`supporting-${current}`} courseId={courseId} sourceRefs={card.supportingSourceRefs} />
+        <SourceCitation key={`${current}-${flipped}`} courseId={courseId} sourceRefs={citationsForPath(card.provenance, flipped ? "/back" : "/front", card).sourceRefs} />
+        <SupportingCitation key={`supporting-${current}-${flipped}`} courseId={courseId} sourceRefs={citationsForPath(card.provenance, flipped ? "/back" : "/front", card).supportingSourceRefs} />
         {/* Card */}
         <div
           className="flashcard-scene h-80 mb-6 cursor-pointer"

@@ -10,6 +10,7 @@ import Navbar from "@/components/Navbar";
 import Sidebar from "@/components/Sidebar";
 import BookmarkButton from "@/components/BookmarkButton";
 import { useAuth } from "@/lib/auth-context";
+import { useLang } from "@/lib/i18n";
 import { getCourse, getUserCourses, Course } from "@/lib/firestore-helpers";
 import { useTrackRecent } from "@/lib/activity";
 
@@ -30,6 +31,8 @@ interface ExamData {
   examId: string;
   texContent?: string;
   questionStructure: Question[];
+  sharedSourceRefs?: SourceRef[];
+  sharedSupportingSourceRefs?: SupportingRef[];
   status: string;
   createdAt: number;
   solutionPath?: string;
@@ -39,6 +42,7 @@ interface ExamData {
 
 export default function ExamAnswerPage() {
   const { user, loading } = useAuth();
+  const { t } = useLang();
   const router = useRouter();
   const params = useParams();
   const courseId = params.id as string;
@@ -554,6 +558,7 @@ export default function ExamAnswerPage() {
               </div>
             );
           })()}
+          {(validatedSourceRefs(exam.sharedSourceRefs).length > 0 || validatedSupportingRefs(exam.sharedSupportingSourceRefs).length > 0) && <div className="mt-4 border border-line rounded-xl p-4 text-sm"><span>{t("Shared context")}</span><SourceCitation courseId={courseId} sourceRefs={exam.sharedSourceRefs} /><SupportingCitation courseId={courseId} sourceRefs={exam.sharedSupportingSourceRefs} /></div>}
           {exam.questionStructure.map((question, index) => (validatedSourceRefs(question.sourceRefs).length > 0 || validatedSupportingRefs(question.supportingSourceRefs).length > 0) && <div key={question.id || index} className="mt-4 border border-line rounded-xl p-4 text-sm"><span>{question.id || index + 1}</span><SourceCitation courseId={courseId} sourceRefs={question.sourceRefs} /><SupportingCitation courseId={courseId} sourceRefs={question.supportingSourceRefs} /></div>)}
         </main>
       </div>

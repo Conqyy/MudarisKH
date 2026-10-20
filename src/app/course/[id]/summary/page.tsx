@@ -20,7 +20,7 @@ import { getCourse, getUserCourses, Course } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 
 import { apiFetch, apiJson } from "@/lib/api";
-import { firstSupportingBlocker, retainSelectedRows, supportingPresentation, SupportingRow } from "@/lib/supporting-materials";
+import { citationsForPath, CanonicalProvenance, firstSupportingBlocker, retainSelectedRows, supportingPresentation, SupportingRow } from "@/lib/supporting-materials";
 import SupportingSelectionNotice from "@/components/SupportingSelectionNotice";
 // Inline-markdown renderer: the AI writes **bold** / *italic* / `code` inside
 // summary text — render it instead of showing raw asterisks. Paragraphs unwrap
@@ -91,6 +91,7 @@ interface SummarySection {
 interface SummaryData {
   sourceRefs?: SourceRef[];
   supportingSourceRefs?: SupportingRef[];
+  provenance?: CanonicalProvenance[];
   title: string;
   overview: string;
   sections: SummarySection[];
@@ -371,6 +372,7 @@ function SummaryPageContent() {
       setSummary({
         sourceRefs: data.sourceRefs,
         supportingSourceRefs: data.supportingSourceRefs,
+        provenance: data.provenance,
         title: data.title,
         overview: data.overview,
         sections: data.sections || [],
@@ -406,6 +408,7 @@ function SummaryPageContent() {
       setSummary({
         sourceRefs: s.sourceRefs,
         supportingSourceRefs: s.supportingSourceRefs,
+        provenance: s.provenance,
         title: s.title,
         overview: s.overview,
         sections: s.sections || [],
@@ -1030,8 +1033,8 @@ function SummaryPageContent() {
         {summary.overview && (
           <div className="text-ink-soft text-lg leading-relaxed bg-paper border border-line rounded-2xl p-7 mb-7">
             <Md>{summary.overview}</Md>
-            <SourceCitation courseId={courseId} sourceRefs={summary.sourceRefs} />
-            <SupportingCitation courseId={courseId} sourceRefs={summary.supportingSourceRefs} />
+            <SourceCitation courseId={courseId} sourceRefs={citationsForPath(summary.provenance, "/overview", summary).sourceRefs} />
+            <SupportingCitation courseId={courseId} sourceRefs={citationsForPath(summary.provenance, "/overview", summary).supportingSourceRefs} />
           </div>
         )}
 
@@ -1044,7 +1047,7 @@ function SummaryPageContent() {
               {summary.examFocus!.map((f, i) => (
                 <li key={i} className="text-base text-ink flex items-start gap-3 leading-relaxed">
                   <span className="text-accent flex-shrink-0">●</span>
-                  <span><Md>{f}</Md></span>
+                  <span><Md>{f}</Md><SourceCitation courseId={courseId} sourceRefs={citationsForPath(summary.provenance, `/examFocus/${i}`).sourceRefs} /><SupportingCitation courseId={courseId} sourceRefs={citationsForPath(summary.provenance, `/examFocus/${i}`).supportingSourceRefs} /></span>
                 </li>
               ))}
             </ul>

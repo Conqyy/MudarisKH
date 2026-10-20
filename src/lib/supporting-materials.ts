@@ -2,6 +2,7 @@ import { API_URL, apiFetch, fetchObjectUrl } from "@/lib/api";
 
 export type MaterialKind = "historical_exam" | "tutorial" | "audio" | "notes";
 export interface SupportingRef { kind: MaterialKind; materialId: string; sourceRevision: string; unitId: string; }
+export interface CanonicalProvenance { path: string; start: number; end: number; authority: "lecture" | "supplementary" | "reported_note"; relation: string; sourceRefs: unknown[]; supportingSourceRefs: SupportingRef[]; supportingSourceProofs: unknown[]; lectureAnchorRefs: unknown[]; }
 export interface SupportingStatus {
   id?: string; courseId?: string; materialId: string; kind: MaterialKind; jobId: string | null;
   status: "queued" | "processing" | "completed" | "incomplete" | "failed" | "legacy" | string;
@@ -35,6 +36,13 @@ export function validatedSupportingRefs(value: unknown): SupportingRef[] {
     seen.add(key);
     return [ref];
   });
+}
+export function citationsForPath(provenance: unknown, path: string, fallback?: { sourceRefs?: unknown; supportingSourceRefs?: unknown }) {
+  if (!Array.isArray(provenance) || provenance.length === 0) return { sourceRefs: fallback?.sourceRefs || [], supportingSourceRefs: fallback?.supportingSourceRefs || [] };
+  const claims = provenance.filter((row): row is CanonicalProvenance => row && row.path === path && Number.isInteger(row.start) && Number.isInteger(row.end) && row.start >= 0 && row.end > row.start);
+  const sourceRefs = [...new Map(claims.flatMap(row => Array.isArray(row.sourceRefs) ? row.sourceRefs : []).filter(row => row && typeof row === "object").map(row => [JSON.stringify(row), row])).values()];
+  const supportingSourceRefs = validatedSupportingRefs(claims.flatMap(row => row.supportingSourceRefs));
+  return { sourceRefs, supportingSourceRefs };
 }
 export function kindForRow(row: SupportingRow, collection: "historical_exam" | "tutorial" | "audio"): MaterialKind {
   return collection === "audio" && row.sourceType === "notes" ? "notes" : collection;

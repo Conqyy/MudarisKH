@@ -33,6 +33,7 @@ export const AR: Record<string, string> = {
   "Origin question on another page": "السؤال الأصلي في صفحة أخرى",
   "Origin requirement on another page": "المتطلب الأصلي في صفحة أخرى",
   "Context dependencies": "اعتماد السؤال على السياق",
+  "Shared context": "السياق المشترك",
   "Required context": "سياق مطلوب",
   "Context not required": "سياق غير مطلوب",
   "Context needs review": "السياق يحتاج مراجعة",

@@ -143,6 +143,7 @@ function ExamPageContent() {
   const [questionStructure, setQuestionStructure] = useState<
     { id: string; type: string; sourceRefs?: SourceRef[]; supportingSourceRefs?: SupportingRef[] }[]
   >([]);
+  const [sharedSupportingSourceRefs, setSharedSupportingSourceRefs] = useState<SupportingRef[]>([]);
   const [errorMsg, setErrorMsg] = useState("");
 
   const [intelligence, setIntelligence] = useState<{
@@ -453,6 +454,7 @@ function ExamPageContent() {
       setExamDocId(data.doc_id || "");
       setTexContent(data.tex_content || "");
       setQuestionStructure(data.question_structure || []);
+      setSharedSupportingSourceRefs(data.sharedSupportingSourceRefs || []);
       setPdfStatus("failed");
       setPageState("done");
     } catch (e: any) {
@@ -1080,6 +1082,7 @@ function ExamPageContent() {
 
   const renderDone = () => (
     <div className="space-y-6">
+      <SupportingCitation courseId={courseId} sourceRefs={sharedSupportingSourceRefs} />
       {questionStructure.map((question, index) => <div key={question.id || index}><span className="text-sm">{question.id || index + 1}</span><SourceCitation courseId={courseId} sourceRefs={question.sourceRefs} /><SupportingCitation courseId={courseId} sourceRefs={question.supportingSourceRefs} /></div>)}
       <div className="flex flex-wrap items-center gap-3">
         <span className="font-mono text-xs text-sage bg-sage/10 px-3 py-1.5 rounded-full">
