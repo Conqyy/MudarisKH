@@ -4,6 +4,8 @@ import { useEffect, useState, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
 import SourceCitation, { SourceRef, validatedSourceRefs } from "@/components/SourceCitation";
+import SupportingCitation from "@/components/SupportingCitation";
+import { validatedSupportingRefs, SupportingRef } from "@/lib/supporting-materials";
 import Navbar from "@/components/Navbar";
 import Sidebar from "@/components/Sidebar";
 import BookmarkButton from "@/components/BookmarkButton";
@@ -18,6 +20,7 @@ const API_URL =
 
 interface Question {
   sourceRefs?: SourceRef[];
+  supportingSourceRefs?: SupportingRef[];
   id: string;
   type: string;
 }
@@ -551,7 +554,7 @@ export default function ExamAnswerPage() {
               </div>
             );
           })()}
-          {exam.questionStructure.map((question, index) => validatedSourceRefs(question.sourceRefs).length > 0 && <div key={question.id || index} className="mt-4 border border-line rounded-xl p-4 text-sm"><span>{question.id || index + 1}</span><SourceCitation courseId={courseId} sourceRefs={question.sourceRefs} /></div>)}
+          {exam.questionStructure.map((question, index) => (validatedSourceRefs(question.sourceRefs).length > 0 || validatedSupportingRefs(question.supportingSourceRefs).length > 0) && <div key={question.id || index} className="mt-4 border border-line rounded-xl p-4 text-sm"><span>{question.id || index + 1}</span><SourceCitation courseId={courseId} sourceRefs={question.sourceRefs} /><SupportingCitation courseId={courseId} sourceRefs={question.supportingSourceRefs} /></div>)}
         </main>
       </div>
     </>

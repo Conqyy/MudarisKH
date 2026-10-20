@@ -1,6 +1,8 @@
 "use client";
 
+import { useCallback, useState } from "react";
 import MultiUploadModal, { Step } from "@/components/MultiUploadModal";
+import { getSupportingStatus } from "@/lib/supporting-materials";
 
 interface Props {
   courseId: string;
@@ -9,14 +11,20 @@ interface Props {
 }
 
 const STEPS: Step[] = [
-  { id: "upload", label: "Uploading tutorial", duration: 1000 },
-  { id: "read", label: "Reading problems (text + images)", duration: 2000 },
-  { id: "topics", label: "Identifying topics covered", duration: 2400 },
-  { id: "ideas", label: "Capturing worked-problem ideas", duration: 2600 },
-  { id: "link", label: "Linking ideas to the exam generator", duration: 2200 },
+  { id: "upload", label: "Uploading tutorial", duration: 0 },
+  { id: "extract", label: "Extracting source content…", duration: 0 },
+  { id: "align", label: "Comparing with lectures…", duration: 0 },
 ];
 
 export default function UploadTutorialModal({ courseId, onClose, onSuccess }: Props) {
+  const [stage, setStage] = useState<{ documentId: string; step: number } | null>(null);
+  const pollAccepted = useCallback(async (result: unknown, signal: AbortSignal) => {
+    const accepted = result as { tutorial_id?: unknown; materialId?: unknown; kind?: unknown; jobId?: unknown };
+    if (typeof accepted.tutorial_id !== "string" || accepted.materialId !== accepted.tutorial_id || accepted.kind !== "tutorial" || typeof accepted.jobId !== "string") throw new Error("Upload did not return a material identity.");
+    const status = await getSupportingStatus("tutorial", accepted.tutorial_id, signal, courseId);
+    if (status.jobId !== accepted.jobId) throw new Error("Supporting analysis changed. Check the course page.");
+    setStage({ documentId: accepted.tutorial_id, step: status.stage === "aligning" ? 2 : status.stage === "extracting" ? 1 : 0 });
+  }, [courseId]);
   return (
     <MultiUploadModal
       courseId={courseId}
@@ -31,7 +39,8 @@ export default function UploadTutorialModal({ courseId, onClose, onSuccess }: Pr
       subtitle="Mudaris will look at the tutorial problems and use their ideas to build exam-style questions."
       fileNoun="tutorial"
       steps={STEPS}
-      footerNote="Tutorials add problem ideas only — analyzed one at a time, ~15–30s each."
+      pollAccepted={pollAccepted} actualStep={stage} acceptedId="tutorial_id" completionMode="queued"
+      footerNote="Uploads are queued one at a time. Follow analysis progress on the course page."
     />
   );
 }

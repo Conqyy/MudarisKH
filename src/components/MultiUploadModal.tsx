@@ -48,10 +48,12 @@ interface Props {
   maxSizeMB?: number;
   pollAccepted?: (result: unknown, signal: AbortSignal) => Promise<void>;
   actualStep?: { documentId: string; step: number } | null;
+  acceptedId?: "document_id" | "exam_id" | "tutorial_id";
+  completionMode?: "analyzed" | "queued";
 }
 
 type Phase = "select" | "processing" | "done";
-type FileStatus = "queued" | "processing" | "done" | "failed";
+type FileStatus = "queued" | "processing" | "accepted" | "done" | "failed";
 
 interface FileItem {
   file: File;
@@ -76,6 +78,8 @@ export default function MultiUploadModal({
   maxSizeMB = MAX_SIZE_MB,
   pollAccepted,
   actualStep,
+  acceptedId = "document_id",
+  completionMode = "analyzed",
 }: Props) {
   const dialogRef = useDialog(() => { if (phase !== "processing") onClose(); });
   const { user } = useAuth();
@@ -229,14 +233,16 @@ export default function MultiUploadModal({
       if (pollAccepted) {
         const accepted = await response.json();
         controller.signal.throwIfAborted();
-        setAcceptedDocumentId(typeof accepted?.document_id === "string" ? accepted.document_id : null);
+        const id = accepted?.[acceptedId];
+        if (typeof id !== "string" || !id || (accepted.materialId && accepted.materialId !== id)) throw new Error(t("Upload did not return a material identity."));
+        setAcceptedDocumentId(id);
         await pollAccepted(accepted, controller.signal);
         controller.signal.throwIfAborted();
       }
       finished = true;
       if (!cancelledRef.current) {
-        setCompleted(new Set(steps.map((s) => s.id)));
-        setCurrentStep(steps.length);
+        setCompleted(new Set((completionMode === "queued" ? steps.slice(0, 1) : steps).map((s) => s.id)));
+        setCurrentStep(completionMode === "queued" ? 1 : steps.length);
       }
       return { ok: true };
     } catch (e: any) {
@@ -268,7 +274,7 @@ export default function MultiUploadModal({
       const result = await processOne(items[idx].file);
       if (stale()) return;
 
-      if (result.ok) setItemStatus(idx, "done");
+      if (result.ok) setItemStatus(idx, completionMode === "queued" ? "accepted" : "done");
       else setItemStatus(idx, "failed", result.error);
     }
 
@@ -288,7 +294,7 @@ export default function MultiUploadModal({
     return `${mb.toFixed(1)} MB`;
   };
 
-  const doneCount = items.filter((it) => it.status === "done").length;
+  const doneCount = items.filter((it) => it.status === "done" || it.status === "accepted").length;
   const failedCount = items.filter((it) => it.status === "failed").length;
   const finishedCount = doneCount + failedCount;
   const total = items.length;
@@ -298,6 +304,7 @@ export default function MultiUploadModal({
 
   const statusBadge = (s: FileStatus) => {
     if (s === "done") return <span className="text-sage">● {t("Done")}</span>;
+    if (s === "accepted") return <span className="text-gold">● {t("Uploaded; analysis is queued.")}</span>;
     if (s === "failed") return <span className="text-accent">● {t("Failed")}</span>;
     if (s === "processing")
       return (
@@ -469,12 +476,12 @@ export default function MultiUploadModal({
               {isDone
                 ? failedCount > 0
                   ? t("Finished with some issues")
-                  : t("All files analyzed!")
-                : t("Mudaris is analyzing…")}
+                  : t(completionMode === "queued" ? "Uploaded; analysis is queued." : "All files analyzed!")
+                : t(completionMode === "queued" ? "Uploading materials…" : "Mudaris is analyzing…")}
             </h2>
             <p className="text-ink-soft text-sm mb-2 px-2">
               <span className="font-medium text-ink">{doneCount}</span> /{" "}
-              <span className="font-medium text-ink">{total}</span> {t("done")}
+              <span className="font-medium text-ink">{total}</span> {t(completionMode === "queued" ? "uploaded" : "done")}
               {failedCount > 0 && (
                 <span className="text-accent"> · {failedCount} {t("failed")}</span>
               )}

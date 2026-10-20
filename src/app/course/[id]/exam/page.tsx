@@ -4,6 +4,8 @@ import { useEffect, useState, useRef } from "react";
 import { useRouter, useParams } from "next/navigation";
 import Link from "next/link";
 import SourceCitation, { SourceRef } from "@/components/SourceCitation";
+import SupportingCitation from "@/components/SupportingCitation";
+import type { SupportingRef } from "@/lib/supporting-materials";
 import Navbar from "@/components/Navbar";
 import Sidebar from "@/components/Sidebar";
 import { CourseFoundationGate } from "@/components/CourseFoundationGate";
@@ -18,6 +20,8 @@ import {
 import { ordered } from "@/lib/ordering";
 
 import { apiFetch, apiJson } from "@/lib/api";
+import { firstSupportingBlocker, retainSelectedRows, supportingPresentation, SupportingRow } from "@/lib/supporting-materials";
+import SupportingSelectionNotice from "@/components/SupportingSelectionNotice";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
@@ -42,21 +46,21 @@ interface SavedExam {
   grade?: { totalScore: number; maxScore: number; percentage: number };
 }
 
-interface HistExamItem {
+interface HistExamItem extends SupportingRow {
   id: string;
   title: string;
   status: string;
   analysis?: { totalQuestions?: number; paperCount?: number };
 }
 
-interface TutorialItem {
+interface TutorialItem extends SupportingRow {
   id: string;
   title: string;
   status: string;
   analysis?: { problemCount?: number; problems?: unknown[] };
 }
 
-interface AudioItem {
+interface AudioItem extends SupportingRow {
   id: string;
   title: string;
   status: string;
@@ -105,6 +109,15 @@ export default function ExamPage() {
   const [selectedHist, setSelectedHist] = useState<Set<string>>(new Set());
   const [selectedTut, setSelectedTut] = useState<Set<string>>(new Set());
   const [selectedAudio, setSelectedAudio] = useState<Set<string>>(new Set());
+  const initialSupportingSelection = useRef("");
+  const selectionRef = useRef({ hist: selectedHist, tut: selectedTut, audio: selectedAudio });
+  selectionRef.current = { hist: selectedHist, tut: selectedTut, audio: selectedAudio };
+  const supportingBlocker = firstSupportingBlocker([{ selected: selectedHist, rows: histExams }, { selected: selectedTut, rows: tutorials }, { selected: selectedAudio, rows: audioRecs }]);
+  const deselectBlocking = (id: string) => {
+    setSelectedHist(previous => new Set([...previous].filter(value => value !== id)));
+    setSelectedTut(previous => new Set([...previous].filter(value => value !== id)));
+    setSelectedAudio(previous => new Set([...previous].filter(value => value !== id)));
+  };
   const [topics, setTopics] = useState("");
   const [preference, setPreference] = useState("");
   const [totalMarks, setTotalMarks] = useState(40);
@@ -122,7 +135,7 @@ export default function ExamPage() {
   const [examId, setExamId] = useState("");
   const [examDocId, setExamDocId] = useState("");
   const [questionStructure, setQuestionStructure] = useState<
-    { id: string; type: string; sourceRefs?: SourceRef[] }[]
+    { id: string; type: string; sourceRefs?: SourceRef[]; supportingSourceRefs?: SupportingRef[] }[]
   >([]);
   const [errorMsg, setErrorMsg] = useState("");
 
@@ -257,34 +270,31 @@ export default function ExamPage() {
       setSelectedDocs(new Set(completedDocs.map((d: DocItem) => d.id)));
 
       const completedHist = ordered<HistExamItem>(
-        (histRes.historical_exams || []).filter(
-          (h: HistExamItem) => h.status === "completed"
-        ),
+        histRes.historical_exams || [],
         courseData?.examOrder,
         courseData?.titleOverrides
       );
-      setHistExams(completedHist);
-      setSelectedHist(new Set(completedHist.map((h: HistExamItem) => h.id)));
+      setHistExams(previous => retainSelectedRows(completedHist, previous, selectionRef.current.hist));
 
       const completedTut = ordered<TutorialItem>(
-        (tutRes.tutorials || []).filter(
-          (t: TutorialItem) => t.status === "completed"
-        ),
+        tutRes.tutorials || [],
         courseData?.tutorialOrder,
         courseData?.titleOverrides
       );
-      setTutorials(completedTut);
-      setSelectedTut(new Set(completedTut.map((t: TutorialItem) => t.id)));
+      setTutorials(previous => retainSelectedRows(completedTut, previous, selectionRef.current.tut));
 
       const completedAudio = ordered<AudioItem>(
-        (audioRes.audio_recordings || []).filter(
-          (a: AudioItem) => a.status === "completed"
-        ),
+        audioRes.audio_recordings || [],
         courseData?.audioOrder,
         courseData?.titleOverrides
       );
-      setAudioRecs(completedAudio);
-      setSelectedAudio(new Set(completedAudio.map((a: AudioItem) => a.id)));
+      setAudioRecs(previous => retainSelectedRows(completedAudio, previous, selectionRef.current.audio));
+      if (initialSupportingSelection.current !== `${user.uid}:${courseId}`) {
+        initialSupportingSelection.current = `${user.uid}:${courseId}`;
+        setSelectedHist(new Set(completedHist.filter(row => supportingPresentation(row) === "usable").map(row => row.id)));
+        setSelectedTut(new Set(completedTut.filter(row => supportingPresentation(row) === "usable").map(row => row.id)));
+        setSelectedAudio(new Set(completedAudio.filter(row => supportingPresentation(row) === "usable").map(row => row.id)));
+      }
 
       setSavedExams(examsRes.exams || []);
       setIntelligence(intRes.counts || null);
@@ -354,6 +364,7 @@ export default function ExamPage() {
 
   const handleGenerate = async () => {
     if (!user || !course || !foundationReadyRef.current || !documents.some((doc) => selectedDocs.has(doc.id))) return;
+    if (supportingBlocker) { setErrorMsg(t("Selected material is unavailable. Retry or deselect it.")); return; }
     studyRequest.current?.abort();
     const controller = new AbortController();
     studyRequest.current = controller;
@@ -909,9 +920,10 @@ export default function ExamPage() {
       </div>
 
       {/* Generate button */}
+      <SupportingSelectionNotice blocker={supportingBlocker} onDeselect={deselectBlocking} onRefresh={() => void loadDataRef.current?.()} />
       <button
         onClick={handleGenerate}
-        disabled={!foundationReady || !documents.some((doc) => selectedDocs.has(doc.id))}
+        disabled={!foundationReady || !!supportingBlocker || !documents.some((doc) => selectedDocs.has(doc.id))}
         className="w-full bg-ink text-paper py-4 rounded-full text-sm font-medium hover:bg-accent transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2.5 disabled:opacity-50 disabled:cursor-not-allowed"
       >
         Generate Exam <span>→</span>
@@ -1062,7 +1074,7 @@ export default function ExamPage() {
 
   const renderDone = () => (
     <div className="space-y-6">
-      {questionStructure.map((question, index) => <div key={question.id || index}><span className="text-sm">{question.id || index + 1}</span><SourceCitation courseId={courseId} sourceRefs={question.sourceRefs} /></div>)}
+      {questionStructure.map((question, index) => <div key={question.id || index}><span className="text-sm">{question.id || index + 1}</span><SourceCitation courseId={courseId} sourceRefs={question.sourceRefs} /><SupportingCitation courseId={courseId} sourceRefs={question.supportingSourceRefs} /></div>)}
       <div className="flex flex-wrap items-center gap-3">
         <span className="font-mono text-xs text-sage bg-sage/10 px-3 py-1.5 rounded-full">
           {examId} · {questionStructure.length} questions

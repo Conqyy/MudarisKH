@@ -2,11 +2,15 @@
 
 import { useDialog } from "@/lib/use-dialog";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AudioRecording } from "@/lib/firestore-helpers";
 import BookmarkButton from "@/components/BookmarkButton";
 import { useTrackRecent } from "@/lib/activity";
 import { fetchObjectUrl } from "@/lib/api";
+import { getLegacySupportingAnalysis } from "@/lib/supporting-materials";
+import SupportingAnalysisReport from "@/components/SupportingAnalysisReport";
+import { useAuth } from "@/lib/auth-context";
+import { useLang } from "@/lib/i18n";
 
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
@@ -25,7 +29,23 @@ export default function AudioViewer({
   courseColor,
 }: AudioViewerProps) {
   const dialogRef = useDialog(onClose);
-  const insights = recording.insights;
+  const { user } = useAuth();
+  const { t } = useLang();
+  const [legacy, setLegacy] = useState<{ insights?: AudioRecording["insights"]; transcript?: string } | null>(null);
+  const [legacyError, setLegacyError] = useState("");
+  const isLegacy = recording.legacy === true;
+  const kind = recording.sourceType === "notes" ? "notes" : "audio";
+  useEffect(() => {
+    if (!isLegacy || !recording.courseId || !user?.uid) return;
+    const controller = new AbortController();
+    setLegacy(null);
+    setLegacyError("");
+    getLegacySupportingAnalysis(kind, recording.id, recording.courseId, controller.signal).then(value => {
+      if (!controller.signal.aborted) setLegacy({ insights: value.insights as AudioRecording["insights"], transcript: typeof value.transcript === "string" ? value.transcript : undefined });
+    }).catch(error => { if (!controller.signal.aborted) setLegacyError((error as Error).message); });
+    return () => controller.abort();
+  }, [isLegacy, kind, recording.courseId, recording.id, user?.uid]);
+  const insights = isLegacy ? legacy?.insights : recording.insights;
 
   // The analysis endpoint needs an Authorization header, which <a href> cannot
   // send, so fetch the bytes on click and hand the browser a blob instead.
@@ -111,9 +131,14 @@ export default function AudioViewer({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto">
+          {recording.reportRevision && <div className="p-6"><SupportingAnalysisReport kind={kind} materialId={recording.id} courseId={recording.courseId} /></div>}
+          {isLegacy && <p className="px-6 pt-4 text-sm text-gold">{t("Legacy analysis is unverified.")}</p>}
+          {recording.sourceType === "notes" && <p className="px-6 pt-4 text-sm text-ink-soft">{t("Student-typed notes")}</p>}
+          {legacyError && <p className="px-6 pt-4 text-sm text-accent" role="alert">{legacyError}</p>}
+          {legacy?.transcript && <section className="px-6 pt-4"><h3 className="font-serif text-lg font-medium">{t(recording.sourceType === "notes" ? "Student-typed notes" : "Transcript")}</h3><pre dir="auto" className="mt-3 whitespace-pre-wrap font-sans text-sm text-ink-soft">{legacy.transcript}</pre></section>}
           {insights ? (
             <div className="p-6 space-y-8">
-              {/* Lecture summary — what the professor said */}
+                  {/* Legacy reading stays clearly labeled as unverified. */}
               {insights.summary && (
                 <section>
                   <h3 className="font-serif text-lg font-medium mb-3">
@@ -149,7 +174,7 @@ export default function AudioViewer({
                           <div dir="auto" className="text-sm text-ink text-start">
                             {h.hint}
                           </div>
-                          {h.source && (
+                          {h.source && recording.sourceType !== "notes" && (
                             <div
                               dir="auto"
                               className="text-xs text-ink-mute mt-1 italic text-start"
@@ -191,7 +216,7 @@ export default function AudioViewer({
                             {e.topic}
                           </span>
                         </div>
-                        {e.quote && (
+                        {e.quote && recording.sourceType !== "notes" && (
                           <p
                             dir="auto"
                             className="text-xs text-ink-soft italic mt-1 text-start"
@@ -243,10 +268,9 @@ export default function AudioViewer({
                 </section>
               )}
             </div>
-          ) : (
+          ) : !recording.reportRevision && (
             <div className="text-center text-ink-mute text-sm py-16 px-6">
-              Insights aren&apos;t ready yet — this recording is still being
-              processed.
+              {t(isLegacy ? "Loading saved analysis…" : "Analysis is still processing.")}
             </div>
           )}
         </div>

@@ -71,14 +71,14 @@ it('does not publish a late completion after switching courses', async () => {
   expect(success).not.toHaveBeenCalled();
 });
 
-it('leaves supporting uploads on their existing response completion path and size cap', async () => {
-  mocks.fetch.mockResolvedValue({ ok: true, status: 200, json: vi.fn() });
-  const view = render(<MultiUploadModal courseId="c1" onClose={vi.fn()} onSuccess={vi.fn()} endpoint="/api/tutorials/upload" accent="#c8472f" icon="📄" acceptExts={['pdf']} acceptAttr=".pdf" heading="Supporting upload" subtitle="Supporting material" fileNoun="tutorial" steps={[{ id: 'upload', label: 'Uploading tutorial', duration: 1 }]} />);
+it('labels accepted supporting uploads as queued work, not completed analysis', async () => {
+  mocks.fetch.mockResolvedValue({ ok: true, status: 202, json: async () => ({ tutorial_id: 't1', materialId: 't1', kind: 'tutorial', status: 'queued', jobId: 'j1' }) });
+  const view = render(<MultiUploadModal courseId="c1" onClose={vi.fn()} onSuccess={vi.fn()} endpoint="/api/tutorials/upload" accent="#c8472f" icon="📄" acceptExts={['pdf']} acceptAttr=".pdf" heading="Supporting upload" subtitle="Supporting material" fileNoun="tutorial" steps={[{ id: 'upload', label: 'Uploading tutorial', duration: 0 }]} completionMode="queued" acceptedId="tutorial_id" pollAccepted={async () => {}} />);
   expect(screen.getByText(/50MB/)).toBeTruthy();
   fireEvent.change(view.container.querySelector('input[type=file]')!, { target: { files: [new File(['a'], 'tutorial.pdf')] } });
   fireEvent.click(screen.getByRole('button', { name: /Upload & Analyze/ }));
-  await screen.findByText('All files analyzed!');
-  expect(mocks.json).not.toHaveBeenCalled();
+  expect((await screen.findAllByText('Uploaded; analysis is queued.')).length).toBeGreaterThan(0);
+  expect(screen.queryByText('All files analyzed!')).toBeNull();
 });
 
 it.each(['preparation', 'guide'])('keeps each file stage authoritative after the prior file fails %s', async failedStage => {

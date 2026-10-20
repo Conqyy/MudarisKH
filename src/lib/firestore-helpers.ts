@@ -113,6 +113,17 @@ export interface CourseDocument {
 
 // ============ AUDIO RECORDINGS (Model 2) ============
 export interface AudioRecording {
+  materialId?: string;
+  kind?: "audio" | "notes";
+  jobId?: string | null;
+  sourceRevision?: string | null;
+  reportRevision?: string | null;
+  scopeRevision?: string | null;
+  stage?: string | null;
+  progress?: { completedUnits: number; totalUnits: number | null; completedRequirements: number; totalRequirements: number | null };
+  coverage?: unknown;
+  legacy?: boolean;
+  stale?: boolean;
   sourceUrl?: string;
   sourceType?: "upload" | "url" | "notes";
   audioExt?: string;
@@ -134,7 +145,7 @@ export interface AudioRecording {
     | "transcribing"
     | "analyzing"
     | "completed"
-    | "failed";
+    | "failed" | "incomplete" | "legacy" | "processing";
   errorMessage?: string;
   transcript?: string;
   insights?: {
@@ -154,6 +165,17 @@ export interface AudioRecording {
 
 // ============ HISTORICAL EXAMS (Model 3) ============
 export interface HistoricalExam {
+  materialId?: string;
+  kind?: "historical_exam";
+  jobId?: string | null;
+  sourceRevision?: string | null;
+  reportRevision?: string | null;
+  scopeRevision?: string | null;
+  stage?: string | null;
+  progress?: { completedUnits: number; totalUnits: number | null; completedRequirements: number; totalRequirements: number | null };
+  coverage?: unknown;
+  legacy?: boolean;
+  stale?: boolean;
   id: string;
   courseId: string;
   userId: string;
@@ -161,7 +183,7 @@ export interface HistoricalExam {
   fileUrl: string;
   storagePath: string;
   fileSize: number;
-  status: "pending" | "processing" | "completed" | "failed";
+  status: "pending" | "queued" | "processing" | "completed" | "incomplete" | "legacy" | "failed";
   errorMessage?: string;
   extractedText?: string;
   analysis?: {
@@ -189,6 +211,17 @@ export interface HistoricalExam {
 // worked-problem IDEAS and feed the exam generator's CONTENT only — never its
 // grading weight or format (that comes from past exams).
 export interface Tutorial {
+  materialId?: string;
+  kind?: "tutorial";
+  jobId?: string | null;
+  sourceRevision?: string | null;
+  reportRevision?: string | null;
+  scopeRevision?: string | null;
+  stage?: string | null;
+  progress?: { completedUnits: number; totalUnits: number | null; completedRequirements: number; totalRequirements: number | null };
+  coverage?: unknown;
+  legacy?: boolean;
+  stale?: boolean;
   id: string;
   courseId: string;
   userId: string;
@@ -197,7 +230,7 @@ export interface Tutorial {
   fileUrl: string;
   storagePath: string;
   fileSize: number;
-  status: "pending" | "processing" | "completed" | "failed";
+  status: "pending" | "queued" | "processing" | "completed" | "incomplete" | "legacy" | "failed";
   errorMessage?: string;
   extractedText?: string;
   analysis?: {

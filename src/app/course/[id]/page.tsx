@@ -38,6 +38,8 @@ import { useLang } from "@/lib/i18n";
 import { apiFetch, apiJson } from "@/lib/api";
 import { useCourseFoundation } from "@/hooks/useCourseFoundation";
 import { CourseFoundationGate } from "@/components/CourseFoundationGate";
+import SupportingMaterialAction from "@/components/SupportingMaterialAction";
+import { kindForRow } from "@/lib/supporting-materials";
 
 function StudyAction({ ready, href, label, className, reason }: { ready: boolean; href: string; label: string; className: string; reason: string }) {
   return ready ? <Link href={href} className={className}>{label} →</Link> : (
@@ -903,22 +905,7 @@ export default function CoursePage() {
                       : ` · ${exam.analysis.totalQuestions} ${t("questions")}`)}
                   </>
                 )}
-                renderStatus={(exam) => (
-                  <>
-                    {exam.status === "completed" && (
-                      <span className="text-sage">● {t("Analyzed")}</span>
-                    )}
-                    {exam.status === "processing" && (
-                      <span className="text-gold">● {t("Processing")}</span>
-                    )}
-                    {exam.status === "failed" && (
-                      <span className="text-accent">● {t("Failed")}</span>
-                    )}
-                    {exam.status === "pending" && (
-                      <span className="text-ink-mute">● {t("Pending")}</span>
-                    )}
-                  </>
-                )}
+                renderStatus={(exam) => <SupportingMaterialAction kind="historical_exam" materialId={exam.id} courseId={courseId} />}
               />
             )}
           </section>
@@ -983,22 +970,7 @@ export default function CoursePage() {
                       : ""}
                   </>
                 )}
-                renderStatus={(tut) => (
-                  <>
-                    {tut.status === "completed" && (
-                      <span className="text-sage">● {t("Analyzed")}</span>
-                    )}
-                    {tut.status === "processing" && (
-                      <span className="text-gold">● {t("Processing")}</span>
-                    )}
-                    {tut.status === "failed" && (
-                      <span className="text-accent">● {t("Failed")}</span>
-                    )}
-                    {tut.status === "pending" && (
-                      <span className="text-ink-mute">● {t("Pending")}</span>
-                    )}
-                  </>
-                )}
+                renderStatus={(tut) => <SupportingMaterialAction kind="tutorial" materialId={tut.id} courseId={courseId} />}
               />
             )}
           </section>
@@ -1043,7 +1015,7 @@ export default function CoursePage() {
                 onReorder={handleReorderAudio}
                 onRename={handleRenameAudio}
                 onItemClick={(rec) => setViewingAudio(rec)}
-                canClick={(rec) => rec.status === "completed"}
+                canClick={(rec) => rec.status === "completed" || rec.legacy === true}
                 onDelete={(rec) => handleDeleteItem("audio", rec.id, rec.title)}
                 renderIcon={() => (
                   <div className="w-10 h-10 rounded-xl bg-gold/10 flex items-center justify-center text-gold">
@@ -1057,54 +1029,7 @@ export default function CoursePage() {
                       ` · ${rec.insights.examHints.length} ${t("exam hints")}`}
                   </>
                 )}
-                renderStatus={(rec) => (
-                  <>
-                    {rec.status === "completed" && (
-                      <span className="text-sage">● {t("Analyzed")}</span>
-                    )}
-                    {rec.status === "queued" && (
-                      <span className="text-gold">● {t("Queued…")}</span>
-                    )}
-                    {rec.status === "downloading" && (
-                      <span className="text-gold">● {t("Downloading…")}</span>
-                    )}
-                    {rec.status === "converting" && (
-                      <span className="text-gold">● {t("Converting to MP3…")}</span>
-                    )}
-                    {rec.status === "transcribing" && (
-                      <span className="text-gold">● {t("Transcribing…")}</span>
-                    )}
-                    {rec.status === "analyzing" && (
-                      <span className="text-gold">● {t("Analyzing…")}</span>
-                    )}
-                    {rec.status === "failed" && (
-                      <span
-                        className="text-accent"
-                        title={rec.errorMessage || "Analysis failed"}
-                      >
-                        ● {t("Failed")}
-                      </span>
-                    )}
-                    {rec.status === "pending" && (
-                      <span className="text-ink-mute">● {t("Pending")}</span>
-                    )}
-                    {/* Retry is only possible when the text was saved (typed
-                        notes always are; recordings once transcribed). */}
-                    {rec.status === "failed" && !!(rec.transcript || rec.storagePath || rec.sourceUrl) && (
-                      <button
-                        disabled={!foundationReady} aria-describedby="foundation-lock-reason"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleReanalyzeRecording(rec);
-                        }}
-                        className="ms-2 text-[10px] underline text-accent hover:text-ink disabled:opacity-50 disabled:cursor-not-allowed"
-                        title="Run AI analysis again"
-                      >
-                        {!foundationReady && <span aria-hidden="true">🔒 </span>}{t("retry")}
-                      </button>
-                    )}
-                  </>
-                )}
+                renderStatus={(rec) => <SupportingMaterialAction kind={kindForRow(rec, "audio")} materialId={rec.id} courseId={courseId} />}
               />
             )}
           </section>

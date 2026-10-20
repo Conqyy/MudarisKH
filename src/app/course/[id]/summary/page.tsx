@@ -6,6 +6,8 @@ import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import SourceCitation, { SourceRef } from "@/components/SourceCitation";
+import SupportingCitation from "@/components/SupportingCitation";
+import type { SupportingRef } from "@/lib/supporting-materials";
 import Navbar from "@/components/Navbar";
 import Sidebar from "@/components/Sidebar";
 import { CourseFoundationGate } from "@/components/CourseFoundationGate";
@@ -18,6 +20,8 @@ import { getCourse, getUserCourses, Course } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 
 import { apiFetch, apiJson } from "@/lib/api";
+import { firstSupportingBlocker, retainSelectedRows, supportingPresentation, SupportingRow } from "@/lib/supporting-materials";
+import SupportingSelectionNotice from "@/components/SupportingSelectionNotice";
 // Inline-markdown renderer: the AI writes **bold** / *italic* / `code` inside
 // summary text — render it instead of showing raw asterisks. Paragraphs unwrap
 // to fragments so it also works inside list items and styled containers.
@@ -54,20 +58,20 @@ interface DocItem {
   analysis?: { topics?: string[] };
 }
 
-interface HistExamItem {
+interface HistExamItem extends SupportingRow {
   id: string;
   title: string;
   status: string;
 }
 
-interface TutorialItem {
+interface TutorialItem extends SupportingRow {
   id: string;
   title: string;
   status: string;
   analysis?: { problems?: unknown[]; problemCount?: number };
 }
 
-interface AudioItem {
+interface AudioItem extends SupportingRow {
   id: string;
   title: string;
   status: string;
@@ -76,6 +80,7 @@ interface AudioItem {
 
 interface SummarySection {
   sourceRefs?: SourceRef[];
+  supportingSourceRefs?: SupportingRef[];
   heading: string;
   content: string;
   keyPoints?: string[];
@@ -84,10 +89,12 @@ interface SummarySection {
 }
 
 interface SummaryData {
+  sourceRefs?: SourceRef[];
+  supportingSourceRefs?: SupportingRef[];
   title: string;
   overview: string;
   sections: SummarySection[];
-  keyTerms?: { term: string; definition: string }[];
+  keyTerms?: { term: string; definition: string; sourceRefs?: SourceRef[]; supportingSourceRefs?: SupportingRef[] }[];
   examFocus?: string[];
 }
 
@@ -145,6 +152,15 @@ export default function SummaryPage() {
   const [selectedHist, setSelectedHist] = useState<Set<string>>(new Set());
   const [selectedTut, setSelectedTut] = useState<Set<string>>(new Set());
   const [selectedAudio, setSelectedAudio] = useState<Set<string>>(new Set());
+  const initialSupportingSelection = useRef("");
+  const selectionRef = useRef({ hist: selectedHist, tut: selectedTut, audio: selectedAudio });
+  selectionRef.current = { hist: selectedHist, tut: selectedTut, audio: selectedAudio };
+  const supportingBlocker = firstSupportingBlocker([{ selected: selectedHist, rows: histExams }, { selected: selectedTut, rows: tutorials }, { selected: selectedAudio, rows: audioRecs }]);
+  const deselectBlocking = (id: string) => {
+    setSelectedHist(previous => new Set([...previous].filter(value => value !== id)));
+    setSelectedTut(previous => new Set([...previous].filter(value => value !== id)));
+    setSelectedAudio(previous => new Set([...previous].filter(value => value !== id)));
+  };
   const [instructions, setInstructions] = useState("");
 
   const [pageState, setPageState] = useState<PageState>("configure");
@@ -240,28 +256,31 @@ export default function SummaryPage() {
       setSelectedDocs(new Set(completedDocs.map((d: DocItem) => d.id)));
 
       const completedHist = ordered<HistExamItem>(
-        (histRes.historical_exams || []).filter((h: HistExamItem) => h.status === "completed"),
+        histRes.historical_exams || [],
         courseData?.examOrder,
         courseData?.titleOverrides
       );
-      setHistExams(completedHist);
-      setSelectedHist(new Set(completedHist.map((h: HistExamItem) => h.id)));
+      setHistExams(previous => retainSelectedRows(completedHist, previous, selectionRef.current.hist));
 
       const completedTut = ordered<TutorialItem>(
-        (tutRes.tutorials || []).filter((t: TutorialItem) => t.status === "completed"),
+        tutRes.tutorials || [],
         courseData?.tutorialOrder,
         courseData?.titleOverrides
       );
-      setTutorials(completedTut);
-      setSelectedTut(new Set(completedTut.map((t: TutorialItem) => t.id)));
+      setTutorials(previous => retainSelectedRows(completedTut, previous, selectionRef.current.tut));
 
       const completedAudio = ordered<AudioItem>(
-        (audioRes.audio_recordings || []).filter((a: AudioItem) => a.status === "completed"),
+        audioRes.audio_recordings || [],
         courseData?.audioOrder,
         courseData?.titleOverrides
       );
-      setAudioRecs(completedAudio);
-      setSelectedAudio(new Set(completedAudio.map((a: AudioItem) => a.id)));
+      setAudioRecs(previous => retainSelectedRows(completedAudio, previous, selectionRef.current.audio));
+      if (initialSupportingSelection.current !== `${user.uid}:${courseId}`) {
+        initialSupportingSelection.current = `${user.uid}:${courseId}`;
+        setSelectedHist(new Set(completedHist.filter(row => supportingPresentation(row) === "usable").map(row => row.id)));
+        setSelectedTut(new Set(completedTut.filter(row => supportingPresentation(row) === "usable").map(row => row.id)));
+        setSelectedAudio(new Set(completedAudio.filter(row => supportingPresentation(row) === "usable").map(row => row.id)));
+      }
 
       setSavedSummaries(sumRes.summaries || []);
     } catch (error: any) {
@@ -281,6 +300,7 @@ export default function SummaryPage() {
 
   const handleGenerate = async () => {
     if (!user || !course || !foundationReadyRef.current || !documents.some((doc) => selectedDocs.has(doc.id))) return;
+    if (supportingBlocker) { setErrorMsg(t("Selected material is unavailable. Retry or deselect it.")); return; }
     studyRequest.current?.abort();
     const controller = new AbortController();
     studyRequest.current = controller;
@@ -343,6 +363,8 @@ export default function SummaryPage() {
       setGenCompleted(new Set(GEN_STEPS.map((_, i) => i)));
       setViewingId(data.doc_id || "");
       setSummary({
+        sourceRefs: data.sourceRefs,
+        supportingSourceRefs: data.supportingSourceRefs,
         title: data.title,
         overview: data.overview,
         sections: data.sections || [],
@@ -376,6 +398,8 @@ export default function SummaryPage() {
       const s = data.summary;
       setViewingId(id);
       setSummary({
+        sourceRefs: s.sourceRefs,
+        supportingSourceRefs: s.supportingSourceRefs,
         title: s.title,
         overview: s.overview,
         sections: s.sections || [],
@@ -849,9 +873,10 @@ export default function SummaryPage() {
         />
       </div>
 
+      <SupportingSelectionNotice blocker={supportingBlocker} onDeselect={deselectBlocking} onRefresh={() => void loadDataRef.current?.()} />
       <button
         onClick={handleGenerate}
-        disabled={!foundationReady || !documents.some((doc) => selectedDocs.has(doc.id))}
+        disabled={!foundationReady || !!supportingBlocker || !documents.some((doc) => selectedDocs.has(doc.id))}
         className="w-full bg-ink text-paper py-4 rounded-full text-sm font-medium hover:bg-accent transition-all hover:-translate-y-0.5 hover:shadow-lift disabled:opacity-50 disabled:cursor-not-allowed"
       >
         Generate Summary →
@@ -999,6 +1024,8 @@ export default function SummaryPage() {
         {summary.overview && (
           <div className="text-ink-soft text-lg leading-relaxed bg-paper border border-line rounded-2xl p-7 mb-7">
             <Md>{summary.overview}</Md>
+            <SourceCitation courseId={courseId} sourceRefs={summary.sourceRefs} />
+            <SupportingCitation courseId={courseId} sourceRefs={summary.supportingSourceRefs} />
           </div>
         )}
 
@@ -1046,6 +1073,7 @@ export default function SummaryPage() {
                 )}
               </div>
               <SourceCitation courseId={courseId} sourceRefs={sec.sourceRefs} />
+              <SupportingCitation courseId={courseId} sourceRefs={sec.supportingSourceRefs} />
               {sec.content && (
                 <div className="text-base text-ink-soft leading-relaxed mb-4">
                   <Md>{sec.content}</Md>
@@ -1075,6 +1103,8 @@ export default function SummaryPage() {
                   <div className="text-base text-ink-soft mt-1.5 leading-relaxed">
                     <Md>{t.definition}</Md>
                   </div>
+                  <SourceCitation courseId={courseId} sourceRefs={t.sourceRefs} />
+                  <SupportingCitation courseId={courseId} sourceRefs={t.supportingSourceRefs} />
                 </div>
               ))}
             </div>

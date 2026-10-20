@@ -7,6 +7,7 @@ import { useAuth } from "@/lib/auth-context";
 import { useLang } from "@/lib/i18n";
 
 import { apiFetch } from "@/lib/api";
+import { getSupportingStatus, MaterialKind } from "@/lib/supporting-materials";
 interface Props {
   courseId: string;
   onClose: () => void;
@@ -22,23 +23,22 @@ const ACCEPTED_EXTS = ["mp3", "wav", "m4a", "mp4", "mov"];
 const ACCEPT_ATTR =
   "audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/mp4,audio/x-m4a,audio/m4a,video/mp4,video/quicktime,.mp3,.wav,.m4a,.mp4,.mov";
 
-// Per-item processing steps (animated while each recording is analyzed).
+// These steps describe the durable job; the course page shows live progress.
 const STEPS = [
-  { id: "fetch", label: "Fetching recording", duration: 5000 },
-  { id: "transcribe", label: "Transcribing (Whisper large-v3)", duration: 14000 },
-  { id: "summarize", label: "Summarizing the lecture", duration: 6000 },
-  { id: "hints", label: "Extracting exam hints", duration: 4000 },
+  { id: "upload", label: "Uploading recording", duration: 0 },
+  { id: "extract", label: "Extracting source content…", duration: 0 },
+  { id: "align", label: "Comparing with lectures…", duration: 0 },
 ];
 
 // Typed notes skip transcription — same analysis AI, different steps.
 const NOTE_STEPS = [
-  { id: "read", label: "Reading your notes", duration: 4000 },
-  { id: "hints", label: "Extracting exam hints & emphasis", duration: 9000 },
-  { id: "save", label: "Saving to your course", duration: 4000 },
+  { id: "upload", label: "Saving your notes", duration: 0 },
+  { id: "extract", label: "Extracting source content…", duration: 0 },
+  { id: "align", label: "Comparing with lectures…", duration: 0 },
 ];
 
 type Phase = "select" | "processing" | "done";
-type ItemStatus = "queued" | "processing" | "done" | "failed";
+type ItemStatus = "queued" | "processing" | "accepted" | "done" | "failed";
 
 interface QueueItem {
   kind: "file" | "url" | "notes";
@@ -74,11 +74,17 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
   const [completed, setCompleted] = useState<Set<string>>(new Set());
 
   const cancelledRef = useRef(false);
+  const requestRef = useRef<AbortController | null>(null);
+  const identity = `${user?.uid || ""}:${courseId}`;
+  const identityRef = useRef(identity);
+  identityRef.current = identity;
   useEffect(() => {
+    cancelledRef.current = false;
     return () => {
       cancelledRef.current = true;
+      requestRef.current?.abort();
     };
-  }, []);
+  }, [identity]);
 
   const switchMode = (m: "file" | "url" | "notes") => {
     setMode(m);
@@ -149,23 +155,23 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
     .map((s) => s.trim())
     .filter((s) => /^https?:\/\/.+/i.test(s));
 
-  const uploadOne = async (item: QueueItem) => {
+  const uploadOne = async (item: QueueItem, signal: AbortSignal) => {
     if (item.kind === "file") {
       const formData = new FormData();
       formData.append("file", item.file!);
       formData.append("user_id", user!.uid);
       formData.append("course_id", courseId);
       formData.append("title", item.file!.name.replace(/\.[^/.]+$/, ""));
-      formData.append("background", "0");
       const res = await apiFetch(`${API_URL}/api/audio/upload`, {
         method: "POST",
         body: formData,
+        signal,
       });
       if (!res.ok) {
         const e = await res.json().catch(() => null);
         throw new Error(e?.detail || `Upload failed (${res.status})`);
       }
-      return;
+      return res.json();
     }
     if (item.kind === "notes") {
       const res = await apiFetch(`${API_URL}/api/audio/upload-notes`, {
@@ -177,12 +183,13 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
           notes: item.notesText,
           title: item.notesTitle || "",
         }),
+        signal,
       });
       if (!res.ok) {
         const e = await res.json().catch(() => null);
         throw new Error(e?.detail || `Analysis failed (${res.status})`);
       }
-      return;
+      return res.json();
     }
     // URL
     const res = await apiFetch(`${API_URL}/api/audio/upload-url`, {
@@ -193,13 +200,14 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
         course_id: courseId,
         video_url: item.url,
         title: "",
-        background: "0",
       }),
+      signal,
     });
     if (!res.ok) {
       const e = await res.json().catch(() => null);
       throw new Error(e?.detail || `Upload failed (${res.status})`);
     }
+    return res.json();
   };
 
   const processOne = async (item: QueueItem): Promise<{ ok: boolean; error?: string }> => {
@@ -207,51 +215,43 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
     setCurrentStep(0);
     setCompleted(new Set());
 
-    let finished = false;
-    const uploadPromise = uploadOne(item);
-
-    (async () => {
-      for (let i = 0; i < steps.length; i++) {
-        if (cancelledRef.current || finished) return;
-        setCurrentStep(i);
-        if (i === steps.length - 1) return;
-        await new Promise((r) => setTimeout(r, steps[i].duration));
-        if (cancelledRef.current || finished) return;
-        setCompleted((prev) => new Set(prev).add(steps[i].id));
-      }
-    })();
-
+    const signal = requestRef.current!.signal;
     try {
-      await uploadPromise;
-      finished = true;
-      if (!cancelledRef.current) {
-        setCompleted(new Set(steps.map((s) => s.id)));
-        setCurrentStep(steps.length);
-      }
+      const result = await uploadOne(item, signal);
+      signal.throwIfAborted();
+      const kind: MaterialKind = item.kind === "notes" ? "notes" : "audio";
+      if (!result || typeof result.recording_id !== "string" || result.materialId !== result.recording_id || result.kind !== kind || typeof result.jobId !== "string") throw new Error(t("Upload did not return a material identity."));
+      const status = await getSupportingStatus(kind, result.recording_id, signal, courseId);
+      if (status.jobId !== result.jobId) throw new Error(t("Supporting analysis changed. Check the course page."));
+      signal.throwIfAborted();
+      if (!cancelledRef.current) { setCompleted(new Set([steps[0].id])); setCurrentStep(status.stage === "aligning" ? 2 : status.stage === "extracting" ? 1 : 0); }
       return { ok: true };
     } catch (e: any) {
-      finished = true;
       return { ok: false, error: e?.message || "Upload failed" };
     }
   };
 
   const runQueue = async (queue: QueueItem[]) => {
     cancelledRef.current = false;
+    requestRef.current?.abort();
+    requestRef.current = new AbortController();
+    const startedIdentity = identity;
+    const stale = () => cancelledRef.current || requestRef.current?.signal.aborted || identityRef.current !== startedIdentity;
     setPhase("processing");
     // Process strictly one at a time — never all at once.
     for (let idx = 0; idx < queue.length; idx++) {
-      if (cancelledRef.current) return;
+      if (stale()) return;
       setCurrentIndex(idx);
       setItemStatus(idx, "processing");
       const result = await processOne(queue[idx]);
-      if (cancelledRef.current) return;
-      if (result.ok) setItemStatus(idx, "done");
+      if (stale()) return;
+      if (result.ok) setItemStatus(idx, "accepted");
       else setItemStatus(idx, "failed", result.error);
     }
-    if (cancelledRef.current) return;
+    if (stale()) return;
     setPhase("done");
     setTimeout(() => {
-      if (cancelledRef.current) return;
+      if (stale()) return;
       onSuccess();
       onClose();
     }, 1600);
@@ -311,7 +311,7 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
     return `${mb.toFixed(1)} MB`;
   };
 
-  const doneCount = items.filter((it) => it.status === "done").length;
+  const doneCount = items.filter((it) => it.status === "done" || it.status === "accepted").length;
   const failedCount = items.filter((it) => it.status === "failed").length;
   const finishedCount = doneCount + failedCount;
   const total = items.length;
@@ -320,6 +320,7 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
 
   const statusBadge = (s: ItemStatus) => {
     if (s === "done") return <span className="text-sage">● {t("Done")}</span>;
+    if (s === "accepted") return <span className="text-gold">● {t("Uploaded; analysis is queued.")}</span>;
     if (s === "failed") return <span className="text-accent">● {t("Failed")}</span>;
     if (s === "processing")
       return (
@@ -328,7 +329,7 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
             className="w-3 h-3 border-2 rounded-full animate-spin"
             style={{ borderColor: `${ACCENT}40`, borderTopColor: ACCENT }}
           />
-          {t("Analyzing…")}
+          {t("Uploading materials…")}
         </span>
       );
     return <span className="text-ink-mute">● {t("Queued")}</span>;
@@ -598,12 +599,12 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
               {isDone
                 ? failedCount > 0
                   ? t("Finished with some issues")
-                  : t("All recordings analyzed!")
-                : t("Mudaris is analyzing…")}
+                  : t("Uploaded; analysis is queued.")
+                : t("Uploading materials…")}
             </h2>
             <p className="text-ink-soft text-sm mb-2 px-2">
               <span className="font-medium text-ink">{doneCount}</span> of{" "}
-              <span className="font-medium text-ink">{total}</span> done
+              <span className="font-medium text-ink">{total}</span> {t("uploaded")}
               {failedCount > 0 && (
                 <span className="text-accent"> · {failedCount} failed</span>
               )}

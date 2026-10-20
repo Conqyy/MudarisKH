@@ -6,6 +6,10 @@ import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import SourceCitation, { SourceRef, validatedSourceRefs } from "@/components/SourceCitation";
+import SupportingCitation from "@/components/SupportingCitation";
+import { SupportingRef, validatedSupportingRefs } from "@/lib/supporting-materials";
+import { firstSupportingBlocker, retainSelectedRows, supportingPresentation } from "@/lib/supporting-materials";
+import SupportingSelectionNotice from "@/components/SupportingSelectionNotice";
 import Navbar from "@/components/Navbar";
 import Sidebar from "@/components/Sidebar";
 import { CourseFoundationGate } from "@/components/CourseFoundationGate";
@@ -50,6 +54,7 @@ const API_URL =
 
 interface ChatMessage {
   sourceRefs?: SourceRef[];
+  supportingSourceRefs?: SupportingRef[];
   role: "user" | "assistant";
   content: string;
 }
@@ -65,6 +70,7 @@ interface ResourceItem {
   id: string;
   title: string;
   kind: "document" | "recording" | "exam" | "tutorial";
+  status?: string; legacy?: boolean; stale?: boolean; sourceRevision?: string | null; reportRevision?: string | null; jobId?: string | null; sourceType?: string;
 }
 
 const SUGGESTIONS = [
@@ -134,6 +140,16 @@ export default function TutorPage() {
   const [selRecs, setSelRecs] = useState<Set<string>>(new Set());
   const [selExams, setSelExams] = useState<Set<string>>(new Set());
   const [selTuts, setSelTuts] = useState<Set<string>>(new Set());
+  const initialSupportingSelection = useRef("");
+  const selectionRef = useRef({ recs: selRecs, exams: selExams, tuts: selTuts });
+  selectionRef.current = { recs: selRecs, exams: selExams, tuts: selTuts };
+  const asRows = (rows: ResourceItem[]) => rows.map(row => ({ ...row, status: row.status || "legacy" }));
+  const supportingBlocker = firstSupportingBlocker([{ selected: selRecs, rows: asRows(recordings) }, { selected: selExams, rows: asRows(pastExams) }, { selected: selTuts, rows: asRows(tutorials) }]);
+  const deselectBlocking = (id: string) => {
+    setSelRecs(previous => new Set([...previous].filter(value => value !== id)));
+    setSelExams(previous => new Set([...previous].filter(value => value !== id)));
+    setSelTuts(previous => new Set([...previous].filter(value => value !== id)));
+  };
   const [sourcesOpen, setSourcesOpen] = useState(false);
 
   // Fullscreen / focus mode for the chat
@@ -227,9 +243,7 @@ export default function TutorPage() {
         courseData?.titleOverrides
       );
       const audioList = ordered(
-        (audioRes.audio_recordings || []).filter(
-          (a: any) => a.status === "completed"
-        ),
+        audioRes.audio_recordings || [],
         courseData?.audioOrder,
         courseData?.titleOverrides
       );
@@ -242,27 +256,29 @@ export default function TutorPage() {
         id: a.id,
         title: a.title,
         kind: "recording" as const,
+        status: a.status, legacy: a.legacy, stale: a.stale, sourceRevision: a.sourceRevision, reportRevision: a.reportRevision, jobId: a.jobId, sourceType: a.sourceType,
       }));
       const exams: ResourceItem[] = ordered(
-        (histRes.historical_exams || []).filter(
-          (h: any) => h.status === "completed"
-        ),
+        histRes.historical_exams || [],
         courseData?.examOrder,
         courseData?.titleOverrides
-      ).map((h: any) => ({ id: h.id, title: h.title, kind: "exam" as const }));
+      ).map((h: any) => ({ id: h.id, title: h.title, kind: "exam" as const, status: h.status, legacy: h.legacy, stale: h.stale, sourceRevision: h.sourceRevision, reportRevision: h.reportRevision, jobId: h.jobId }));
       const tuts: ResourceItem[] = ordered(
-        (tutRes.tutorials || []).filter((t: any) => t.status === "completed"),
+        tutRes.tutorials || [],
         courseData?.tutorialOrder,
         courseData?.titleOverrides
-      ).map((t: any) => ({ id: t.id, title: t.title, kind: "tutorial" as const }));
+      ).map((t: any) => ({ id: t.id, title: t.title, kind: "tutorial" as const, status: t.status, legacy: t.legacy, stale: t.stale, sourceRevision: t.sourceRevision, reportRevision: t.reportRevision, jobId: t.jobId }));
       setLectures(lec);
-      setRecordings(recs);
-      setPastExams(exams);
-      setTutorials(tuts);
+      setRecordings(previous => retainSelectedRows(recs.map(row => ({ ...row, status: row.status || "legacy" })), previous.map(row => ({ ...row, status: row.status || "legacy" })), selectionRef.current.recs));
+      setPastExams(previous => retainSelectedRows(exams.map(row => ({ ...row, status: row.status || "legacy" })), previous.map(row => ({ ...row, status: row.status || "legacy" })), selectionRef.current.exams));
+      setTutorials(previous => retainSelectedRows(tuts.map(row => ({ ...row, status: row.status || "legacy" })), previous.map(row => ({ ...row, status: row.status || "legacy" })), selectionRef.current.tuts));
       setSelLectures(new Set(lec.map((x) => x.id)));
-      setSelRecs(new Set(recs.map((x) => x.id)));
-      setSelExams(new Set(exams.map((x) => x.id)));
-      setSelTuts(new Set(tuts.map((x) => x.id)));
+      if (initialSupportingSelection.current !== `${user.uid}:${courseId}`) {
+        initialSupportingSelection.current = `${user.uid}:${courseId}`;
+        setSelRecs(new Set(recs.filter(row => supportingPresentation({ ...row, status: row.status || "legacy" }) === "usable").map(row => row.id)));
+        setSelExams(new Set(exams.filter(row => supportingPresentation({ ...row, status: row.status || "legacy" }) === "usable").map(row => row.id)));
+        setSelTuts(new Set(tuts.filter(row => supportingPresentation({ ...row, status: row.status || "legacy" }) === "usable").map(row => row.id)));
+      }
     } catch (error: any) {
       if (!controller.signal.aborted) setLoadError(error.message || "Could not load course data.");
     } finally {
@@ -299,7 +315,10 @@ export default function TutorPage() {
       if (version !== conversationVersion.current) return;
       const savedMessages = data.chat?.messages || [];
       const turns = Array.isArray(data.chat?.sourceTurns) ? data.chat.sourceTurns : [];
-      setMessages(savedMessages.map((message: ChatMessage, index: number) => ({ role: message.role, content: message.content, ...(message.role === "assistant" ? { sourceRefs: validatedSourceRefs(turns.find((turn: any) => turn.messageIndex === index)?.sourceRefs) } : {}) })));
+      setMessages(savedMessages.map((message: ChatMessage, index: number) => {
+        const turn = turns.find((entry: { messageIndex?: number }) => entry.messageIndex === index);
+        return { role: message.role, content: message.content, ...(message.role === "assistant" ? { sourceRefs: validatedSourceRefs(turn?.sourceRefs), supportingSourceRefs: validatedSupportingRefs(turn?.supportingSourceRefs) } : {}) };
+      }));
       activeChatId.current = id;
       setChatId(id);
     } catch {
@@ -326,6 +345,7 @@ export default function TutorPage() {
   const send = async (text: string) => {
     const content = text.trim();
     if (!content || thinking || openingChat || conversationRequest.current || !user || !foundationReadyRef.current) return;
+    if (supportingBlocker) { setSendError(t("Selected material is unavailable. Retry or deselect it.")); return; }
     const version = conversationVersion.current;
     const controller = new AbortController();
     conversationRequest.current = controller;
@@ -367,7 +387,7 @@ export default function TutorPage() {
       }
       const data = await res.json();
       if (version !== conversationVersion.current || controller.signal.aborted || (!foundationReadyRef.current && !foundationUnknownRef.current)) return;
-      setMessages((prev) => [...prev, { role: "assistant", content: data.reply || "", sourceRefs: validatedSourceRefs(data.sourceRefs) }]);
+      setMessages((prev) => [...prev, { role: "assistant", content: data.reply || "", sourceRefs: validatedSourceRefs(data.sourceRefs), supportingSourceRefs: validatedSupportingRefs(data.supportingSourceRefs) }]);
       if (data.chat_id) { activeChatId.current = data.chat_id; setChatId(data.chat_id); }
       loadChats();
     } catch (e: any) {
@@ -796,6 +816,7 @@ export default function TutorPage() {
                             </ReactMarkdown>
                           )}
                           {m.role === "assistant" && <SourceCitation key={`${chatId}:${conversationVersion.current}:${i}`} courseId={courseId} sourceRefs={m.sourceRefs} />}
+                          {m.role === "assistant" && <SupportingCitation key={`supporting:${chatId}:${conversationVersion.current}:${i}`} courseId={courseId} sourceRefs={m.supportingSourceRefs} />}
                         </div>
                       </div>
                     ))}
@@ -814,6 +835,7 @@ export default function TutorPage() {
 
               {/* Input */}
               <div className="border-t border-line p-4 flex-shrink-0 bg-bg/30">
+      <SupportingSelectionNotice blocker={supportingBlocker} onDeselect={deselectBlocking} onRefresh={() => void loadDataRef.current?.()} />
                 <form
                   onSubmit={(e) => { e.preventDefault(); send(input); }}
                   className={`${
@@ -832,7 +854,7 @@ export default function TutorPage() {
                   />
                   <button
                     type="submit"
-                    disabled={!input.trim() || thinking || openingChat || !foundationReady}
+                    disabled={!input.trim() || thinking || openingChat || !foundationReady || !!supportingBlocker}
                     className="bg-ink text-paper px-5 py-2.5 rounded-2xl text-sm font-medium hover:bg-accent transition disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
                   >
                     Send
