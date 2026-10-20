@@ -1,5 +1,6 @@
 """Source-first publication authorization survives the last-read/write race."""
 from copy import deepcopy
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -172,16 +173,22 @@ def test_tutor_fallback_stores_separate_provenance_and_reloads_exact_history(sou
 def test_notes_analysis_has_originals_and_fenced_publication_without_changing_professor_quote(source_api):
     api, db, docs, scope, calls = source_api
     quote = 'The sum formula is worth 8 marks.'
-    api.audio_agent.analyze_transcript.return_value = {'summary': quote,
-        'chapterMapping': [], 'examHints': [{'hint': 'Sum: 8 marks', 'source': quote}],
-        'keyEmphasis': [{'topic': 'Sum', 'quote': quote, 'emphasisLevel': 'high'}]}
-    api.upload_lecture_notes(api.LectureNotesRequest(course_id='course', user_id='owner', notes=quote), uid='owner')
-    assert api.audio_agent.analyze_transcript.call_args.kwargs['lecture_evidence']['guide']
-    completed = [c for c in db.update_audio_recording.call_args_list if c.args[1].get('status') == 'completed']
-    assert completed[0].kwargs['expected_foundation_revision']
-    assert completed[0].args[1]['insights']['keyEmphasis'][0]['quote'] == quote
-    assert completed[0].args[1]['insights']['examHints'][0]['source'] == quote
-    assert completed[0].args[1]['insights']['keyEmphasis'][0]['lectureRefs'] == []
+    api.supporting_repository = MagicMock()
+    api.supporting_repository.queue.return_value = {'id': 'job'}
+    api._supporting_runner = MagicMock()
+    accepted = api.upload_lecture_notes(
+        api.LectureNotesRequest(course_id='course', user_id='owner', notes='  ' + quote + '  '), uid='owner')
+    assert accepted['status'] == 'queued' and accepted['kind'] == 'notes'
+    saved = db.upload_file_to_storage.call_args.args[0]
+    assert saved.decode('utf-8') == '  ' + quote + '  '
+    queued_identity = api.supporting_repository.queue.call_args.args[0]
+    queued = api.supporting_repository.queue.call_args.kwargs
+    assert queued_identity == accepted['identity']
+    assert queued['source_digest'] == accepted['originalDigest']
+    assert queued['foundation_revision'] == scope['foundationRevision']
+    assert queued['initial_data']['sourceType'] == 'notes'
+    api._supporting_runner.submit.assert_called_once_with(accepted['identity'])
+    api.audio_agent.analyze_transcript.assert_not_called()
 
 
 def test_invalid_selected_citation_cannot_be_saved(source_api):
@@ -272,16 +279,29 @@ def test_supporting_api_calls_supply_guide_original_and_atomic_publication(sourc
         agent.analyze_tutorial.return_value = {'topics': [], 'problems': [], 'problemCount': 2, 'formulas': [], 'skills': []}
         agent.analyze_pdf.return_value = {'papers': [], 'topicWeights': [], 'totalQuestions': 12, 'gradingBlueprint': '5 marks each'}
         monkeypatch.setattr('src.utils.pdf_extract.pdf_to_image_uris', lambda *a: [])
+        api.supporting_repository = MagicMock()
+        api.supporting_repository.queue.return_value = {'id': 'job'}
+        api._supporting_runner = MagicMock()
         upload = UploadFile(filename='source.docx' if kind == 'tutorial' else 'source.pdf', file=BytesIO(b'synthetic'))
         if kind == 'tutorial':
             result = asyncio.run(api.upload_tutorial(upload, 'owner', 'course', title='Tutorial', uid='owner'))
             generate, update = agent.analyze_tutorial, db.update_tutorial
-            assert result['analysis']['problemCount'] == 2
+            assert result['status'] == 'queued' and result['kind'] == 'tutorial'
         else:
             result = asyncio.run(api.upload_historical_exam(upload, 'owner', 'course', title='Past', uid='owner'))
             generate, update = agent.analyze_pdf, db.update_historical_exam
-            assert result['analysis']['totalQuestions'] == 12
-            assert result['analysis']['gradingBlueprint'] == '5 marks each'
+            assert result['status'] == 'queued' and result['kind'] == 'historical_exam'
+        assert db.upload_file_to_storage.call_args.args[0] == b'synthetic'
+        queued_identity = api.supporting_repository.queue.call_args.args[0]
+        queued = api.supporting_repository.queue.call_args.kwargs
+        assert queued_identity == result['identity']
+        assert queued['source_digest'] == result['originalDigest']
+        assert queued['foundation_revision'] == scope['foundationRevision']
+        assert queued['initial_data']['fileSize'] == len(b'synthetic')
+        api._supporting_runner.submit.assert_called_once_with(result['identity'])
+        generate.assert_not_called()
+        update.assert_not_called()
+        return
     else:
         db.get_audio_recording.return_value = {'id': 'recording', 'userId': 'owner', 'courseId': 'course', 'transcript': text}
         db.audio_job_exists.return_value = True

@@ -2,6 +2,7 @@
 import asyncio
 from io import BytesIO
 import threading
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi import UploadFile
@@ -30,14 +31,18 @@ def test_supporting_source_work_allows_event_loop_progress(source_api, monkeypat
         return original(*args, **kwargs)
 
     monkeypatch.setattr(target, method, delayed)
+    api.supporting_repository = MagicMock()
+    api.supporting_repository.queue.return_value = {'id': 'job'}
+    api._supporting_runner = MagicMock()
     agent = api.doc_processor if kind == 'tutorial' else api.hist_analyzer
-    agent.extract_text.return_value = agent.extract_exam_text.return_value = 'The original sum formula is n(n+1)/2 and is worth five marks.'
-    agent.analyze_tutorial.return_value = {'topics': ['ORIGINAL_FORMULA'], 'problems': [], 'problemCount': 2}
-    agent.analyze_pdf.return_value = {'topicWeights': [{'topic': 'ORIGINAL_FORMULA'}], 'totalQuestions': 12}
     upload = UploadFile(filename='source.docx' if kind == 'tutorial' else 'source.pdf', file=BytesIO(b'synthetic'))
     route = api.upload_tutorial if kind == 'tutorial' else api.upload_historical_exam
 
     async def other_task():
+        if stage != 'foundation':
+            await asyncio.sleep(0)
+            progressed.set()
+            return
         for _ in range(2000):
             if entered.is_set():
                 progressed.set()
@@ -49,12 +54,21 @@ def test_supporting_source_work_allows_event_loop_progress(source_api, monkeypat
         result, _ = await asyncio.gather(route(upload, 'untrusted-owner', 'course', title='Source', uid='owner'), other_task())
         return result
 
-    assert asyncio.run(run())['status'] == 'success'
-    assert observed and all(observed), f'{stage} blocked the ASGI event loop'
+    result = asyncio.run(run())
+    assert result['status'] == 'queued'
+    if stage == 'foundation':
+        assert observed and all(observed), 'foundation validation blocked the ASGI event loop'
+    else:
+        assert observed == [], f'{stage} ran before the durable worker'
+    assert db.upload_file_to_storage.call_args.args[0] == b'synthetic'
+    assert api.supporting_repository.queue.call_args.kwargs['foundation_revision'] == scope['foundationRevision']
+    api._supporting_runner.submit.assert_called_once_with(result['identity'])
+    agent.extract_text.assert_not_called()
+    agent.extract_exam_text.assert_not_called()
+    agent.analyze_tutorial.assert_not_called()
+    agent.analyze_pdf.assert_not_called()
     update = db.update_tutorial if kind == 'tutorial' else db.update_historical_exam
-    completed = [c for c in update.call_args_list if c.args[1].get('status') == 'completed']
-    assert completed[0].kwargs['expected_foundation_revision']
-    assert completed[0].args[1]['analysis']['sourceScope']['allowedRefs'] == scope['allowedRefs']
+    update.assert_not_called()
 
 
 @pytest.mark.parametrize('selection', [['missing'], ['doc', 'missing'], ['foreign'], ['wrong-course']])

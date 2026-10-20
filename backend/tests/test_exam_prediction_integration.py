@@ -92,6 +92,7 @@ def test_generation_uses_and_saves_one_combined_prediction(monkeypatch, api_modu
     db = MagicMock()
     db.get_owned_course.return_value = {'id': 'course', 'userId': 'owner', 'title': 'AI'}
     documents = confirm_lecture_foundation(db, [lecture_document(topic='AI')])
+    foundation_revision = db.get_document_foundation.return_value['revision']
     rows = []
     for source_id, kind, count in [('a', 'mcq', 1), ('b', 'written', 3)]:
         paper = {'paperId': 'p1', 'startPage': 1, 'endPage': 1, 'examType': None,
@@ -100,7 +101,12 @@ def test_generation_uses_and_saves_one_combined_prediction(monkeypatch, api_modu
                  'difficultyDistribution': [], 'patterns': [], 'gradingBlueprint': 'Different question styles'}
         analysis = {**paper, 'analysisVersion': 2, 'papers': [paper], 'paperCount': 1,
                     'collectionQuestionCount': count, 'sourceId': source_id}
-        rows.append({'id': source_id, 'userId': 'owner', 'courseId': 'course', 'analysis': analysis})
+        rows.append({'id': source_id, 'userId': 'owner', 'courseId': 'course',
+            'status': 'completed', 'analysis': analysis,
+            'processingJob': {'foundationRevision': foundation_revision},
+            'supportingAnalysis': {'version': 1, 'state': 'completed',
+                'sourceRevision': (source_id * 64)[:64],
+                'reportRevision': ((source_id + 'r') * 64)[:64]}})
     db.get_course_historical_exams.return_value = rows
     db.get_course_intelligence.return_value = {
         'document_analyses': [documents[0]['analysis']], 'document_texts': ['AI concepts'],
@@ -158,6 +164,12 @@ def test_generation_stops_if_selected_past_source_disappears_on_refresh(monkeypa
     api = api_module
     db = MagicMock()
     documents = confirm_lecture_foundation(db, [lecture_document(topic='AI')])
+    foundation_revision = db.get_document_foundation.return_value['revision']
+    db.get_course_historical_exams.return_value = [{
+        'id': 'past', 'userId': 'owner', 'courseId': 'course', 'status': 'completed',
+        'processingJob': {'foundationRevision': foundation_revision},
+        'supportingAnalysis': {'version': 1, 'state': 'completed',
+            'sourceRevision': 's' * 64, 'reportRevision': 'r' * 64}}]
     db.get_course_intelligence.side_effect = [
         {'document_analyses': [documents[0]['analysis']],
          'historical_analyses': [{'totalQuestions': 100}],

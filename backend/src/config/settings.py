@@ -62,6 +62,12 @@ class Settings:
             "openrouter_max_tokens",
             os.getenv("OPENROUTER_MAX_TOKENS", "8192"),
         ))
+        self.SUPPORTING_MAX_WORKERS = max(1, int(overrides.get(
+            "supporting_max_workers", os.getenv("SUPPORTING_MAX_WORKERS", "2"))))
+        self.SUPPORTING_MAX_PENDING = max(1, int(overrides.get(
+            "supporting_max_pending", os.getenv("SUPPORTING_MAX_PENDING", "8"))))
+        self.SUPPORTING_MODEL_CALL_BUDGET = max(1, int(overrides.get(
+            "supporting_model_call_budget", os.getenv("SUPPORTING_MODEL_CALL_BUDGET", "512"))))
 
 
 # Module-level singleton — importable as `from src.config.settings import settings`

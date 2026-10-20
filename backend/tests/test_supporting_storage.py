@@ -111,6 +111,7 @@ def test_large_report_is_private_chunked_and_paginates_without_overflow(library)
     page = library.report_page(identity(), report_revision=version['revision'], offset=50, limit=50)
     assert [item['id'] for item in page['items']] == [f'q{n}' for n in range(50, 100)]
     assert page['total'] == 140
+    assert page['papers'] == report['papers']
 
 
 def test_single_oversized_report_item_fails_without_publication(library):

@@ -116,18 +116,21 @@ class SupportingRepository:
             return None, {}, deepcopy(version)
         return self._atomic(identity, read, version_ids=[key])
 
-    def queue(self, identity, *, input_revision, source_digest, foundation_revision, now_ms, initial_data=None):
+    def queue(self, identity, *, input_revision, source_digest, foundation_revision, now_ms,
+              initial_data=None, model_call_budget=DEFAULT_MODEL_CALL_BUDGET):
         identity = validate_identity(identity)
         _hash(input_revision)
         _hash(foundation_revision)
         _clock(now_ms)
+        if type(model_call_budget) is not int or model_call_budget < 1:
+            raise ValueError('Invalid successful model-call budget')
         if source_digest is not None: _hash(source_digest)
         elif identity['kind'] != 'audio': raise ValueError('Only an uncaptured recording can omit its digest')
         if initial_data is not None and not isinstance(initial_data, dict): raise ValueError('Invalid initial material')
         job = {'id': uuid.uuid4().hex, 'claimToken': None, 'inputRevision': input_revision,
                'sourceDigest': source_digest, 'foundationRevision': foundation_revision,
                'stage': 'queued', 'leaseUntil': 0, 'cursor': None, 'modelCalls': 0,
-               'modelCallBudget': DEFAULT_MODEL_CALL_BUDGET, 'createdAt': now_ms, 'error': None}
+               'modelCallBudget': model_call_budget, 'createdAt': now_ms, 'error': None}
         def queue(row, versions):
             if initial_data is not None:
                 if row: raise DataConflict('An existing material cannot be overwritten')
@@ -141,7 +144,7 @@ class SupportingRepository:
             queued = deepcopy(job)
             previous = row.get('processingJob') or {}
             if all(previous.get(k) == queued[k] for k in ('inputRevision', 'sourceDigest', 'foundationRevision')):
-                for key in ('checkpointRevision', 'cursor'):
+                for key in ('checkpointRevision', 'inventoryRevision', 'cursor'):
                     if key in previous: queued[key] = deepcopy(previous[key])
             row.update(status='queued', originalDigest=source_digest, processingJob=queued, error=None)
             row['supportingAnalysis'] = {**row.get('supportingAnalysis', {}), 'version': 1, 'state': 'queued'}
@@ -181,7 +184,7 @@ class SupportingRepository:
 
     def checkpoint(self, identity, job, *, changes, now_ms):
         _clock(now_ms)
-        allowed = {'stage', 'cursor', 'modelCalls', 'error', 'checkpointRevision'}
+        allowed = {'stage', 'cursor', 'modelCalls', 'error', 'checkpointRevision', 'inventoryRevision'}
         if not isinstance(changes, dict) or set(changes) - allowed: raise ValueError('Invalid supporting checkpoint fields')
         if 'modelCalls' in changes and (type(changes['modelCalls']) is not int or changes['modelCalls'] < 0):
             raise ValueError('Invalid model-call count')
@@ -192,6 +195,7 @@ class SupportingRepository:
             if not isinstance(cursor, dict) or len(cursor) > 16 or any(type(v) is not int or v < 0 for v in cursor.values()):
                 raise ValueError('Checkpoint cursor must contain compact numeric positions')
         if 'checkpointRevision' in changes: _hash(changes['checkpointRevision'])
+        if 'inventoryRevision' in changes: _hash(changes['inventoryRevision'])
         if changes.get('error') is not None and (not isinstance(changes['error'], str) or len(changes['error']) > 2000):
             raise ValueError('Invalid checkpoint error')
         def checkpoint(row, versions):

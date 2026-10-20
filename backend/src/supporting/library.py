@@ -365,10 +365,54 @@ class SupportingLibrary:
     def public_status(self, identity):
         row = self.repository.get_owned(identity)
         analysis, job = row.get('supportingAnalysis') or {}, row.get('processingJob') or {}
-        return {'materialId': identity['materialId'], 'kind': identity['kind'], 'status': analysis.get('state', 'legacy'),
-            'stage': job.get('stage'), 'cursor': deepcopy(job.get('cursor')), 'error': row.get('error'),
-            'sourceRevision': analysis.get('sourceRevision'), 'reportRevision': analysis.get('reportRevision'),
-            'analysisId': analysis.get('analysisId'), 'scopeRevision': analysis.get('scopeRevision')}
+        legacy = analysis.get('version') != 1
+        stage = job.get('stage')
+        if legacy:
+            stage = 'upgrade_required'
+        elif stage == 'capturing':
+            stage = 'preparing'
+        stale = legacy or bool(row.get('stale'))
+        database = getattr(self.repository, 'database', None)
+        if job.get('foundationRevision') and database is not None:
+            try:
+                foundation = database.get_document_foundation(identity['userId'], identity['courseId'])
+                stale = stale or foundation.get('revision') != job['foundationRevision']
+            except (AttributeError, TypeError, ValueError):
+                pass
+        progress = {'completedUnits': 0, 'totalUnits': None,
+                    'completedRequirements': 0, 'totalRequirements': None}
+        coverage = None
+        source_revision, report_revision = analysis.get('sourceRevision'), analysis.get('reportRevision')
+        if source_revision:
+            try:
+                manifest = self.load_source(identity, source_revision)
+                total = len(manifest['units'])
+                unresolved = len(manifest['coverage']['unresolvedUnitIds'])
+                progress.update(completedUnits=total-unresolved, totalUnits=total)
+                coverage = {'source': deepcopy(manifest['coverage'])}
+            except ValueError:
+                pass
+        if report_revision:
+            try:
+                report = self.load_report(identity, report_revision)
+                requirement_ids = {requirement['id'] for item in report['items']
+                                   for requirement in item['requirements']}
+                topic_ids = set(report['alignmentCoverage'].get('topicIds', []))
+                unresolved = set(report['alignmentCoverage'].get('unresolvedTopicIds', []))
+                for alignment in report['alignments']:
+                    unresolved.update(alignment.get('unresolvedRequirementIds', []))
+                total = len(requirement_ids) + len(topic_ids)
+                progress.update(completedRequirements=total-len(unresolved), totalRequirements=total)
+                coverage = {**(coverage or {}), 'extraction': deepcopy(report['extractionCoverage']),
+                            'alignment': deepcopy(report['alignmentCoverage'])}
+            except ValueError:
+                pass
+        return {'materialId': identity['materialId'], 'kind': identity['kind'],
+            'status': analysis.get('state', 'legacy'), 'stage': stage, 'progress': progress,
+            'sourceRevision': source_revision, 'reportRevision': report_revision,
+            'scopeRevision': analysis.get('scopeRevision'), 'coverage': coverage,
+            'legacy': legacy, 'stale': stale,
+            'errorMessage': row.get('errorMessage') or row.get('error') or job.get('error')}
 
     def report_page(self, identity, *, report_revision, offset=0, limit=50):
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
@@ -377,9 +421,12 @@ class SupportingLibrary:
         items = report['items'][offset:offset+limit]
         ids = {item['id'] for item in items}
         contexts = {key for item in items for key in item['sharedContextIds']}
+        paper_ids = {item.get('paperId') for item in items if item.get('paperId') is not None}
         return {'reportRevision': report_revision, 'items': items, 'total': len(report['items']),
             'offset': offset, 'limit': limit, 'nextOffset': offset+limit if offset+limit < len(report['items']) else None,
             'alignments': [a for a in report['alignments'] if a['itemId'] in ids],
             'sharedContexts': [c for c in report['sharedContexts'] if c['id'] in contexts],
-            'papers': report['papers'], 'topics': report['topics'], 'scopeSnapshot': report['scopeSnapshot'],
+            'papers': [paper for paper in report['papers'] if paper.get('paperId') in paper_ids],
+            'topics': [topic for topic in report['topics'] if ids.intersection(topic.get('itemIds', []))],
+            'scopeSnapshot': report['scopeSnapshot'],
             'extractionCoverage': report['extractionCoverage'], 'alignmentCoverage': report['alignmentCoverage']}

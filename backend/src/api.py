@@ -20,7 +20,7 @@ if project_root not in sys.path:
 
 # 1. التحقق من وجود المكتبات الأساسية لتشغيل الخادم
 try:
-    from fastapi import FastAPI, HTTPException, Depends
+    from fastapi import FastAPI, HTTPException, Depends, Query, Response
     from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel, Field, field_validator
     import uvicorn
@@ -123,6 +123,58 @@ def _save_uploaded_record(save, user_id, course_id, data):
             except Exception:
                 logger.exception("Upload rollback failed; lifecycle cleanup will retry this file")
         raise
+
+
+def _queue_supporting_acceptance(identity, foundation_revision, initial_data, *,
+                                 original_bytes=None, storage_path=None, source_digest=None):
+    """Persist a unique original, then atomically create its compact row and job."""
+    initial_data = deepcopy(initial_data)
+    if original_bytes is not None:
+        if not storage_path:
+            raise ValueError('An uploaded original needs a private storage path')
+        source_digest = hashlib.sha256(original_bytes).hexdigest()
+        initial_data['storagePath'] = storage_path
+        initial_data['fileUrl'] = db_client.upload_file_to_storage(
+            original_bytes, storage_path, identity['userId'])
+    input_revision = __import__('src.supporting.contracts', fromlist=['digest']).digest({
+        'identity': identity, 'sourceDigest': source_digest, 'storagePath': storage_path,
+        'sourceUrl': initial_data.get('sourceUrl'), 'fileType': initial_data.get('fileType'),
+        'sourceType': initial_data.get('sourceType')})
+    try:
+        job = supporting_repository.queue(identity, input_revision=input_revision,
+            source_digest=source_digest, foundation_revision=foundation_revision,
+            now_ms=int(_time.time() * 1000), initial_data=initial_data,
+            model_call_budget=settings.SUPPORTING_MODEL_CALL_BUDGET)
+    except Exception as queue_error:
+        try:
+            adopted = supporting_repository.get_owned(identity)
+        except DataConflict:
+            adopted = {}
+        except Exception:
+            # The queue write may have committed even though both transports
+            # failed. Keep the unique bytes so the durable row can recover.
+            raise
+        current = (adopted or {}).get('processingJob') or {}
+        committed = (current.get('inputRevision') == input_revision
+                     and ((adopted or {}).get('storagePath') or None) == storage_path)
+        if storage_path and not committed:
+            try:
+                db_client.delete_file_from_storage(storage_path, identity['userId'])
+            except Exception:
+                logger.exception('Supporting upload compensation failed; preserved object needs cleanup')
+        if not committed:
+            raise queue_error
+        job = current
+    _supporting_runner.submit(identity)
+    return {
+        'materialId': identity['materialId'], 'kind': identity['kind'],
+        'status': 'queued', 'stage': 'queued',
+        'progress': {'completedUnits': 0, 'totalUnits': None,
+                     'completedRequirements': 0, 'totalRequirements': None},
+        'sourceRevision': None, 'reportRevision': None, 'scopeRevision': None,
+        'coverage': None, 'legacy': False, 'stale': False, 'errorMessage': None,
+        'originalDigest': source_digest, 'identity': deepcopy(identity), 'jobId': job['id'],
+    }
 
 
 def _require_record_storage(row: dict, uid: str, category: str) -> None:
@@ -261,10 +313,12 @@ def _upload_path(uid: str, course_id: str, category: str, filename: str) -> str:
 async def _lifespan(application):
     await run_in_threadpool(_recover_audio_jobs)
     await run_in_threadpool(_recover_document_jobs)
+    await run_in_threadpool(_recover_supporting_jobs)
     async def recover_documents():
         while True:
             await asyncio.sleep(10)
             await run_in_threadpool(_recover_document_jobs)
+            await run_in_threadpool(_recover_supporting_jobs)
     recovery = asyncio.create_task(recover_documents())
     try:
         yield
@@ -276,6 +330,7 @@ async def _lifespan(application):
             pass
         await run_in_threadpool(_close_document_jobs)
         await run_in_threadpool(_close_audio_jobs)
+        await run_in_threadpool(_close_supporting_jobs)
 
 
 app = FastAPI(
@@ -818,7 +873,7 @@ def _ensure_historical_paper_analysis(course_id: str, uid: str, selected_ids: li
         changed = True
     return changed
 
-@app.post("/api/historical-exams/upload")
+@app.post("/api/historical-exams/upload", status_code=202)
 async def upload_historical_exam(
     file: UploadFile = File(...),
     user_id: str = Form(...),
@@ -826,7 +881,6 @@ async def upload_historical_exam(
     title: str = Form(""), uid: str = Depends(require_uid),):
     user_id = uid  # the token decides the owner, not the form field
     foundation = await run_in_threadpool(_require_document_foundation, course_id, uid)
-    course = foundation['course']
     import time as _time
 
     content_type = file.content_type or ""
@@ -844,90 +898,21 @@ async def upload_historical_exam(
     file_size = len(file_bytes)
     exam_title = title or (file.filename or "Untitled Exam")
 
+    exam_id = 'historical_exams_' + uuid.uuid4().hex
     storage_path = _upload_path(uid, course_id, "historical_exams", file.filename)
-    file_url = db_client.upload_file_to_storage(file_bytes, storage_path, user_id=uid)
-
-    exam_data = {
-        "title": exam_title,
-        "fileUrl": file_url,
-        "storagePath": storage_path,
-        "fileSize": file_size,
-        "status": "processing",
-        "uploadedAt": int(_time.time() * 1000),
-    }
-
-    exam_id = _save_uploaded_record(db_client.save_historical_exam, user_id, course_id, exam_data)
-    logger.info(f"Historical exam {exam_id} saved, starting analysis...")
-
-    try:
-        course_title = course.get("title", course_id)
-
-        if is_pdf:
-            extracted_text = await run_in_threadpool(hist_analyzer.extract_exam_text, file_bytes)
-            # Paper detection and contiguous image rendering happen in analyze_pdf.
-            page_images = []  # analyze_pdf inspects contiguous pages, not a sparse global sample
-        else:
-            # A photo / image of the exam: there's no embedded text, so the
-            # vision model reads the page straight from the (normalized) image.
-            from src.utils.pdf_extract import image_to_image_uri
-            extracted_text = ""
-            page_images = [image_to_image_uri(file_bytes)]
-
-        # Pass the course's CURRENT lecture-document analyses so the analyzer can
-        # tag each past-exam topic as in/out of the course as it is taught now.
-        await run_in_threadpool(_require_document_foundation, course_id, uid, foundation['revision'])
-        document_insights = foundation['document_insights']
-
-        db_client.update_historical_exam(exam_id, {"extractedText": extracted_text})
-        reader = await run_in_threadpool(_source_reader, course_id, uid, hist_analyzer)
-        lecture_evidence = await run_in_threadpool(_source_prepare, reader, "focused", extracted_text)
-        if is_pdf:
-            analysis = await run_in_threadpool(hist_analyzer.analyze_pdf,
-                file_bytes, course_title, document_insights=document_insights, lecture_evidence=lecture_evidence)
-        else:
-            analysis = await run_in_threadpool(hist_analyzer.analyze_exam,
-                extracted_text, course_title, image_uris=page_images,
-                document_insights=document_insights, lecture_evidence=lecture_evidence)
-
-        await run_in_threadpool(_require_document_foundation, course_id, uid, foundation['revision'])
-        analysis = await run_in_threadpool(reader.tag_analysis, analysis)
-        db_client.update_historical_exam(exam_id, {
-            "extractedText": extracted_text,
-            "analysis": analysis,
-            "foundationRevision": foundation['revision'],
-            "status": "completed",
-            "processedAt": int(_time.time() * 1000),
-        }, expected_foundation_revision=foundation['revision'])
-        logger.info(f"Historical exam {exam_id} analyzed successfully.")
-
-        return {
-            "status": "success",
-            "exam_id": exam_id,
-            "title": exam_title,
-            "analysis": analysis,
-        }
-
-    except DataSizeConflict as exc:
-        db_client.update_historical_exam(exam_id, {"status": "failed", "errorMessage": "This file is too large to save safely. Split it into smaller parts."})
-        raise HTTPException(status_code=413, detail="This file is too large to save safely. Split it into smaller parts.") from exc
-    except DataConflict:
-        raise
-    except HTTPException as exc:
-        db_client.update_historical_exam(exam_id, {'status': 'failed', 'errorMessage': str(exc.detail)})
-        raise
-    except Exception as e:
-        logger.error(f"Historical exam analysis failed: {e}")
-        db_client.update_historical_exam(exam_id, {
-            "status": "failed",
-            "errorMessage": "Processing failed. Your saved material is available to retry.",
-        })
-        raise HTTPException(status_code=500, detail="Processing could not finish. Please retry or check backend configuration.")
+    accepted = await run_in_threadpool(_queue_supporting_acceptance,
+        {'userId': uid, 'courseId': course_id, 'kind': 'historical_exam', 'materialId': exam_id},
+        foundation['revision'], {'title': exam_title, 'fileType': 'pdf' if is_pdf else 'image',
+        'fileSize': file_size, 'uploadedAt': int(_time.time() * 1000)},
+        original_bytes=file_bytes, storage_path=storage_path)
+    return {**accepted, 'exam_id': exam_id, 'title': exam_title}
 
 
 @app.get("/api/historical-exams/{course_id}")
 def get_course_historical_exams(course_id: str, uid: str = Depends(require_uid)):
     _require_course(course_id, uid)
     exams = owned_only(db_client.get_course_historical_exams(course_id, user_id=uid), uid)
+    exams = [_supporting_projection(row, 'historical_exam') for row in exams if row.get('courseId') == course_id]
     return {"status": "success", "historical_exams": exams}
 
 
@@ -935,7 +920,7 @@ def get_course_historical_exams(course_id: str, uid: str = Depends(require_uid))
 # Tutorials — ungraded practice problems (ideas only, no marks/format)
 # ──────────────────────────────────────────────────
 
-@app.post("/api/tutorials/upload")
+@app.post("/api/tutorials/upload", status_code=202)
 async def upload_tutorial(
     file: UploadFile = File(...),
     user_id: str = Form(...),
@@ -946,7 +931,6 @@ async def upload_tutorial(
     or exam format (those come from past exams). Reuses the document analyzer."""
     user_id = uid  # the token decides the owner, not the form field
     foundation = await run_in_threadpool(_require_document_foundation, course_id, uid)
-    course = foundation['course']
     import time as _time
 
     content_type = file.content_type or ""
@@ -961,83 +945,21 @@ async def upload_tutorial(
     file_size = len(file_bytes)
     tut_title = title or (file.filename or "Untitled Tutorial")
 
+    tut_id = 'tutorials_' + uuid.uuid4().hex
     storage_path = _upload_path(uid, course_id, "tutorials", file.filename)
-    file_url = db_client.upload_file_to_storage(file_bytes, storage_path, user_id=uid)
-
-    tut_data = {
-        "title": tut_title,
-        "fileType": file_type,
-        "fileUrl": file_url,
-        "storagePath": storage_path,
-        "fileSize": file_size,
-        "status": "processing",
-        "uploadedAt": int(_time.time() * 1000),
-    }
-
-    tut_id = _save_uploaded_record(db_client.save_tutorial, user_id, course_id, tut_data)
-    logger.info(f"Tutorial {tut_id} saved, starting analysis...")
-
-    try:
-        extracted_text = await run_in_threadpool(doc_processor.extract_text, file_bytes, file_type)
-        db_client.update_tutorial(tut_id, {"extractedText": extracted_text})
-
-        from src.utils.pdf_extract import is_meaningful_text
-        page_images = []
-        if file_type == "pdf":
-            from src.utils.pdf_extract import pdf_to_image_uris
-            page_images = await run_in_threadpool(pdf_to_image_uris, file_bytes)
-
-        # Allow image-only PDFs (vision will read them); only fail if neither
-        # text nor page images are available.
-        if not is_meaningful_text(extracted_text) and not page_images:
-            msg = "Couldn't read this tutorial file. If it's a scanned/image-only PDF, it needs OCR."
-            db_client.update_tutorial(tut_id, {"status": "failed", "errorMessage": msg})
-            raise HTTPException(status_code=422, detail=msg)
-
-        course_title = course.get("title", course_id)
-
-        await run_in_threadpool(_require_document_foundation, course_id, uid, foundation['revision'])
-        reader = await run_in_threadpool(_source_reader, course_id, uid, doc_processor)
-        lecture_evidence = await run_in_threadpool(_source_prepare, reader, "focused", extracted_text)
-        analysis = await run_in_threadpool(doc_processor.analyze_tutorial, extracted_text, course_title,
-            image_uris=page_images, document_insights=foundation['document_insights'], lecture_evidence=lecture_evidence)
-        await run_in_threadpool(_require_document_foundation, course_id, uid, foundation['revision'])
-
-        analysis = await run_in_threadpool(reader.tag_analysis, analysis)
-        db_client.update_tutorial(tut_id, {
-            "extractedText": extracted_text,
-            "analysis": analysis,
-            "foundationRevision": foundation['revision'],
-            "status": "completed",
-            "processedAt": int(_time.time() * 1000),
-        }, expected_foundation_revision=foundation['revision'])
-        logger.info(f"Tutorial {tut_id} analyzed successfully.")
-
-        return {
-            "status": "success",
-            "tutorial_id": tut_id,
-            "title": tut_title,
-            "analysis": analysis,
-        }
-
-    except HTTPException as exc:
-        db_client.update_tutorial(tut_id, {'status': 'failed', 'errorMessage': str(exc.detail)})
-        raise
-    except DataSizeConflict as exc:
-        db_client.update_tutorial(tut_id, {"status": "failed", "errorMessage": "This file is too large to save safely. Split it into smaller parts."})
-        raise HTTPException(status_code=413, detail="This file is too large to save safely. Split it into smaller parts.") from exc
-    except DataConflict:
-        raise
-    except Exception as e:
-        logger.error(f"Tutorial analysis failed: {e}")
-        db_client.update_tutorial(tut_id, {"status": "failed", "errorMessage": "Processing failed. Your saved material is available to retry."})
-        raise HTTPException(status_code=500, detail="Processing could not finish. Please retry or check backend configuration.")
+    accepted = await run_in_threadpool(_queue_supporting_acceptance,
+        {'userId': uid, 'courseId': course_id, 'kind': 'tutorial', 'materialId': tut_id},
+        foundation['revision'], {'title': tut_title, 'fileType': file_type,
+        'fileSize': file_size, 'uploadedAt': int(_time.time() * 1000)},
+        original_bytes=file_bytes, storage_path=storage_path)
+    return {**accepted, 'tutorial_id': tut_id, 'title': tut_title}
 
 
 @app.get("/api/tutorials/{course_id}")
 def get_course_tutorials(course_id: str, uid: str = Depends(require_uid)):
     _require_course(course_id, uid)
     tutorials = owned_only(db_client.get_course_tutorials(course_id, user_id=uid), uid)
+    tutorials = [_supporting_projection(row, 'tutorial') for row in tutorials if row.get('courseId') == course_id]
     return {"status": "success", "tutorials": tutorials}
 
 
@@ -1238,13 +1160,150 @@ def _run_audio_pipeline(rec_id, course_id, *, file_bytes=None, audio_ext=None,
 
 def _run_saved_audio_job(rec_id):
     record = db_client.get_audio_recording(rec_id)
-    if record:
+    if record and not record.get('supportingAnalysis'):
         _run_audio_pipeline(rec_id, record.get("courseId", ""),
                             url=record.get("sourceUrl"), had_title=record.get("hadTitle", True))
 
 
 from src.utils.job_runner import AudioJobRunner
 _audio_runner = AudioJobRunner(lambda: db_client, _run_saved_audio_job)
+
+
+def _supporting_reader(identity):
+    foundation = _require_document_foundation(identity['courseId'], identity['userId'])
+    reader = _source_reader(identity['courseId'], identity['userId'], doc_processor)
+    if reader.scope.get('foundationRevision') != foundation['revision']:
+        raise ValueError('Lecture foundation changed while preparing supporting material')
+    return reader
+
+
+from src.supporting.repository import SupportingRepository
+from src.supporting.library import SupportingLibrary
+from src.supporting.extraction import SupportingExtractor
+from src.supporting.workflows import SupportingWorkflow
+from src.supporting.jobs import SupportingJobRunner
+
+supporting_repository = SupportingRepository(db_client)
+supporting_library = SupportingLibrary(supporting_repository)
+supporting_extractor = SupportingExtractor(doc_processor.client, doc_processor.model_id)
+supporting_workflow = SupportingWorkflow(supporting_repository, supporting_library,
+    supporting_extractor, audio_agent, _supporting_reader)
+_supporting_runner = SupportingJobRunner(supporting_repository, supporting_workflow.run,
+    max_workers=settings.SUPPORTING_MAX_WORKERS, max_pending=settings.SUPPORTING_MAX_PENDING)
+
+
+def _recover_supporting_jobs():
+    global _supporting_runner
+    if _supporting_runner._closed:
+        _supporting_runner = SupportingJobRunner(supporting_repository, supporting_workflow.run,
+            max_workers=settings.SUPPORTING_MAX_WORKERS, max_pending=settings.SUPPORTING_MAX_PENDING)
+    _supporting_runner.recover()
+
+
+def _close_supporting_jobs():
+    _supporting_runner.close()
+
+
+def _supporting_identity(kind: str, material_id: str, uid: str, course_id: str = None):
+    getters = {
+        'historical_exam': db_client.get_historical_exam,
+        'tutorial': db_client.get_tutorial,
+        'audio': db_client.get_audio_recording,
+        'notes': db_client.get_audio_recording,
+    }
+    getter = getters.get(kind)
+    if getter is None:
+        raise HTTPException(status_code=404, detail='Supporting material not found')
+    row = getter(material_id)
+    try:
+        row = assert_owner(row, uid, 'Supporting material')
+    except (ValueError, HTTPException):
+        raise HTTPException(status_code=404, detail='Supporting material not found')
+    if not row or (course_id is not None and row.get('courseId') != course_id):
+        raise HTTPException(status_code=404, detail='Supporting material not found')
+    actual_kind = ('notes' if row.get('sourceType') == 'notes' else 'audio') if kind in ('audio', 'notes') else kind
+    if actual_kind != kind:
+        raise HTTPException(status_code=404, detail='Supporting material not found')
+    return {'userId': uid, 'courseId': row['courseId'], 'kind': kind, 'materialId': material_id}
+
+
+def _supporting_projection(row, kind):
+    identity = {'userId': row['userId'], 'courseId': row['courseId'], 'kind': kind,
+                'materialId': row['id']}
+    if row.get('supportingAnalysis'):
+        status = supporting_library.public_status(identity)
+    else:
+        status = {'materialId': row['id'], 'kind': kind, 'status': 'legacy',
+            'stage': 'upgrade_required',
+            'progress': {'completedUnits': 0, 'totalUnits': None,
+                         'completedRequirements': 0, 'totalRequirements': None},
+            'sourceRevision': None, 'reportRevision': None, 'scopeRevision': None,
+            'coverage': None, 'legacy': True, 'stale': True,
+            'errorMessage': row.get('errorMessage')}
+    return {**status, **{key: row.get(key) for key in
+        ('title', 'fileSize', 'uploadedAt', 'processedAt', 'sourceType', 'lectureId') if key in row}}
+
+
+@app.post('/api/supporting/{kind}/{material_id}/prepare', status_code=202)
+def prepare_supporting_material(kind: str, material_id: str, course_id: str = None,
+                                retry: bool = False, uid: str = Depends(require_uid)):
+    identity = _supporting_identity(kind, material_id, uid, course_id)
+    try:
+        result = supporting_workflow.prepare(identity, retry=retry)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={'code': 'upgrade_required', 'message': str(exc)}) from exc
+    _supporting_runner.submit(identity)
+    return result
+
+
+@app.get('/api/supporting/{kind}/{material_id}/status')
+def get_supporting_status(kind: str, material_id: str, course_id: str = None,
+                          uid: str = Depends(require_uid)):
+    identity = _supporting_identity(kind, material_id, uid, course_id)
+    try:
+        return supporting_library.public_status(identity)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail='Supporting material not found') from exc
+
+
+@app.get('/api/supporting/{kind}/{material_id}/report')
+def get_supporting_report(kind: str, material_id: str, revision: str, course_id: str = None,
+                          offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100),
+                          uid: str = Depends(require_uid)):
+    identity = _supporting_identity(kind, material_id, uid, course_id)
+    try:
+        return supporting_library.report_page(identity, report_revision=revision, offset=offset, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail='Supporting report not found') from exc
+
+
+@app.get('/api/supporting/{kind}/{material_id}/source')
+def get_supporting_source(kind: str, material_id: str, revision: str, unit_id: str,
+                          course_id: str = None, uid: str = Depends(require_uid)):
+    identity = _supporting_identity(kind, material_id, uid, course_id)
+    ref = {'kind': kind, 'materialId': material_id, 'sourceRevision': revision, 'unitId': unit_id}
+    try:
+        unit = supporting_library.read_refs(identity, [ref])[0]
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail='Supporting source not found') from exc
+    return {'ref': ref, 'unit': unit}
+
+
+@app.get('/api/supporting/{kind}/{material_id}/original')
+def get_supporting_original(kind: str, material_id: str, revision: str, course_id: str = None,
+                            uid: str = Depends(require_uid)):
+    identity = _supporting_identity(kind, material_id, uid, course_id)
+    try:
+        manifest = supporting_library.load_source(identity, revision)
+        body = supporting_library.original_bytes(identity, revision)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail='Supporting original not found') from exc
+    media = {'pdf': 'application/pdf', 'image': 'image/png', 'docx':
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'pptx':
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'audio': 'audio/mpeg', 'notes': 'text/plain; charset=utf-8'}.get(manifest['fileType'], 'application/octet-stream')
+    return Response(body, media_type=media, headers={
+        'Content-Disposition': f'attachment; filename="{material_id}.{manifest["fileType"]}"'})
 
 
 def _run_document_pipeline(doc_id):
@@ -1295,7 +1354,7 @@ def _close_audio_jobs():
 
 
 
-@app.post("/api/audio/upload")
+@app.post("/api/audio/upload", status_code=202)
 async def upload_audio(
     file: UploadFile = File(...),
     user_id: str = Form(...),
@@ -1321,43 +1380,17 @@ async def upload_audio(
     file_size = len(file_bytes)
     audio_title = title or (file.filename or "Untitled Recording")
 
+    rec_id = 'audio_recordings_' + uuid.uuid4().hex
     storage_path = _upload_path(uid, course_id, "audio", file.filename)
-    file_url = db_client.upload_file_to_storage(file_bytes, storage_path, user_id=uid)
-
-    rec_data = {
-        "title": audio_title,
-        "fileUrl": file_url,
-        "storagePath": storage_path,
-        "fileSize": file_size,
-        "sourceType": "upload",
-        "foundationRevision": foundation['revision'],
-        "audioExt": audio_ext,
-        "hadTitle": bool(title.strip()),
-        "status": "queued",
-        "uploadedAt": int(_time.time() * 1000),
-    }
+    data = {'title': audio_title, 'fileSize': file_size, 'sourceType': 'upload',
+            'audioExt': audio_ext, 'hadTitle': bool(title.strip()),
+            'uploadedAt': int(_time.time() * 1000)}
     if lecture_id:
-        rec_data["lectureId"] = lecture_id
-
-    rec_id = _save_uploaded_record(db_client.save_audio_recording, user_id, course_id, rec_data)
-
-    if background == "1":
-        logger.info(f"Audio recording {rec_id} saved; processing in background.")
-        _spawn_audio_job(rec_id=rec_id, course_id=course_id, file_bytes=file_bytes, audio_ext=audio_ext)
-        return {
-            "status": "processing",
-            "recording_id": rec_id,
-            "title": audio_title,
-            "message": "Transcription started — this can take a few minutes for long recordings.",
-        }
-
-    # Synchronous: transcribe + analyze now, return when finished (one at a time).
-    logger.info(f"Audio recording {rec_id} saved; processing synchronously.")
-    from starlette.concurrency import run_in_threadpool
-    ok = await run_in_threadpool(_run_audio_pipeline, rec_id, course_id, file_bytes=file_bytes, audio_ext=audio_ext)
-    if not ok:
-        raise HTTPException(status_code=500, detail=f"Could not transcribe \"{audio_title}\".")
-    return {"status": "success", "recording_id": rec_id, "title": audio_title}
+        data['lectureId'] = lecture_id
+    accepted = await run_in_threadpool(_queue_supporting_acceptance,
+        {'userId': uid, 'courseId': course_id, 'kind': 'audio', 'materialId': rec_id},
+        foundation['revision'], data, original_bytes=file_bytes, storage_path=storage_path)
+    return {**accepted, 'recording_id': rec_id, 'title': audio_title}
 
 
 class AudioUrlRequest(BaseModel):
@@ -1371,7 +1404,7 @@ class AudioUrlRequest(BaseModel):
     background: str = "1"
 
 
-@app.post("/api/audio/upload-url")
+@app.post("/api/audio/upload-url", status_code=202)
 def upload_audio_from_url(payload: AudioUrlRequest, uid: str = Depends(require_uid)):
     """Take a video/audio URL; download + extract audio to MP3 + transcribe +
     analyze. Runs in the background by default, or synchronously when the caller
@@ -1388,44 +1421,16 @@ def upload_audio_from_url(payload: AudioUrlRequest, uid: str = Depends(require_u
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    rec_data = {
-        "title": payload.title or "Online Recording",
-        "fileUrl": url,
-        "storagePath": "",
-        "sourceUrl": url,
-        "sourceType": "url",
-        "foundationRevision": foundation['revision'],
-        "hadTitle": bool(payload.title.strip()),
-        "fileSize": 0,
-        "status": "queued",
-        "uploadedAt": int(_time.time() * 1000),
-    }
+    rec_id = 'audio_recordings_' + uuid.uuid4().hex
+    data = {'title': payload.title or 'Online Recording', 'fileSize': 0,
+            'sourceType': 'url', 'sourceUrl': url, 'fileUrl': url, 'storagePath': '',
+            'hadTitle': bool(payload.title.strip()), 'uploadedAt': int(_time.time() * 1000)}
     if payload.lecture_id:
-        rec_data["lectureId"] = payload.lecture_id
-
-    rec_id = db_client.save_audio_recording(payload.user_id, payload.course_id, rec_data)
-
-    if payload.background == "1":
-        logger.info(f"Audio URL recording {rec_id}: queued background download for {url}")
-        _spawn_audio_job(
-            rec_id=rec_id, course_id=payload.course_id, url=url,
-            had_title=bool(payload.title.strip()),
-        )
-        return {
-            "status": "processing",
-            "recording_id": rec_id,
-            "title": payload.title or "Online Recording",
-            "message": "Fetching and transcribing in the background — long videos can take a while.",
-        }
-
-    # Synchronous: download + transcribe + analyze now, return when finished.
-    logger.info(f"Audio URL recording {rec_id}: processing synchronously for {url}")
-    ok = _run_audio_pipeline(
-        rec_id, payload.course_id, url=url, had_title=bool(payload.title.strip())
-    )
-    if not ok:
-        raise HTTPException(status_code=500, detail="Could not fetch/transcribe that URL.")
-    return {"status": "success", "recording_id": rec_id}
+        data['lectureId'] = payload.lecture_id
+    accepted = _queue_supporting_acceptance(
+        {'userId': uid, 'courseId': payload.course_id, 'kind': 'audio', 'materialId': rec_id},
+        foundation['revision'], data, storage_path=None, source_digest=None)
+    return {**accepted, 'recording_id': rec_id, 'title': data['title']}
 
 
 class LectureNotesRequest(BaseModel):
@@ -1436,7 +1441,7 @@ class LectureNotesRequest(BaseModel):
     lecture_id: str = ""
 
 
-@app.post("/api/audio/upload-notes")
+@app.post("/api/audio/upload-notes", status_code=202)
 def upload_lecture_notes(payload: LectureNotesRequest, uid: str = Depends(require_uid)):
     """Typed lecture notes: the student writes what happened in the lecture and
     what the professor emphasized (e.g. "the prof said section 3 will come in
@@ -1448,61 +1453,25 @@ def upload_lecture_notes(payload: LectureNotesRequest, uid: str = Depends(requir
     _require_lecture(payload.lecture_id, payload.course_id, uid)
     import time as _time
 
-    notes = (payload.notes or "").strip()
-    if len(notes) < 20:
+    notes = payload.notes or ""
+    if len(notes.strip()) < 20:
         raise HTTPException(
             status_code=400,
             detail="Please write at least a couple of sentences about the lecture.",
         )
 
     title = (payload.title or "").strip() or "Typed Lecture Notes"
-    rec_data = {
-        "title": title,
-        "fileUrl": "",
-        "storagePath": "",
-        "sourceType": "notes",
-        "foundationRevision": foundation['revision'],
-        "fileSize": len(notes.encode("utf-8")),
-        "status": "analyzing",
-        # Store what the student typed BEFORE calling the AI. Unlike a recording
-        # (whose audio file is still on disk if analysis fails), these notes exist
-        # nowhere else — if we only saved them on success, a failed AI call would
-        # throw away everything the student wrote and force them to retype it.
-        "transcript": notes,
-        "uploadedAt": int(_time.time() * 1000),
-    }
+    rec_id = 'audio_recordings_' + uuid.uuid4().hex
+    original = notes.encode('utf-8')
+    storage_path = _upload_path(uid, payload.course_id, 'audio', 'notes.txt')
+    data = {'title': title, 'fileSize': len(original), 'sourceType': 'notes',
+            'uploadedAt': int(_time.time() * 1000)}
     if payload.lecture_id:
-        rec_data["lectureId"] = payload.lecture_id
-
-    rec_id = db_client.save_audio_recording(payload.user_id, payload.course_id, rec_data)
-
-    # Give the analyzer honest context: these are a student's notes ABOUT the
-    # lecture, not a verbatim transcript — hints like "section 3 will come in
-    # the midterm" should be treated as high-confidence exam signals.
-    framed = _frame_notes(notes)
-    try:
-        reader = _source_reader(payload.course_id, uid, audio_agent)
-        lecture_evidence = _source_prepare(reader, "focused", framed)
-        insights = audio_agent.analyze_transcript(framed, foundation['course'].get('title', payload.course_id),
-                                                document_insights=foundation['document_insights'], lecture_evidence=lecture_evidence)
-        _require_document_foundation(payload.course_id, uid, foundation['revision'])
-        insights = reader.tag_analysis(insights)
-        db_client.update_audio_recording(rec_id, {
-            "insights": insights,
-            "status": "completed",
-            "processedAt": int(_time.time() * 1000),
-        }, expected_foundation_revision=foundation['revision'])
-    except HTTPException as exc:
-        db_client.update_audio_recording(rec_id, {'status': 'failed', 'errorMessage': str(exc.detail)})
-        raise
-    except Exception as e:
-        # The typed notes stay on the record (saved above), so nothing the
-        # student wrote is lost — the entry can be re-analyzed instead.
-        logger.error(f"Notes analysis failed for {rec_id}: {e}")
-        db_client.update_audio_recording(rec_id, {"status": "failed", "errorMessage": "Processing failed. Your saved material is available to retry."})
-        raise HTTPException(status_code=500, detail="Processing could not finish. Please retry or check backend configuration.")
-
-    return {"status": "success", "recording_id": rec_id, "title": title}
+        data['lectureId'] = payload.lecture_id
+    accepted = _queue_supporting_acceptance(
+        {'userId': uid, 'courseId': payload.course_id, 'kind': 'notes', 'materialId': rec_id},
+        foundation['revision'], data, original_bytes=original, storage_path=storage_path)
+    return {**accepted, 'recording_id': rec_id, 'title': title}
 
 
 def _frame_notes(notes: str) -> str:
@@ -1528,6 +1497,17 @@ def reanalyze_audio_recording(rec_id: str, uid: str = Depends(require_uid)):
     rec = db_client.get_audio_recording(rec_id)
     if not rec:
         raise HTTPException(status_code=404, detail="Recording not found")
+    if rec.get('supportingAnalysis'):
+        kind = 'notes' if rec.get('sourceType') == 'notes' else 'audio'
+        identity = {'userId': uid, 'courseId': rec.get('courseId'), 'kind': kind,
+                    'materialId': rec_id}
+        try:
+            accepted = supporting_workflow.prepare(identity, retry=True)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail={
+                'code': 'upgrade_required', 'message': str(exc)}) from exc
+        _supporting_runner.submit(identity)
+        return accepted
     foundation = _require_document_foundation(rec.get('courseId', ''), uid)
     db_client.update_audio_recording(rec_id, {'foundationRevision': foundation['revision']})
 
@@ -1583,6 +1563,8 @@ def reanalyze_audio_recording(rec_id: str, uid: str = Depends(require_uid)):
 def get_course_audio_recordings(course_id: str, uid: str = Depends(require_uid)):
     _require_course(course_id, uid)
     recordings = owned_only(db_client.get_course_audio_recordings(course_id, user_id=uid), uid)
+    recordings = [_supporting_projection(row, 'notes' if row.get('sourceType') == 'notes' else 'audio')
+                  for row in recordings if row.get('courseId') == course_id]
     return {"status": "success", "audio_recordings": recordings}
 
 
@@ -1605,6 +1587,67 @@ class SourceSelectionRequest(BaseModel):
             raise ValueError("Select at most 200 sources per type.")
         from src.utils.storage_paths import validate_component
         return list(dict.fromkeys(validate_component(item, "source ID") for item in ids))
+
+
+def _require_selected_supporting_ready(course_id, uid, *, foundation_revision=None,
+                                       historical_exam_ids=None, tutorial_ids=None,
+                                       audio_ids=None):
+    """Validate selection before legacy completed-only projections can hide rows."""
+    groups = (
+        ('historical_exam', db_client.get_course_historical_exams(course_id, user_id=uid), historical_exam_ids),
+        ('tutorial', db_client.get_course_tutorials(course_id, user_id=uid), tutorial_ids),
+        ('audio', db_client.get_course_audio_recordings(course_id, user_id=uid), audio_ids),
+    )
+    unavailable = []
+    for category, values, selected_ids in groups:
+        rows = [row for row in owned_only(values, uid) if row.get('courseId') == course_id]
+        by_id = {row['id']: row for row in rows}
+        if selected_ids is None:
+            selected = rows
+        else:
+            missing = [material_id for material_id in selected_ids if material_id not in by_id]
+            if missing:
+                raise HTTPException(status_code=404, detail='Selected supporting material was not found')
+            selected = [by_id[material_id] for material_id in selected_ids]
+        for row in selected:
+            kind = ('notes' if category == 'audio' and row.get('sourceType') == 'notes'
+                    else category)
+            analysis = row.get('supportingAnalysis') or {}
+            job = row.get('processingJob') or {}
+            ready = (analysis.get('version') == 1 and analysis.get('state') == 'completed'
+                     and row.get('status') == 'completed' and analysis.get('sourceRevision')
+                     and analysis.get('reportRevision') and not row.get('stale')
+                     and (foundation_revision is None
+                          or job.get('foundationRevision') == foundation_revision))
+            if ready:
+                continue
+            queued = False
+            recoverable_original = bool(
+                row.get('originalDigest') or row.get('storagePath')
+                or (kind == 'notes' and isinstance(row.get('transcript'), str)
+                    and row['transcript'].strip())
+                or (kind == 'audio' and row.get('sourceType') == 'url'
+                    and row.get('sourceUrl')))
+            if (recoverable_original
+                    and analysis.get('state') not in ('queued', 'processing')):
+                identity = {'userId': uid, 'courseId': course_id, 'kind': kind,
+                            'materialId': row['id']}
+                try:
+                    supporting_workflow.prepare(identity, retry=True)
+                    _supporting_runner.submit(identity)
+                    queued = True
+                except (ValueError, DataConflict):
+                    pass
+            unavailable.append({'materialId': row['id'], 'kind': kind,
+                'status': analysis.get('state', 'legacy'), 'legacy': analysis.get('version') != 1,
+                'queued': queued,
+                'guidance': ('Retry, upgrade, or deselect this material' if recoverable_original
+                             else 'Re-upload the original material')})
+    if unavailable:
+        raise HTTPException(status_code=409, detail={
+            'code': 'supporting_upgrade_required',
+            'message': 'Selected supporting material is not ready for generation.',
+            'materials': unavailable})
 
 
 class EnhancedExamGenerateRequest(SourceSelectionRequest):
@@ -1799,6 +1842,10 @@ def _make_compilable_answer_key(exam: dict, *, reader, lecture_evidence) -> dict
 def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: str = Depends(require_uid)):
     payload.user_id = uid  # ignore any client-supplied owner
     foundation = _require_document_foundation(payload.course_id, uid)
+    _require_selected_supporting_ready(payload.course_id, uid,
+        foundation_revision=foundation['revision'],
+        historical_exam_ids=payload.historical_exam_ids,
+        tutorial_ids=payload.tutorial_ids, audio_ids=payload.audio_ids)
     import uuid
     import base64
     import time as _time
@@ -2239,6 +2286,10 @@ class FlashcardGenerateRequest(SourceSelectionRequest):
 def generate_flashcards_endpoint(payload: FlashcardGenerateRequest, uid: str = Depends(require_uid)):
     payload.user_id = uid  # ignore any client-supplied owner
     foundation = _require_document_foundation(payload.course_id, uid)
+    _require_selected_supporting_ready(payload.course_id, uid,
+        foundation_revision=foundation['revision'],
+        historical_exam_ids=payload.historical_exam_ids,
+        tutorial_ids=payload.tutorial_ids, audio_ids=payload.audio_ids)
     import uuid
     import time as _time
 
@@ -2558,6 +2609,10 @@ def _apply_summary_scope(summary: dict, document_analyses: list, *, source_reade
 def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depends(require_uid)):
     payload.user_id = uid  # ignore any client-supplied owner
     foundation = _require_document_foundation(payload.course_id, uid)
+    _require_selected_supporting_ready(payload.course_id, uid,
+        foundation_revision=foundation['revision'],
+        historical_exam_ids=payload.historical_exam_ids,
+        tutorial_ids=payload.tutorial_ids, audio_ids=payload.audio_ids)
     import uuid
     import time as _time
 
@@ -3035,6 +3090,10 @@ class TutorChatRequest(BaseModel):
 def tutor_chat(payload: TutorChatRequest, uid: str = Depends(require_uid)):
     payload.user_id = uid  # ignore any client-supplied owner
     foundation = _require_document_foundation(payload.course_id, uid)
+    _require_selected_supporting_ready(payload.course_id, uid,
+        foundation_revision=foundation['revision'],
+        historical_exam_ids=payload.historical_exam_ids,
+        tutorial_ids=payload.tutorial_ids, audio_ids=payload.recording_ids)
     import time as _time
     if not payload.messages:
         raise HTTPException(status_code=400, detail="No messages provided.")

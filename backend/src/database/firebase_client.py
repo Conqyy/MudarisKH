@@ -1460,7 +1460,9 @@ class FirebaseClient:
 
     def _recoverable_audio_job(self, row: dict) -> bool:
         try:
-            return not self.is_course_deleting(row.get('courseId')) and bool(self.get_owned_course(row.get('userId'), row.get('courseId')))
+            return (not row.get('supportingAnalysis')
+                    and not self.is_course_deleting(row.get('courseId'))
+                    and bool(self.get_owned_course(row.get('userId'), row.get('courseId'))))
         except (ValueError, TypeError):
             return False
 
