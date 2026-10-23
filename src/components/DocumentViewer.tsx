@@ -12,7 +12,7 @@ import { useTrackRecent } from "@/lib/activity";
 
 import { apiJson } from "@/lib/api";
 import { useObjectUrl } from "@/lib/use-object-url";
-import { useDialog } from "@/lib/use-dialog";
+import { useOverlayMotion } from "@/lib/use-overlay-motion";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
@@ -46,7 +46,7 @@ export default function DocumentViewer({
   const defaultTab = doc.guide || doc.analysis ? "analysis" : doc.fileType !== "pdf" && doc.sourceRevision ? "sources" : "content";
   const [activeTab, setActiveTab] = useState<"content" | "analysis" | "sources">(defaultTab);
   const [activeChapter, setActiveChapter] = useState(0);
-  const dialogRef = useDialog(onClose);
+  const { ref: dialogRef, close: closeDialog } = useOverlayMotion(onClose, { kind: "drawer" });
   const [sourceAttempt, setSourceAttempt] = useState(0);
   const [sourceState, setSourceState] = useState<{ key: string; units: { unitId: string; label: string; kind: string }[]; warnings: string[]; error?: string } | null>(null);
   const sourceKey = JSON.stringify([user?.uid, doc.courseId, doc.id, doc.sourceRevision]);
@@ -96,7 +96,7 @@ export default function DocumentViewer({
       {/* Backdrop */}
       <div
         className="material-viewer-backdrop"
-        onClick={onClose}
+        onClick={closeDialog}
       />
 
       {/* Panel */}
@@ -104,7 +104,7 @@ export default function DocumentViewer({
         {/* Header */}
         <div className="material-viewer-header">
           <button
-            onClick={onClose}
+            onClick={closeDialog}
             aria-label={t("Close document")}
             className="icon-button"
           ><Icon name="close" /></button>

@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Icon from "@/components/Icon";
-import { useDialog } from "@/lib/use-dialog";
+import { useOverlayMotion } from "@/lib/use-overlay-motion";
 import SupportingAnalysisReport from "@/components/SupportingAnalysisReport";
 import { useSupportingAnalysis } from "@/hooks/useSupportingAnalysis";
 import { useLang } from "@/lib/i18n";
@@ -11,7 +11,7 @@ import { MaterialKind } from "@/lib/supporting-materials";
 export default function SupportingMaterialAction({ kind, materialId, courseId }: { kind: MaterialKind; materialId: string; courseId: string }) {
   const { t } = useLang();
   const [open, setOpen] = useState(false);
-  const dialogRef = useDialog(() => setOpen(false), open);
+  const { ref: dialogRef, close: dismissReport } = useOverlayMotion(() => setOpen(false), { enabled: open });
   const { status, error, retry } = useSupportingAnalysis({ kind, materialId, courseId });
   const active = status && ["queued", "processing", "preparing", "extracting", "aligning"].includes(status.status);
   const retryable = status && (status.legacy || status.stale || ["failed", "incomplete"].includes(status.status));
@@ -21,6 +21,6 @@ export default function SupportingMaterialAction({ kind, materialId, courseId }:
     {error && <span role="alert" className="text-accent">{error}</span>}
     {retryable && <button type="button" className="ui-button ghost" onClick={() => void retry()}><Icon name="refresh" size={15} />{t(status?.legacy ? "Prepare material" : "Retry analysis")}</button>}
     {status?.reportRevision && <button type="button" className="ui-button ghost" onClick={() => setOpen(true)}><Icon name="file" size={15} />{t("Supporting material report")}</button>}
-    {open && <div ref={dialogRef} role="dialog" tabIndex={-1} aria-modal="true" aria-label={t("Supporting material report")} className="dialog-overlay z-[110]" onClick={() => setOpen(false)}><div className="dialog-panel material-dialog max-w-4xl" onClick={event => event.stopPropagation()}><button type="button" aria-label={t("Close source")} className="icon-button material-dialog-close" onClick={() => setOpen(false)}><Icon name="close" /></button><SupportingAnalysisReport kind={kind} materialId={materialId} courseId={courseId} /></div></div>}
+    {open && <div ref={dialogRef} role="dialog" tabIndex={-1} aria-modal="true" aria-label={t("Supporting material report")} className="dialog-overlay z-[110]" onClick={dismissReport}><div className="dialog-panel material-dialog max-w-4xl" onClick={event => event.stopPropagation()}><button type="button" aria-label={t("Close source")} className="icon-button material-dialog-close" onClick={dismissReport}><Icon name="close" /></button><SupportingAnalysisReport kind={kind} materialId={materialId} courseId={courseId} /></div></div>}
   </div>;
 }

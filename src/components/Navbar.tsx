@@ -7,6 +7,7 @@ import type { Course } from "@/lib/firestore-helpers";
 import { useAuth } from "@/lib/auth-context";
 import { useLang } from "@/lib/i18n";
 import { useTheme } from "@/lib/theme";
+import { useOverlayMotion } from "@/lib/use-overlay-motion";
 import Icon, { BrandMark } from "./Icon";
 
 export default function Navbar({ workspace = false, course, courses = [], onOpenNavigation }: {
@@ -17,15 +18,16 @@ export default function Navbar({ workspace = false, course, courses = [], onOpen
   const { t, lang, toggle: toggleLanguage } = useLang();
   const { theme, toggle: toggleTheme } = useTheme();
   const [menuOpen, setMenuOpen] = useState(false);
+  const { ref: dropdownRef, close: closeMenu, toggle: toggleMenu } = useOverlayMotion(() => setMenuOpen(false), { enabled: menuOpen, kind: "popover", trapFocus: false });
   const menuRef = useRef<HTMLDivElement>(null);
   const accountButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!menuOpen) return;
-    const outside = (e: MouseEvent) => { if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false); };
-    const escape = (e: KeyboardEvent) => { if (e.key === "Escape") { setMenuOpen(false); accountButton.current?.focus(); } };
+    const outside = (e: MouseEvent) => { if (!menuRef.current?.contains(e.target as Node)) closeMenu(); };
+    const escape = (e: KeyboardEvent) => { if (e.key === "Escape") { closeMenu(); accountButton.current?.focus(); } };
     document.addEventListener("mousedown", outside); document.addEventListener("keydown", escape);
     return () => { document.removeEventListener("mousedown", outside); document.removeEventListener("keydown", escape); };
-  }, [menuOpen]);
+  }, [menuOpen, closeMenu]);
   const logout = async () => { setMenuOpen(false); await signOut(); router.push("/"); };
   const initial = (profile?.fullName || user?.email || "S").trim().charAt(0).toUpperCase();
   const maskEmail = (email?: string | null) => { if (!email) return ""; const [local, domain] = email.split("@"); return domain ? local.charAt(0) + "••••" + (local.length > 1 ? local.slice(-1) : "") + "@" + domain : email; };
@@ -44,14 +46,14 @@ export default function Navbar({ workspace = false, course, courses = [], onOpen
       <button onClick={toggleLanguage} className="icon-button language-control" aria-label={lang === "en" ? "Switch to Arabic" : "Switch to English"}>{lang === "en" ? "العربية" : "English"}</button>
       <button onClick={toggleTheme} className="icon-button" aria-label={theme === "dark" ? t("Switch to light mode") : t("Switch to dark mode")} title={theme === "dark" ? t("Switch to light mode") : t("Switch to dark mode")}><Icon name={theme === "dark" ? "sun" : "moon"} size={18} /></button>
       {loading ? <div className="w-12 h-10 bg-bg-alt rounded-full animate-pulse" /> : user ? <div className="relative" ref={menuRef}>
-        <button ref={accountButton} onClick={() => setMenuOpen(v => !v)} className="icon-button account-control" aria-label={t("Account")} title={t("Account")} aria-expanded={menuOpen} aria-controls="account-links">
+        <button ref={accountButton} onClick={() => toggleMenu(() => setMenuOpen(true))} className="icon-button account-control" aria-label={t("Account")} title={t("Account")} aria-expanded={menuOpen} aria-controls="account-links">
           {profile?.photoURL ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img src={profile.photoURL} alt="" className="account-avatar" />
           ) : <span className="account-avatar">{initial}</span>}
           <span className="account-name text-xs font-semibold max-w-28 truncate">{profile?.fullName?.split(" ")[0] || t("Student")}</span><Icon name="chevron-down" size={13} />
         </button>
-        {menuOpen && <div id="account-links" className="account-dropdown">
+        {menuOpen && <div ref={dropdownRef} id="account-links" className="account-dropdown">
           <div className="px-3 py-3 mb-1 border-b border-line"><p className="font-semibold text-sm truncate">{profile?.fullName || t("Student")}</p><p className="text-xs text-ink-soft mt-1 truncate">{maskEmail(user.email)}</p></div>
           <Link href="/dashboard" onClick={() => setMenuOpen(false)}><Icon name="grid" size={17} />{t("Dashboard")}</Link>
           <Link href="/dashboard/recent" onClick={() => setMenuOpen(false)}><Icon name="history" size={17} />{t("Recent")}</Link>

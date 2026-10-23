@@ -3,7 +3,7 @@
 import Icon from "@/components/Icon";
 import { COURSE_COLORS as COLORS } from "@/components/material-presentation";
 import { useLang } from "@/lib/i18n";
-import { useDialog } from "@/lib/use-dialog";
+import { useOverlayMotion } from "@/lib/use-overlay-motion";
 
 import { useState, FormEvent } from "react";
 import { useAuth } from "@/lib/auth-context";
@@ -23,7 +23,7 @@ export default function CreateCourseModal({
   const { user } = useAuth();
 
   const { t } = useLang();
-  const dialogRef = useDialog(onClose);
+  const { ref: dialogRef, close: closeDialog } = useOverlayMotion(onClose, { kind: "dialog" });
   const [code, setCode] = useState("");
   const [title, setTitle] = useState("");
   const [instructor, setInstructor] = useState("");
@@ -63,14 +63,14 @@ export default function CreateCourseModal({
   return (
     <div
       ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("Create a course")} tabIndex={-1} className="dialog-overlay"
-      onClick={onClose}
+      onClick={closeDialog}
     >
       <div
         className="dialog-panel material-dialog max-w-md"
         onClick={(e) => e.stopPropagation()}
       >
         <button
-          onClick={onClose}
+          onClick={closeDialog}
           aria-label={t("Close dialog")}
           className="icon-button material-dialog-close"
         ><Icon name="close" /></button>

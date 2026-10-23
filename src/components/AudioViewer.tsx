@@ -2,7 +2,7 @@
 
 import Icon from "@/components/Icon";
 
-import { useDialog } from "@/lib/use-dialog";
+import { useOverlayMotion } from "@/lib/use-overlay-motion";
 
 import { useEffect, useState } from "react";
 import { AudioRecording } from "@/lib/firestore-helpers";
@@ -30,7 +30,7 @@ export default function AudioViewer({
   courseCode,
   courseColor,
 }: AudioViewerProps) {
-  const dialogRef = useDialog(onClose);
+  const { ref: dialogRef, close: closeDialog } = useOverlayMotion(onClose, { kind: "drawer" });
   const { user } = useAuth();
   const { t } = useLang();
   const [legacy, setLegacy] = useState<{ insights?: AudioRecording["insights"]; transcript?: string } | null>(null);
@@ -94,14 +94,14 @@ export default function AudioViewer({
     <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("Audio recording")} tabIndex={-1} className="material-viewer">
       <div
         className="material-viewer-backdrop"
-        onClick={onClose}
+        onClick={closeDialog}
       />
 
       <div className="material-viewer-panel">
         {/* Header */}
         <div className="material-viewer-header">
           <button
-            onClick={onClose}
+            onClick={closeDialog}
           aria-label={t("Close dialog")}
             className="icon-button"
           ><Icon name="close" /></button>

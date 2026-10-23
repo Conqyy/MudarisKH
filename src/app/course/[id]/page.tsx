@@ -496,7 +496,7 @@ export default function CoursePage() {
     <AppShell courses={allCourses} course={course} courseId={courseId} activeTab={view}>
       <main className="workspace-main course-page">
         <header className="page-header">
-          <div><div className="course-page-code"><span className="course-color-dot" style={{ background: course.color }} />{course.code}</div><h1 className="page-heading">{course.title}</h1><p className="page-subtitle flex items-center gap-2"><Icon name="user" size={15} />{course.instructor || "—"}</p></div>
+          <div><div className="course-page-code"><span className="course-color-dot" style={{ background: course.color }} />{course.code}</div><h1 className="page-heading">{course.title}</h1>{course.instructor && <p className="page-subtitle flex items-center gap-2"><Icon name="user" size={15} />{course.instructor}</p>}</div>
           <div className="flex flex-wrap items-center gap-2">
             <BookmarkButton item={{ kind: "course", id: course.id, title: course.code + " — " + course.title, href: "/course/" + course.id, courseCode: course.code, courseColor: course.color }} />
             <button className="ui-button secondary" onClick={() => setShowEdit(true)}><Icon name="edit" size={15} />{t("Edit")}</button>

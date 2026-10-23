@@ -48,3 +48,15 @@ Independent review found and closed three issues: hidden flashcard academic acce
 - The current course has no saved generated outputs. An older Recent exam link refers to a removed item and correctly displayed the existing missing-item/retry state.
 - Responsive review used browser viewport overrides, not physical phone hardware.
 - The local development preview remains available at `http://localhost:3000`. Merge and production delivery await the owner's visual review.
+
+## Glass and motion revision
+
+The owner supplied a closer reference screenshot and explicitly requested circular side panels with liquid glass, plus every issue from the motion review. The revision adds a floating capsule navigation rail with circular controls, a rounded translucent shell, glass edges and static highlights, and a more compact connected journey. Glass blur is limited to chrome and overlays; document text stays on mostly opaque surfaces, with a solid-surface fallback when backdrop blur is unavailable.
+
+The shared overlay hook now keeps the real dialog mounted through its pointer exit. It animates transform/opacity at 200ms for drawers/dialogs and 180ms/125ms for menu opening/closing, using the existing strong ease-out token and a drawer easing token. Keyboard dismissal remains immediate. Reduced motion uses opacity without spatial movement. Reopening an account menu during its exit cancels the obsolete close and resumes from its current presentation. Touch and mouse presses receive 100ms press / 160ms release feedback; hover remains gated to fine pointers.
+
+Upload completion callbacks and operation timing remain immediate. Manual busy-state guards are checked before animation and before committing dismissal. Focus trapping and return focus remain in effect until the actual close. No backend, domain hook, API helper, dependency, or generation contract changed.
+
+Final automated checks: 236 tests across 19 files, full lint, TypeScript, production build, and whitespace checks passed. Eight overlay lifecycle regressions cover pointer exits, immediate keyboard actions, rapid toggle reversal, busy-state changes, cleanup, and reduced motion. Independent source review approved the corrected implementation.
+
+Live Chrome review covered the account menu, document drawer, focus restoration, mobile navigation, compact/expanded tablet navigation, 360/390/768/1440 widths, Arabic RTL, dark mode, and tutor fullscreen. Desktop and Arabic mobile screenshots are saved as local review artifacts. Browser viewport overrides and original preferences were restored after review. Real-device gesture testing and paid generation were not performed.

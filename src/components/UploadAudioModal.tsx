@@ -1,7 +1,7 @@
 "use client";
 
 import Icon from "@/components/Icon";
-import { useDialog } from "@/lib/use-dialog";
+import { useOverlayMotion } from "@/lib/use-overlay-motion";
 
 import { useState, useRef, useEffect, ChangeEvent, DragEvent } from "react";
 import { useAuth } from "@/lib/auth-context";
@@ -55,7 +55,6 @@ const stepsFor = (item?: QueueItem) =>
   item?.kind === "notes" ? NOTE_STEPS : STEPS;
 
 export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props) {
-  const dialogRef = useDialog(() => { if (phase !== "processing") onClose(); });
   const { user } = useAuth();
   const { t } = useLang();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -69,6 +68,7 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
   const [error, setError] = useState("");
 
   const [phase, setPhase] = useState<Phase>("select");
+  const { ref: dialogRef, close: closeDialog } = useOverlayMotion(onClose, { canClose: phase !== "processing" });
   const [currentIndex, setCurrentIndex] = useState(0);
   const [currentStep, setCurrentStep] = useState(0);
   const [completed, setCompleted] = useState<Set<string>>(new Set());
@@ -321,9 +321,9 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
 
   const statusBadge = (status: ItemStatus) => <span className={"status-badge " + (status === "failed" ? "danger" : status === "done" ? "success" : "info")}>{status === "processing" && <Icon name="loader" size={14} className="animate-spin" />}{t(status === "done" ? "Done" : status === "accepted" ? "Uploaded; analysis is queued." : status === "failed" ? "Failed" : status === "processing" ? "Uploading materials…" : "Queued")}</span>;
 
-  return <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Upload recordings" tabIndex={-1} className="dialog-overlay" onClick={() => { if (phase === "select") onClose(); }}>
+  return <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Upload recordings" tabIndex={-1} className="dialog-overlay" onClick={() => { if (phase === "select") closeDialog(); }}>
     <div className="dialog-panel material-dialog max-w-xl" onClick={event => event.stopPropagation()}>
-      <button type="button" aria-label={t("Close dialog")} onClick={onClose} disabled={isBusy} className="icon-button material-dialog-close"><Icon name="close" /></button>
+      <button type="button" aria-label={t("Close dialog")} onClick={closeDialog} disabled={isBusy} className="icon-button material-dialog-close"><Icon name="close" /></button>
       {phase === "select" ? <>
         <h2>{t("Upload lecture recordings")}</h2>
         <p className="text-ink-soft text-sm mt-2 mb-6">{t("Add recordings, video URLs, or your lecture notes. Follow supporting analysis from Materials.")}</p>

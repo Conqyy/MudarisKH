@@ -6,7 +6,7 @@ import { REMINDER_ICONS } from "@/components/material-presentation";
 import { useState, FormEvent } from "react";
 import { CourseReminder, ReminderType } from "@/lib/firestore-helpers";
 import { useLang } from "@/lib/i18n";
-import { useDialog } from "@/lib/use-dialog";
+import { useOverlayMotion } from "@/lib/use-overlay-motion";
 
 interface Props {
   reminders: CourseReminder[];
@@ -82,7 +82,7 @@ export default function CourseReminders({ reminders, onChange }: Props) {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [actionError, setActionError] = useState("");
-  const dialogRef = useDialog(() => { if (!saving) { setShowForm(false); setEditing(null); } }, showForm);
+  const { ref: dialogRef, close: dismissForm } = useOverlayMotion(() => { setShowForm(false); setEditing(null); }, { enabled: showForm, canClose: !saving });
 
   const openAdd = () => {
     setEditing(null);
@@ -294,14 +294,14 @@ export default function CourseReminders({ reminders, onChange }: Props) {
         <div
           ref={dialogRef} role="dialog" aria-modal="true" aria-label={editing ? t("Edit reminder") : t("New reminder")} tabIndex={-1}
           className="dialog-overlay"
-          onClick={closeForm}
+          onClick={dismissForm}
         >
           <div
             className="dialog-panel material-dialog max-w-md"
             onClick={(e) => e.stopPropagation()}
           >
             <button
-              onClick={closeForm}
+              onClick={dismissForm}
               disabled={saving} aria-label={t("Close reminder")}
               className="icon-button material-dialog-close"
             ><Icon name="close" /></button>
@@ -407,7 +407,7 @@ export default function CourseReminders({ reminders, onChange }: Props) {
               <div className="flex gap-3 pt-1">
                 <button
                   type="button"
-                  onClick={closeForm}
+                  onClick={dismissForm}
                   className="ui-button secondary flex-1"
                 >
                   {t("Cancel")}

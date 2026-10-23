@@ -5,7 +5,7 @@ import Icon from "@/components/Icon";
 import { Course } from "@/lib/firestore-helpers";
 import { useLang } from "@/lib/i18n";
 
-import { useDialog } from "@/lib/use-dialog";
+import { useOverlayMotion } from "@/lib/use-overlay-motion";
 import { apiFetch } from "@/lib/api";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
@@ -75,7 +75,7 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
   const [ef, setEf] = useState({ day: "sunday", start: "", end: "", courseId: "", title: "", hall: "" });
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState("");
-  const editDialogRef = useDialog(() => { if (!editSaving) setEditing(null); }, !!editing);
+  const { ref: editDialogRef, close: dismissEditing } = useOverlayMotion(() => setEditing(null), { enabled: !!editing, canClose: !editSaving });
 
   const load = useCallback(async () => {
     loadRequest.current?.abort();
@@ -420,7 +420,7 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
       {editing && (
         <div
           ref={editDialogRef} role="dialog" aria-modal="true" aria-label="Edit lecture" tabIndex={-1} className="dialog-overlay"
-          onClick={() => setEditing(null)}
+          onClick={dismissEditing}
         >
           <div
             className="dialog-panel material-dialog max-w-lg"
@@ -429,7 +429,7 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
             <div className="flex items-center justify-between mb-5">
               <h3 className="section-heading">{t("Edit lecture")}</h3>
               <button
-                onClick={() => setEditing(null)}
+                onClick={dismissEditing}
                 aria-label={t("Close dialog")}
                 className="icon-button"
               >
@@ -489,7 +489,7 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
                 Delete lecture
               </button>
               <div className="flex gap-2">
-                <button onClick={() => setEditing(null)}
+                <button onClick={dismissEditing}
                   className="ui-button secondary">{t("Cancel")}</button>
                 <button onClick={handleUpdate} disabled={editSaving}
                   className="ui-button primary">

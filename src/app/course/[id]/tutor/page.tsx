@@ -14,7 +14,7 @@ import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
 import { StudyBusy, StudySourceStatus } from "@/components/StudyWorkspace";
 import { CourseFoundationGate } from "@/components/CourseFoundationGate";
-import { useDialog } from "@/lib/use-dialog";
+import { useOverlayMotion } from "@/lib/use-overlay-motion";
 import { useCourseFoundation } from "@/hooks/useCourseFoundation";
 import { useAuth } from "@/lib/auth-context";
 import { useLang } from "@/lib/i18n";
@@ -160,8 +160,8 @@ function TutorPageContent() {
     setSelTuts(previous => new Set([...previous].filter(value => value !== id)));
   };
   const [sourcesOpen, setSourcesOpen] = useState(false);
-  const sourceDialogRef = useDialog(() => setSourcesOpen(false), sourcesOpen);
-  const historyDialogRef = useDialog(() => setHistoryOpen(false), historyOpen);
+  const { ref: sourceDialogRef, close: dismissSources } = useOverlayMotion(() => setSourcesOpen(false), { enabled: sourcesOpen, kind: "drawer" });
+  const { ref: historyDialogRef, close: dismissHistory } = useOverlayMotion(() => setHistoryOpen(false), { enabled: historyOpen, kind: "drawer" });
 
   // Fullscreen / focus mode for the chat
   const [fullscreen, setFullscreen] = useState(false);
@@ -694,12 +694,12 @@ function TutorPageContent() {
 
               {/* Mobile history dropdown */}
               {historyOpen && (
-                <div className="tutor-overlay" onClick={() => setHistoryOpen(false)}><div ref={historyDialogRef} role="dialog" aria-modal="true" aria-label={t("History")} tabIndex={-1} className="tutor-context-panel" onClick={event => event.stopPropagation()}><div className="flex justify-end mb-3"><button type="button" className="icon-button" aria-label={t("Close history")} onClick={() => setHistoryOpen(false)}><Icon name="close" size={18} /></button></div>{HistoryList()}</div></div>
+                <div className="tutor-overlay" onClick={dismissHistory}><div ref={historyDialogRef} role="dialog" aria-modal="true" aria-label={t("History")} tabIndex={-1} className="tutor-context-panel" onClick={event => event.stopPropagation()}><div className="flex justify-end mb-3"><button type="button" className="icon-button" aria-label={t("Close history")} onClick={dismissHistory}><Icon name="close" size={18} /></button></div>{HistoryList()}</div></div>
               )}
 
               {/* Mobile sources dropdown */}
               {sourcesOpen && (
-                <div className="tutor-overlay" onClick={() => setSourcesOpen(false)}><div ref={sourceDialogRef} role="dialog" aria-modal="true" aria-label={t("Sources")} tabIndex={-1} className="tutor-context-panel" onClick={event => event.stopPropagation()}><div className="flex justify-between items-center mb-3"><h2 className="section-heading">{t("Sources")}</h2><button type="button" className="icon-button" aria-label={t("Close sources")} onClick={() => setSourcesOpen(false)}><Icon name="close" size={18} /></button></div>{SourcesPanel()}</div></div>
+                <div className="tutor-overlay" onClick={dismissSources}><div ref={sourceDialogRef} role="dialog" aria-modal="true" aria-label={t("Sources")} tabIndex={-1} className="tutor-context-panel" onClick={event => event.stopPropagation()}><div className="flex justify-between items-center mb-3"><h2 className="section-heading">{t("Sources")}</h2><button type="button" className="icon-button" aria-label={t("Close sources")} onClick={dismissSources}><Icon name="close" size={18} /></button></div>{SourcesPanel()}</div></div>
               )}
 
               {/* Messages */}

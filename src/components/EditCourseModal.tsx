@@ -3,7 +3,7 @@
 import Icon from "@/components/Icon";
 import { COURSE_COLORS as COLORS } from "@/components/material-presentation";
 import { useLang } from "@/lib/i18n";
-import { useDialog } from "@/lib/use-dialog";
+import { useOverlayMotion } from "@/lib/use-overlay-motion";
 
 import { useState, FormEvent } from "react";
 import { updateCourse, Course } from "@/lib/firestore-helpers";
@@ -16,7 +16,7 @@ interface Props {
 
 export default function EditCourseModal({ course, onClose, onSuccess }: Props) {
   const { t } = useLang();
-  const dialogRef = useDialog(onClose);
+  const { ref: dialogRef, close: closeDialog } = useOverlayMotion(onClose, { kind: "dialog" });
   const [code, setCode] = useState(course.code);
   const [title, setTitle] = useState(course.title);
   const [instructor, setInstructor] = useState(
@@ -54,14 +54,14 @@ export default function EditCourseModal({ course, onClose, onSuccess }: Props) {
   return (
     <div
       ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("Edit course")} tabIndex={-1} className="dialog-overlay"
-      onClick={onClose}
+      onClick={closeDialog}
     >
       <div
         className="dialog-panel material-dialog max-w-md"
         onClick={(e) => e.stopPropagation()}
       >
         <button
-          onClick={onClose}
+          onClick={closeDialog}
           aria-label={t("Close dialog")}
           className="icon-button material-dialog-close"
         ><Icon name="close" /></button>
@@ -144,7 +144,7 @@ export default function EditCourseModal({ course, onClose, onSuccess }: Props) {
           <div className="flex gap-3 pt-3">
             <button
               type="button"
-              onClick={onClose}
+              onClick={closeDialog}
               className="ui-button secondary flex-1"
             >
               {t("Cancel")}

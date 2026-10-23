@@ -2,10 +2,12 @@ import type { Metadata } from "next";
 import "./globals.css";
 import "./workspace-pages.css";
 import "@/components/material-ui.css";
+import "./glass-shell.css";
 import { AuthProvider } from "@/lib/auth-context";
 import { LanguageProvider } from "@/lib/i18n";
 import { ThemeProvider } from "@/lib/theme";
 import { SidebarProvider } from "@/lib/sidebar";
+import { InputModalityProvider } from "@/lib/input-modality";
 
 export const metadata: Metadata = {
   title: "Mudaris — AI Study Assistant",
@@ -50,7 +52,7 @@ export default function RootLayout({
         <ThemeProvider>
           <LanguageProvider>
             <SidebarProvider>
-              <AuthProvider>{children}</AuthProvider>
+              <InputModalityProvider><AuthProvider>{children}</AuthProvider></InputModalityProvider>
             </SidebarProvider>
           </LanguageProvider>
         </ThemeProvider>

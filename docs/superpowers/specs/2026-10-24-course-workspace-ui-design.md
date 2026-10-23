@@ -5,6 +5,8 @@
 - Source baseline: `bcf3612497ecf3d9e8de213c4796a7beac04c23e`
 - Status: approved by the owner and implemented on the redesign branch. Local visual review remains pending before merge or production delivery.
 
+Revision: the owner's subsequent screenshot feedback requests a closer reference match with circular sidebar controls and liquid glass. The revised implementation uses a floating rounded chrome frame and capsule rail, static translucent/blurred navigation and overlays with specular edges, a denser connected journey, and real pointer-driven overlay entrances/exits. Reading surfaces remain mostly opaque. This explicit direction supersedes the original flat-chrome treatment below; all workflow and preference-preservation constraints remain.
+
 ## 1. Agreed intent and scope
 
 The owner wants a complete, fresh Mudaris interface with the same functionality, using [Customer Journey CRM Dashboard by Jack R. / RonDesignLab](https://dribbble.com/shots/24659454-Customer-Journey-CRM-Dashboard) as the visual and experience reference. The owner explicitly excludes influence from the current colors, typography, textures, and design language, and selected the **course workspace with a journey overview** approach.

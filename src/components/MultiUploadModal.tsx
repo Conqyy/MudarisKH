@@ -1,7 +1,7 @@
 "use client";
 
 import Icon from "@/components/Icon";
-import { useDialog } from "@/lib/use-dialog";
+import { useOverlayMotion } from "@/lib/use-overlay-motion";
 
 import {
   useState,
@@ -86,7 +86,6 @@ export default function MultiUploadModal({
   selectionFields,
   selectionValid = true,
 }: Props) {
-  const dialogRef = useDialog(() => { if (phase !== "processing") onClose(); });
   const { user } = useAuth();
   const { t } = useLang();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -96,6 +95,7 @@ export default function MultiUploadModal({
   const [error, setError] = useState("");
 
   const [phase, setPhase] = useState<Phase>("select");
+  const { ref: dialogRef, close: closeDialog } = useOverlayMotion(onClose, { canClose: phase !== "processing" });
   const [currentIndex, setCurrentIndex] = useState(0);
 
   // Per-current-file step animation
@@ -318,9 +318,9 @@ export default function MultiUploadModal({
   };
 
   return (
-    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Upload materials" tabIndex={-1} className="dialog-overlay" onClick={() => { if (phase === "select") onClose(); }}>
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Upload materials" tabIndex={-1} className="dialog-overlay" onClick={() => { if (phase === "select") closeDialog(); }}>
       <div className="dialog-panel material-dialog max-w-xl" onClick={event => event.stopPropagation()}>
-        <button type="button" onClick={onClose} aria-label={t("Close dialog")} disabled={isBusy} className="icon-button material-dialog-close"><Icon name="close" /></button>
+        <button type="button" onClick={closeDialog} aria-label={t("Close dialog")} disabled={isBusy} className="icon-button material-dialog-close"><Icon name="close" /></button>
         {phase === "select" ? <>
           <h2>{t(heading)}</h2>
           <p className="text-ink-soft text-sm mt-2 mb-6">{t(subtitle)}</p>
