@@ -188,4 +188,5 @@ class SummaryGeneratorAgent:
             if getattr(response.choices[0], 'finish_reason', None) == 'length':
                 raise ValueError('Summary response was truncated')
             return (response.choices[0].message.content or '').strip()
-        return parse_with_retry(_call, label='study summary', validator=validate_summary)
+        return parse_with_retry(_call, label='study summary', validator=lambda data: validate_summary(
+            data, supporting=bool(supporting_context and supporting_context['snapshot']['materials'])))

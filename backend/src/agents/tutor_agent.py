@@ -94,7 +94,7 @@ class AITutorAgent:
                        supporting_context: dict | None = None) -> dict:
         from src.services.source_evidence import evidence_content, SOURCE_POLICY
         from src.utils.generation_context import supporting_packet_text, SUPPORTING_PROVENANCE_POLICY
-        from src.utils.ai_contracts import response_text
+        from src.utils.ai_contracts import response_text, validate_supporting_output
         from src.utils.json_parse import parse_with_retry
         history = [{'role': m.get('role', 'user'), 'content': str(m.get('content', ''))}
                    for m in messages[-12:] if m.get('content')]
@@ -108,6 +108,7 @@ class AITutorAgent:
             if supporting_context and supporting_context['snapshot']['materials']:
                 if not isinstance(value.get('provenance'), list) or not isinstance(value.get('supportingSourceRefs'), list):
                     raise ValueError('Tutor supporting provenance is required')
+                validate_supporting_output(value, 'tutor')
                 return {key: value[key] for key in ('reply', 'sourceRefs', 'supportingSourceRefs', 'provenance')}
             return {'reply': value['reply'], 'sourceRefs': value['sourceRefs']}
         def call(reminder):

@@ -1,4 +1,6 @@
 from unittest.mock import MagicMock
+from copy import deepcopy
+from hashlib import sha256
 import json
 from types import SimpleNamespace
 
@@ -7,7 +9,14 @@ import pytest
 from src.utils.ai_contracts import validate_exam_contract, validate_analysis
 from src.utils.topic_scope import retag_topic_weights
 from src.agents.exam_generator import ExamGeneratorAgent
-from tests.foundation_fixtures import confirm_lecture_foundation, lecture_document, source_refs
+from tests.foundation_fixtures import source_refs
+from tests.test_atomic_data import database, cloud_database
+from tests.test_document_job_storage import job_db
+from tests.test_supporting_job_storage import repository, identity, queue_claim
+from tests.test_supporting_storage import library, report_for
+from tests.supporting_fixtures import supporting_manifest
+from src.supporting.contracts import supporting_revision
+from src.database.firebase_client import DataConflict
 
 
 TEX = r'\begin{document}\textbf{Question 1:} Choose. [2 marks]\textbf{Question 2:} Explain. [3 marks]\end{document}'
@@ -87,49 +96,102 @@ def test_missing_legacy_source_does_not_fall_back_to_collection_question_count(m
     db.update_historical_exam.assert_not_called()
 
 
-def test_generation_uses_and_saves_one_combined_prediction(monkeypatch, api_module):
-    api = api_module
-    db = MagicMock()
-    db.get_owned_course.return_value = {'id': 'course', 'userId': 'owner', 'title': 'AI'}
-    documents = confirm_lecture_foundation(db, [lecture_document(topic='AI')])
-    foundation_revision = db.get_document_foundation.return_value['revision']
-    rows = []
-    for source_id, kind, count in [('a', 'mcq', 1), ('b', 'written', 3)]:
-        paper = {'paperId': 'p1', 'startPage': 1, 'endPage': 1, 'examType': None,
-                 'totalQuestions': count, 'questionTypes': [{'type': kind, 'count': count, 'percentage': 100}],
-                 'topicWeights': [{'topic': 'AI', 'weight': 1, 'questionCount': count}],
-                 'difficultyDistribution': [], 'patterns': [], 'gradingBlueprint': 'Different question styles'}
-        analysis = {**paper, 'analysisVersion': 2, 'papers': [paper], 'paperCount': 1,
-                    'collectionQuestionCount': count, 'sourceId': source_id}
-        rows.append({'id': source_id, 'userId': 'owner', 'courseId': 'course',
-            'status': 'completed', 'analysis': analysis,
-            'processingJob': {'foundationRevision': foundation_revision},
-            'supportingAnalysis': {'version': 1, 'state': 'completed',
-                'sourceRevision': (source_id * 64)[:64],
-                'reportRevision': ((source_id + 'r') * 64)[:64]}})
-    db.get_course_historical_exams.return_value = rows
-    db.get_course_intelligence.return_value = {
-        'document_analyses': [documents[0]['analysis']], 'document_texts': ['AI concepts'],
-        'historical_analyses': [row['analysis'] for row in rows],
-        'source_ids': {'document_ids': ['doc'], 'historical_exam_ids': ['a', 'b']},
-        'counts': {'documents': 1, 'historical_exams': 2},
-    }
+def _publish_paper(library, source_id, kind, count):
+    """Publish immutable originals and reports through the real managed pipeline."""
+    material = identity(material=source_id)
+    raw = f'Original past paper {source_id}'.encode()
+    manifest = supporting_manifest()
+    manifest['identity'] = material
+    manifest['originalDigest'] = sha256(raw).hexdigest()
+    manifest['sourceRevision'] = supporting_revision(manifest['originalDigest'], manifest['units'])
+    _, claim, _ = queue_claim(library.repository, material=material, original=manifest['originalDigest'])
+    library.save_source(material, claim, raw, manifest)
+    report = report_for(library, manifest, count=count)
+
+    def set_material(value):
+        if isinstance(value, dict):
+            if value.get('kind') == 'historical_exam' and value.get('materialId') == 'source':
+                value['materialId'] = source_id
+            for child in value.values(): set_material(child)
+        elif isinstance(value, list):
+            for child in value: set_material(child)
+
+    set_material(report)
+    report['papers'][0].update(examType='Final', unknownQuestionTypeIds=[], questionTypes=[{
+        'type': kind, 'count': count, 'percentage': 100,
+        'questionIds': [item['id'] for item in report['items']]}])
+    return library.save_report(material, claim, report)
+
+
+def _install_generation(monkeypatch, api, library, *, on_provider=None):
+    db = library.repository.database
     monkeypatch.setattr(api, 'db_client', db)
+    monkeypatch.setattr(api, 'supporting_repository', library.repository)
+    monkeypatch.setattr(api, 'supporting_library', library)
     agent = ExamGeneratorAgent.__new__(ExamGeneratorAgent)
     agent.client, agent.model_id = object(), 'fake'
     monkeypatch.setattr(api, 'ai_agent', agent)
-    complete = TEX + '\n<secret-rubrics>' + json.dumps({'questions': {k: {**v, 'sourceRefs': source_refs(documents)} for k, v in RUBRICS['questions'].items()}}) + '</secret-rubrics>'
-    response = SimpleNamespace(choices=[SimpleNamespace(finish_reason='stop', message=SimpleNamespace(content=complete))])
-    monkeypatch.setattr('src.agents.exam_generator.chat_with_retry', lambda *a, **kw: response)
+    refs = source_refs([library.repository.test_lecture])
+    rubrics = {'questions': {key: {**deepcopy(value), 'sourceRefs': refs}
+                             for key, value in RUBRICS['questions'].items()}}
+    rubrics['provenance'] = [{
+        'path': path, 'authority': 'lecture', 'relation': 'lecture_supported',
+        'sourceRefs': refs, 'supportingSourceRefs': [], 'supportingSourceProofs': [],
+        'lectureAnchorRefs': []} for path in (
+            '/sharedContext',
+            '/questions/q1/text', '/questions/q1/correct_answer',
+            '/questions/q2/text', '/questions/q2/criteria')]
+    complete = TEX + '\n<secret-rubrics>' + json.dumps(rubrics) + '</secret-rubrics>'
+    seen = []
+
+    def provider(*args, **kwargs):
+        seen.append(deepcopy(kwargs['messages']))
+        if on_provider: on_provider()
+        return SimpleNamespace(choices=[SimpleNamespace(finish_reason='stop',
+            message=SimpleNamespace(content=complete))])
+
+    monkeypatch.setattr('src.agents.exam_generator.chat_with_retry', provider)
     monkeypatch.setattr('src.utils.pdf_response.compile_temp_pdf', lambda *a, **kw: None)
     monkeypatch.setattr(agent, 'repair_latex', lambda tex, **kwargs: tex)
+    return seen
+
+
+def _assert_no_exam_or_secret(db):
+    assert db.get_course_exams('c', 'u') == []
+    if db.use_local:
+        assert not db._read_local_db().get('users', {}).get('u', {}).get('courses', {}).get('c', {}).get('exams')
+    else:
+        assert not any(path.startswith('users/u/courses/c/exams/') for path in db.db.rows)
+
+
+def test_generation_uses_and_saves_one_combined_prediction(monkeypatch, api_module, library):
+    api = api_module
+    versions = {}
+    for source_id, kind, count in [('a', 'mcq', 1), ('b', 'written', 3)]:
+        versions[source_id] = _publish_paper(library, source_id, kind, count)
+    seen = _install_generation(monkeypatch, api, library)
     result = api.generate_enhanced_exam_endpoint(api.EnhancedExamGenerateRequest(
-        user_id='owner', course_id='course', total_marks=5, exam_type='Final', historical_exam_ids=['a', 'b']), uid='owner')
+        user_id='u', course_id='c', total_marks=5, exam_type='Final',
+        historical_exam_ids=['a', 'b'], tutorial_ids=[], audio_ids=[]), uid='u')
     blueprint = result['exam_blueprint']
     assert blueprint['totalQuestions'] == 2
     assert [(row['type'], row['count']) for row in blueprint['questionTypes']] == [('mcq', 1), ('written', 1)]
     assert blueprint['evidence']['paperCount'] == 2
-    assert db.save_exam_flat.call_args.args[2]['examBlueprint'] == blueprint
+    assert blueprint['evidence']['sourceCount'] == 2
+    db = library.repository.database
+    saved = db.get_exam(result['doc_id'])
+    assert saved['examBlueprint'] == blueprint
+    materials = saved['supportingSnapshot']['materials']
+    assert [row['identity']['materialId'] for row in materials] == ['a', 'b']
+    assert [row['reportRevision'] for row in materials] == [versions[key]['revision'] for key in ('a', 'b')]
+    assert saved['rubrics']['provenance']
+    if db.use_local:
+        secret = db._read_local_db()['users']['u']['courses']['c']['exams'][result['exam_id']]
+    else:
+        secret = db.db.rows[f"users/u/courses/c/exams/{result['exam_id']}"]['rubrics']
+    assert secret == saved['rubrics']
+    provider_text = json.dumps(seen, ensure_ascii=False)
+    assert all(version['revision'] in provider_text for version in versions.values())
     assert len(result['question_structure']) == 2
 
 
@@ -159,35 +221,38 @@ def test_legacy_rescan_rechecks_source_before_caching(monkeypatch, api_module, t
     db.update_historical_exam.assert_not_called()
 
 
-@pytest.mark.parametrize('remaining_documents', [[], [{'topics': ['AI']}]])
-def test_generation_stops_if_selected_past_source_disappears_on_refresh(monkeypatch, api_module, remaining_documents):
+@pytest.mark.parametrize('disappearance', ['before_compile', 'during_generation'])
+def test_generation_stops_if_selected_past_source_disappears_on_refresh(monkeypatch, api_module, library, disappearance):
     api = api_module
-    db = MagicMock()
-    documents = confirm_lecture_foundation(db, [lecture_document(topic='AI')])
-    foundation_revision = db.get_document_foundation.return_value['revision']
-    db.get_course_historical_exams.return_value = [{
-        'id': 'past', 'userId': 'owner', 'courseId': 'course', 'status': 'completed',
-        'processingJob': {'foundationRevision': foundation_revision},
-        'supportingAnalysis': {'version': 1, 'state': 'completed',
-            'sourceRevision': 's' * 64, 'reportRevision': 'r' * 64}}]
-    db.get_course_intelligence.side_effect = [
-        {'document_analyses': [documents[0]['analysis']],
-         'historical_analyses': [{'totalQuestions': 100}],
-         'source_ids': {'historical_exam_ids': ['past']}},
-        {'document_analyses': remaining_documents, 'historical_analyses': [],
-         'source_ids': {'historical_exam_ids': []}},
-    ]
-    monkeypatch.setattr(api, 'db_client', db)
-    monkeypatch.setattr(api, '_ensure_historical_paper_analysis', lambda *a, **kw: True)
-    agent = MagicMock()
-    monkeypatch.setattr(api, 'ai_agent', agent)
-    with pytest.raises(api.HTTPException) as error:
+    db = library.repository.database
+    _publish_paper(library, 'a', 'mcq', 1)
+    _publish_paper(library, 'b', 'written', 3)
+    deleted = []
+
+    def disappear():
+        library.repository.delete(identity(material='b'))
+        deleted.append('b')
+
+    seen = _install_generation(monkeypatch, api, library,
+        on_provider=disappear if disappearance == 'during_generation' else None)
+    if disappearance == 'before_compile':
+        prepare = api._source_prepare
+        def prepare_then_disappear(*args, **kwargs):
+            result = prepare(*args, **kwargs)
+            disappear()
+            return result
+        monkeypatch.setattr(api, '_source_prepare', prepare_then_disappear)
+    with pytest.raises((api.HTTPException, DataConflict)) as error:
         api.generate_enhanced_exam_endpoint(api.EnhancedExamGenerateRequest(
-            user_id='owner', course_id='course', historical_exam_ids=['past']), uid='owner')
-    assert error.value.status_code in (409, 422)
-    assert db.get_course_intelligence.call_count == 2
-    agent.compile_enhanced_exam.assert_not_called()
-    db.save_exam_flat.assert_not_called()
+            user_id='u', course_id='c', total_marks=5, exam_type='Final',
+            historical_exam_ids=['a', 'b'], tutorial_ids=[], audio_ids=[]), uid='u')
+    if isinstance(error.value, api.HTTPException):
+        assert error.value.status_code in (409, 422)
+    if disappearance == 'during_generation':
+        assert isinstance(error.value, DataConflict)
+    assert deleted == ['b']
+    assert bool(seen) == (disappearance == 'during_generation')
+    _assert_no_exam_or_secret(db)
 
 
 @pytest.fixture(autouse=True)

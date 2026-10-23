@@ -100,6 +100,13 @@ def test_structured_retry_reuses_entire_checked_packet(monkeypatch, kind):
         'examLikelihood': 'high', 'examWeight': 50}], 'keyTerms': [], 'examFocus': []}
         if kind == 'summary' else {'cards': [{'front': 'Trees?', 'back': 'Roots.',
                                              'topic': 'Trees', 'examLikelihood': 'high'}]})
+    ref = {'documentId': 'lecture', 'sourceRevision': 'f' * 64, 'unitId': 'u1'}
+    row = completed if kind == 'summary' else completed['cards'][0]
+    paths = (['/overview', '/sections/0/heading', '/sections/0/content']
+             if kind == 'summary' else ['/front', '/back', '/topic'])
+    row['provenance'] = [{'path': path, 'authority': 'lecture', 'relation': 'lecture_supported',
+        'sourceRefs': [ref], 'supportingSourceRefs': [], 'supportingSourceProofs': [],
+        'lectureAnchorRefs': []} for path in paths]
     def provider(*args, **kwargs):
         seen.append(json.dumps(kwargs['messages'], ensure_ascii=False))
         content = 'not json' if len(seen) == 1 else json.dumps(completed)

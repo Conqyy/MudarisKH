@@ -296,7 +296,8 @@ class ExamGeneratorAgent:
         if "\\end{document}" not in full or "</secret-rubrics>" not in full or finish == 'length':
             raise RuntimeError('The generated exam is incomplete. Please retry.')
         metadata = self.extract_and_save_exam_metadata(full, exam_id, user_id, course_id)
-        validate_exam_contract(metadata['cleaned_tex'], metadata['rubrics'], blueprint=blueprint)
+        validate_exam_contract(metadata['cleaned_tex'], metadata['rubrics'], blueprint=blueprint,
+            supporting=bool(supporting_context and supporting_context['snapshot']['materials']))
         raw_tex = self._sanitize_latex(full.strip())
 
         raw_tex = raw_tex.replace("{{EXAM_ID}}", exam_id)
@@ -680,7 +681,8 @@ class ExamGeneratorAgent:
             if getattr(response.choices[0], 'finish_reason', None) == 'length':
                 raise ValueError('Flashcard response was truncated')
             return (response.choices[0].message.content or '').strip()
-        return parse_with_retry(_call, label='flashcards', validator=lambda data: validate_flashcards(data, count))['cards']
+        return parse_with_retry(_call, label='flashcards', validator=lambda data: validate_flashcards(
+            data, count, supporting=bool(supporting_context and supporting_context['snapshot']['materials'])))['cards']
 
     def repair_latex(self, tex_content: str, error_hint: str = "", *, lecture_evidence: dict | None = None) -> str:
         """Ask the model to fix a LaTeX document that fails to compile.

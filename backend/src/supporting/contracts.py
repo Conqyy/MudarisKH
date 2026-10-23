@@ -363,6 +363,11 @@ def validate_source_proof(value, *, ref, unit):
     return deepcopy(value)
 
 
+def validate_source_proof_shape(value, *, supporting=True):
+    """Validate provider proof syntax before resolving its immutable original."""
+    return deepcopy(_proof(value, supporting=supporting))
+
+
 def _ledger(value, all_key, checked_key, unresolved_key, expected=None, *, check_complete=True):
     _obj(value, 'coverage')
     for key in (all_key, checked_key, unresolved_key):

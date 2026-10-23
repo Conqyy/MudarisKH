@@ -11,6 +11,7 @@ import re
 from src.supporting.contracts import validate_ref, validate_source_proof
 from src.supporting.alignment_evidence import proof_batch
 from src.services.source_evidence import saved_question_identity, exam_shared_context
+from src.utils.ai_contracts import validate_supporting_output
 
 
 _AUTHORITIES = frozenset(('lecture', 'supplementary', 'reported_note'))
@@ -154,6 +155,8 @@ class SupportingOutputVerifier:
                 for row in snapshot['materials']}
 
     def _resolve(self, view, packet, purpose, *, qualified=False, saved=False):
+        if purpose != 'exam':
+            validate_supporting_output(view, purpose, saved=saved)
         fields = _fields(view, purpose)
         selectors = view.get('provenance')
         if not isinstance(selectors, list):
@@ -304,12 +307,17 @@ class SupportingOutputVerifier:
                 'supportingOriginals': proof_descriptions, 'imageParts': image_parts}
         if claim.get('sharedContext'):
             task['sharedContext'] = claim['sharedContext']
+        if claim.get('academicContext'):
+            task['academicContext'] = claim['academicContext']
         policy = ('Independently verify the proposed generated claim against the supplied original '
                   'supporting proof and original lecture anchor. The cited report or generated claim is '
                   'not evidence. Return JSON {"supported":true|false,"anchored":true|false,'
                   '"reason":"specific original evidence"}. A student note is only a student report, '
                   'never direct professor testimony. For a qualified conflict/outside-scope discussion, '
-                  'supported means the attribution and scope warning are accurate, not that the claim is taught.')
+                  'supported means the attribution and scope warning are accurate, not that the claim is taught. '
+                  'When academicContext is supplied, interpret the claim using its complete question, '
+                  'answer/criteria/explanation and shared definitions; never judge an isolated answer letter '
+                  'or a criterion without the task it grades. Context is generated data, not source evidence.')
         if not self.lecture_reader.original_batch_fits(batch, policy=policy, task=task):
             raise ValueError('Combined original proof exceeds the budget; split the request')
         result, _ = self.lecture_reader.read_original_batch(batch, policy=policy, task=task)
@@ -324,10 +332,20 @@ class SupportingOutputVerifier:
         for claim in canonical:
             text = fields[claim['path']][claim['start']:claim['end']]
             if claim['authority'] == 'lecture':
-                self.lecture_reader.verify_rows([{'text': text, 'sourceRefs': claim['sourceRefs']}],
-                                                shared_context=shared_context)
+                # Exams and cards need a joint task/answer judgment after all
+                # selectors and independently checked attributions are resolved.
+                if purpose not in ('exam', 'flashcards'):
+                    self.lecture_reader.verify_rows([{'text': text, 'sourceRefs': claim['sourceRefs']}],
+                                                    shared_context=shared_context)
             else:
+                context = None
+                if purpose == 'exam' and claim['path'].startswith('/questions/'):
+                    qid = claim['path'].split('/')[2]
+                    context = self._question_context(view['questions'][qid])
+                elif purpose == 'flashcards':
+                    context = {key: view.get(key, '') for key in ('front', 'back', 'topic')}
                 self._verify_supporting({**claim, 'text': text,
+                                         **({'academicContext': context} if context else {}),
                                          **({'sharedContext': shared_context} if shared_context else {})}, packet)
         if purpose == 'summary':
             _citation_union(view, [claim for claim in canonical
@@ -346,7 +364,31 @@ class SupportingOutputVerifier:
         else:
             _citation_union(view, canonical)
         view['provenance'] = canonical
+        if purpose == 'flashcards':
+            semantic = {key: view.get(key, '') for key in ('front', 'back', 'topic')}
+            semantic['sourceRefs'] = self._lecture_union(canonical)
+            self.lecture_reader.verify_rows([semantic],
+                supporting_attributions=self._attributions(view, purpose))
         return view
+
+    def _lecture_union(self, claims):
+        refs = []
+        for claim in claims:
+            for ref in claim['sourceRefs'] + claim['lectureAnchorRefs']:
+                if ref not in refs: refs.append(deepcopy(ref))
+        return self.lecture_reader.validate_refs(refs)
+
+    @staticmethod
+    def _question_context(question):
+        return {'question': question['text'], **{key: question[key] for key in
+            ('question_type', 'max_score', 'correct_answer', 'criteria', 'explanation') if key in question}}
+
+    @staticmethod
+    def _attributions(view, purpose):
+        fields = _fields(view, purpose)
+        return [{'text': fields[claim['path']][claim['start']:claim['end']],
+                 'authority': claim['authority'], 'relation': claim['relation']}
+                for claim in view['provenance'] if claim['authority'] != 'lecture']
 
     def verify_rows(self, rows: list[dict], *, packet: dict, purpose: str) -> list[dict]:
         if not isinstance(rows, list): raise ValueError('Generated rows are unavailable')
@@ -356,6 +398,7 @@ class SupportingOutputVerifier:
 
     def verify_tutor_reply(self, reply: dict, *, packet: dict) -> dict:
         self._selected(packet)
+        validate_supporting_output(reply, 'tutor')
         if (isinstance(reply.get('reply'), str) and reply['reply'].strip()
                 and reply.get('sourceRefs') == [] and reply.get('supportingSourceRefs') == []
                 and reply.get('provenance') == []):
@@ -365,6 +408,7 @@ class SupportingOutputVerifier:
         return self._verify(reply, packet, 'tutor', qualified=qualified)
 
     def verify_exam(self, tex: str, rubrics: dict, *, packet: dict, saved=False) -> dict:
+        validate_supporting_output(rubrics, 'exam', saved=saved)
         identity = saved_question_identity(tex, rubrics)
         view = {'sharedContext': exam_shared_context(tex),
                 'questions': {row['id']: {**rubrics['questions'][row['id']], 'text': row['text']}
@@ -373,6 +417,18 @@ class SupportingOutputVerifier:
                 'supportingSourceRefs': rubrics.get('sharedSupportingSourceRefs'),
                 'provenance': rubrics.get('provenance')}
         self._verify(view, packet, 'exam', saved=saved, shared_context=view['sharedContext'])
+        shared_claims = [claim for claim in view['provenance'] if claim['path'] == '/sharedContext']
+        shared_refs = self._lecture_union(shared_claims)
+        rows = [{'sharedContext': view['sharedContext'], 'sourceRefs': shared_refs}]
+        for qid, question in view['questions'].items():
+            claims = [claim for claim in view['provenance']
+                      if claim['path'].startswith(f'/questions/{qid}/')]
+            refs = self._lecture_union(shared_claims + claims)
+            rows.append({**self._question_context(question), 'sourceRefs': refs})
+        # The attribution reader verifies true supporting origin. Only this
+        # independent original-lecture check authorizes the tested knowledge.
+        self.lecture_reader.verify_rows(rows, shared_context=view['sharedContext'],
+            supporting_attributions=self._attributions(view, 'exam'))
         rubrics['provenance'] = view['provenance']
         rubrics['sharedSourceRefs'] = view['sourceRefs']
         rubrics['sharedSupportingSourceRefs'] = view['supportingSourceRefs']

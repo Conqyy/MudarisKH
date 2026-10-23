@@ -140,7 +140,73 @@ def validate_analysis(kind: str, data: dict) -> dict:
     return data
 
 
-def validate_summary(data: dict) -> dict:
+def _closed_fields(value, allowed):
+    if not isinstance(value, dict) or set(value) - set(allowed):
+        raise ValueError('Unsupported generated output field')
+
+
+def _citation_shapes(row):
+    from src.supporting.contracts import validate_ref
+    for key, supporting in (('sourceRefs', False), ('sharedSourceRefs', False),
+                            ('supportingSourceRefs', True), ('sharedSupportingSourceRefs', True)):
+        if key in row:
+            for ref in _list(row, key): validate_ref(ref, supporting=supporting)
+
+
+def validate_provenance_shape(row, *, saved=False):
+    """Reject malformed selectors/citations before a parse can be successful."""
+    from src.supporting.contracts import RELATIONS, validate_ref, validate_source_proof_shape
+    claims = _list(row, 'provenance')
+    if len(claims) > 1024: raise ValueError('Generated provenance exceeds claim budget')
+    fields = {'path', 'authority', 'relation', 'sourceRefs', 'supportingSourceRefs',
+              'supportingSourceProofs', 'lectureAnchorRefs'}
+    for claim in claims:
+        _closed_fields(claim, fields | ({'start', 'end'} if saved else {'quote'}))
+        if not fields <= set(claim): raise ValueError('Incomplete provenance selector')
+        if not re.fullmatch(r'/(?:[^~]|~[01])*', _text(claim, 'path')):
+            raise ValueError('Invalid provenance JSON Pointer')
+        if claim['authority'] not in ('lecture', 'supplementary', 'reported_note') or claim['relation'] not in RELATIONS:
+            raise ValueError('Invalid provenance authority or relation')
+        if saved:
+            _number(claim, 'start', integer=True)
+            _number(claim, 'end', lower=claim['start']+1, integer=True)
+        elif 'quote' in claim:
+            _text(claim, 'quote')
+        for key, supporting in (('sourceRefs', False), ('supportingSourceRefs', True), ('lectureAnchorRefs', False)):
+            for ref in _list(claim, key): validate_ref(ref, supporting=supporting)
+        for proof in _list(claim, 'supportingSourceProofs'):
+            validate_source_proof_shape(proof)
+    return row
+
+
+def validate_supporting_output(data, purpose, *, saved=False):
+    """Close retained provider fields; every academic field has a known selector."""
+    citations = {'sourceRefs', 'supportingSourceRefs'}
+    if purpose == 'summary':
+        _closed_fields(data, {'title', 'overview', 'sections', 'keyTerms', 'examFocus', 'provenance'} | citations)
+        for section in data.get('sections', []):
+            _closed_fields(section, {'heading', 'content', 'keyPoints', 'examLikelihood', 'examWeight'} | citations)
+            _citation_shapes(section)
+        for term in data.get('keyTerms', []):
+            _closed_fields(term, {'term', 'definition'} | citations)
+            _citation_shapes(term)
+    elif purpose == 'flashcards':
+        _closed_fields(data, {'front', 'back', 'topic', 'examLikelihood', 'provenance'} | citations)
+    elif purpose == 'tutor':
+        _closed_fields(data, {'reply', 'provenance'} | citations)
+    elif purpose == 'exam':
+        _closed_fields(data, {'exam_id', 'questions', 'sharedSourceRefs', 'sharedSupportingSourceRefs', 'provenance'})
+        if 'exam_id' in data: _text(data, 'exam_id')
+        for question in data.get('questions', {}).values():
+            _closed_fields(question, {'question_type', 'max_score', 'correct_answer', 'criteria', 'explanation'} | citations)
+            _citation_shapes(question)
+    else:
+        raise ValueError('Unknown supporting output purpose')
+    _citation_shapes(data)
+    return validate_provenance_shape(data, saved=saved)
+
+
+def validate_summary(data: dict, *, supporting=False) -> dict:
     _text(data, 'title')
     _text(data, 'overview')
     for section in _objects(data, 'sections', ('heading', 'content'), True):
@@ -149,10 +215,11 @@ def validate_summary(data: dict) -> dict:
         _number(section, 'examWeight', upper=100)
     _objects(data, 'keyTerms', ('term', 'definition'))
     _strings(data, 'examFocus')
+    if supporting: validate_supporting_output(data, 'summary')
     return data
 
 
-def validate_flashcards(data: dict, count: int) -> dict:
+def validate_flashcards(data: dict, count: int, *, supporting=False) -> dict:
     cards = _objects(data, 'cards', ('front', 'back', 'topic'), True)
     if len(cards) != count: raise ValueError('Generated card count differs from requested count')
     seen = set()
@@ -161,6 +228,8 @@ def validate_flashcards(data: dict, count: int) -> dict:
         front = card['front'].strip().casefold()
         if front in seen: raise ValueError('Duplicate flashcard front')
         seen.add(front)
+        if supporting: validate_supporting_output(card, 'flashcards')
+    if supporting: _closed_fields(data, {'cards'})
     return data
 
 
@@ -204,10 +273,11 @@ def validate_rubrics(rubrics: dict) -> dict:
     return rubrics
 
 
-def validate_exam_contract(tex: str, rubrics: dict, historical: list = None, total_marks=None, *, blueprint=None) -> dict:
+def validate_exam_contract(tex: str, rubrics: dict, historical: list = None, total_marks=None, *, blueprint=None, supporting=False) -> dict:
     if not isinstance(tex, str) or '\\begin{document}' not in tex or '\\end{document}' not in tex:
         raise ValueError('Exam LaTeX is incomplete')
     validate_rubrics(rubrics)
+    if supporting: validate_supporting_output(rubrics, 'exam')
     questions = rubrics['questions']
     printed = exam_question_numbers(tex)
     if printed != list(range(1, len(questions) + 1)):

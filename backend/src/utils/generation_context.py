@@ -58,6 +58,16 @@ academic TeX outside questions and /questions/qN/text for printed question
 text, plus /questions/qN/correct_answer, /questions/qN/criteria, and
 /questions/qN/explanation when present. Cite the question's complete
 supportingSourceRefs and sourceRefs. Preserve the exact selected source identity.
+
+For exams and flashcards, every tested academic premise, operation, method and
+answer must follow from the selected lecture originals. A supporting proof plus
+a related lecture anchor does not authorize extra knowledge. Supporting materials
+may supply accurate attribution, emphasis, style and explicitly hypothetical
+givens. Keep a question's grading answer/criteria consistent with its complete
+wording, options and shared definitions; it will be checked jointly against all
+cited question and shared lecture originals. Return only the documented schema
+fields. Do not add explanation, example or other academic keys outside the
+listed summary/card fields or the documented exam rubric explanation field.
 """
 
 

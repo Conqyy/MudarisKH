@@ -354,7 +354,7 @@ class SourceEvidence:
             rubrics['questions'][question['id']]['sourceRefs'] = verified['sourceRefs']
         return rubrics
 
-    def verify_rows(self, rows, *, refs_key='sourceRefs', shared_context=None):
+    def verify_rows(self, rows, *, refs_key='sourceRefs', shared_context=None, supporting_attributions=None):
         """Cover every non-whitespace output character with exact supported spans.
 
         Distinct claims may be proved by different bounded original readings. A
@@ -414,9 +414,17 @@ class SourceEvidence:
                     'Never classify arbitrary preface statements, scientific instructions, values, '
                     'custom commands or definitions as harmless metadata. If a joint deduction cannot '
                     'be established from the supplied originals, leave it unsupported. '
+                    'When supportingAttributions is supplied, those exact attributions have separately '
+                    'passed original-source checks. They establish only reporting, source identity, '
+                    'hypothetical givens and style, never additional taught facts or operations. '
+                    'A task may invent explicitly hypothetical given values or distractors, but every '
+                    'required academic premise, method and deduction must be justified by these lecture '
+                    'originals; a related topic anchor is insufficient. Evaluate answers/criteria jointly '
+                    'with the entire question and shared context. '
                     'Administration does not justify academic sections. Proposed citations are not proof.',
                     {'text': target, 'row': row, **({'sharedContext': shared_context}
-                                                  if shared_context is not None else {})})
+                                                  if shared_context is not None else {}),
+                     **({'supportingAttributions': supporting_attributions} if supporting_attributions else {})})
                 if judgment.get('contradicted') is True:
                     raise ValueError('Generated content contradicts selected originals')
                 for span in judgment.get('supportedSpans', []):
