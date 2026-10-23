@@ -1019,9 +1019,9 @@ async def upload_tutorial(
     user_id: str = Form(...),
     course_id: str = Form(...),
     title: str = Form(""), uid: str = Depends(require_uid),):
-    """Upload a tutorial / practice sheet (PDF, PPTX, DOCX). We analyze it for
-    TOPICS and worked-problem IDEAS only — it never contributes grading weight
-    or exam format (those come from past exams). Reuses the document analyzer."""
+    """Queue a practice sheet for question-level extraction and lecture alignment.
+    The shared supporting-material pipeline checks it against original lectures.
+    Tutorials supply practice ideas, never exam marks or question-type proportions."""
     user_id = uid  # the token decides the owner, not the form field
     foundation = await run_in_threadpool(_require_document_foundation, course_id, uid)
     import time as _time
