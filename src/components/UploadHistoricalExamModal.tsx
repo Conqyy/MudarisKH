@@ -3,6 +3,9 @@
 import { useCallback, useState } from "react";
 import MultiUploadModal, { Step } from "@/components/MultiUploadModal";
 import { getSupportingStatus } from "@/lib/supporting-materials";
+import HistoricalExamTypeSelect from "@/components/HistoricalExamTypeSelect";
+import { HistoricalExamType } from "@/lib/historical-exam-types";
+import { useLang } from "@/lib/i18n";
 
 interface Props {
   courseId: string;
@@ -17,6 +20,8 @@ const STEPS: Step[] = [
 ];
 
 export default function UploadHistoricalExamModal({ courseId, onClose, onSuccess }: Props) {
+  const [examType, setExamType] = useState<HistoricalExamType | "">("");
+  const { t } = useLang();
   const [stage, setStage] = useState<{ documentId: string; step: number } | null>(null);
   const pollAccepted = useCallback(async (result: unknown, signal: AbortSignal) => {
     const accepted = result as { exam_id?: unknown; materialId?: unknown; kind?: unknown; jobId?: unknown };
@@ -38,6 +43,9 @@ export default function UploadHistoricalExamModal({ courseId, onClose, onSuccess
       heading="Upload past exams"
       subtitle="Upload a PDF or photos of the exam pages. Mudaris will study its format, question types, and how marks are distributed."
       fileNoun="past exam"
+      selectionValid={!!examType}
+      extraFields={{ exam_type: examType }}
+      selectionFields={<><HistoricalExamTypeSelect value={examType} onChange={setExamType} required /><p className="text-xs text-ink-mute mb-5">{t("This type applies to every file and every paper in a merged PDF. Upload different types separately.")}</p></>}
       steps={STEPS}
       pollAccepted={pollAccepted} actualStep={stage} acceptedId="exam_id" completionMode="queued"
       footerNote="Uploads are queued one at a time. Follow analysis progress on the course page."

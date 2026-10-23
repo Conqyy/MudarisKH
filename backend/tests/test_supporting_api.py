@@ -405,7 +405,7 @@ def test_upload_returns_202_with_legacy_alias_and_job_identity(api_module, monke
     api._supporting_runner = MagicMock()
     with TestClient(api.app) as client:
         response = client.post("/api/historical-exams/upload", headers={"Authorization": "Bearer token"},
-            data={"user_id": "forged", "course_id": "course", "title": "Past"},
+            data={"user_id": "forged", "course_id": "course", "title": "Past", "exam_type": "final"},
             files={"file": ("past.pdf", b"%PDF synthetic", "application/pdf")})
     assert response.status_code == 202
     body = response.json()

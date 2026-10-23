@@ -40,6 +40,8 @@ import { useCourseFoundation } from "@/hooks/useCourseFoundation";
 import { CourseFoundationGate } from "@/components/CourseFoundationGate";
 import SupportingMaterialAction from "@/components/SupportingMaterialAction";
 import { kindForRow } from "@/lib/supporting-materials";
+import HistoricalExamTypeSelect from "@/components/HistoricalExamTypeSelect";
+import { EXAM_GROUP_LABELS, HISTORICAL_EXAM_TYPES, HistoricalExamType } from "@/lib/historical-exam-types";
 
 function StudyAction({ ready, href, label, className, reason }: { ready: boolean; href: string; label: string; className: string; reason: string }) {
   return ready ? <Link href={href} className={className}>{label} →</Link> : (
@@ -77,6 +79,14 @@ export default function CoursePage() {
   const [documents, setDocuments] = useState<CourseDocument[]>([]);
   const [audioRecordings, setAudioRecordings] = useState<AudioRecording[]>([]);
   const [historicalExams, setHistoricalExams] = useState<HistoricalExam[]>([]);
+  const [classifying, setClassifying] = useState<string | null>(null);
+  const [classificationError, setClassificationError] = useState("");
+  const classificationRequest = useRef<AbortController | null>(null);
+  useEffect(() => {
+    setClassifying(null);
+    setClassificationError("");
+    return () => classificationRequest.current?.abort();
+  }, [courseId, user?.uid]);
   const [tutorials, setTutorials] = useState<Tutorial[]>([]);
   const [examCount, setExamCount] = useState(0);
   const [showEdit, setShowEdit] = useState(false);
@@ -306,12 +316,34 @@ export default function CoursePage() {
     }
   };
   const handleReorderExams = async (orderedIds: string[]) => {
+    // A list emits only its category. Replace those slots in the full order.
+    const fullOrder = [...new Set([...(course?.examOrder || []), ...historicalExams.map(exam => exam.id)])];
+    const groupIds = new Set(orderedIds);
+    let index = 0;
+    const mergedOrder = fullOrder.map(id => groupIds.has(id) ? orderedIds[index++] : id);
     try {
-      await updateCourse(courseId, { examOrder: orderedIds }, { examOrder: course?.examOrder || [] });
-      setHistoricalExams((prev) => applyOrder(prev, orderedIds));
-      setCourse((prev) => (prev ? { ...prev, examOrder: orderedIds } : prev));
+      await updateCourse(courseId, { examOrder: mergedOrder }, { examOrder: course?.examOrder || [] });
+      setHistoricalExams((prev) => applyOrder(prev, mergedOrder));
+      setCourse((prev) => (prev ? { ...prev, examOrder: mergedOrder } : prev));
     } catch (error) {
       alert(error instanceof Error ? error.message : "Could not save the new order. Please retry.");
+    }
+  };
+  const handleClassifyExam = async (id: string, examType: HistoricalExamType) => {
+    classificationRequest.current?.abort();
+    const controller = new AbortController();
+    classificationRequest.current = controller;
+    setClassifying(id);
+    setClassificationError("");
+    try {
+      await apiJson(`${API_URL}/api/historical-exams/${id}/classify`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ exam_type: examType }), signal: controller.signal });
+      if (controller.signal.aborted) return;
+      // Reload the authoritative category after assignment, including conflicts.
+      await loadDataRef.current?.();
+    } catch (error) {
+      if (!controller.signal.aborted) setClassificationError(error instanceof Error ? error.message : t("Could not classify past exam."));
+    } finally {
+      if (!controller.signal.aborted) setClassifying(null);
     }
   };
   const handleReorderTutorials = async (orderedIds: string[]) => {
@@ -867,7 +899,7 @@ export default function CoursePage() {
 
             {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
 
-            {historicalExams.length === 0 ? (
+            {historicalExams.length === 0 && (
               <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
                 <div className="text-4xl mb-3 opacity-60">📋</div>
                 <h3 className="font-serif text-xl font-medium mb-2">
@@ -884,9 +916,17 @@ export default function CoursePage() {
                   <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload your first past exam")}
                 </button>
               </div>
-            ) : (
+            )}
+            {classificationError && <p role="alert" className="text-sm text-accent mb-4">{classificationError}</p>}
+            {[...HISTORICAL_EXAM_TYPES, "uncategorized" as const].map(type => {
+              const exams = historicalExams.filter(exam => type === "uncategorized" ? !exam.examType : exam.examType === type);
+              if (type === "uncategorized" && !exams.length) return null;
+              const label = type === "uncategorized" ? "Needs classification" : EXAM_GROUP_LABELS[type];
+              return <section key={type} aria-label={t(label)} className="mb-6">
+                <h3 className="font-serif text-xl font-medium mb-3">{t(label)} <span className="font-mono text-sm text-ink-mute">{exams.length}</span></h3>
+                {type === "uncategorized" && <p className="text-sm text-ink-soft mb-3">{t("Assign a type before using these papers for exams or summaries.")}</p>}
               <ReorderableList<HistoricalExam>
-                items={historicalExams}
+                items={exams}
                 onReorder={handleReorderExams}
                 onRename={handleRenameExam}
                 onDelete={(exam) =>
@@ -905,9 +945,13 @@ export default function CoursePage() {
                       : ` · ${exam.analysis.totalQuestions} ${t("questions")}`)}
                   </>
                 )}
-                renderStatus={(exam) => <SupportingMaterialAction kind="historical_exam" materialId={exam.id} courseId={courseId} />}
+                renderStatus={(exam) => <div>
+                  {!exam.examType && <HistoricalExamTypeSelect value="" label={`${t("Classify")} ${exam.title}`} disabled={!!classifying} onChange={type => void handleClassifyExam(exam.id, type)} />}
+                  <SupportingMaterialAction kind="historical_exam" materialId={exam.id} courseId={courseId} />
+                </div>}
               />
-            )}
+              </section>;
+            })}
           </section>
 
           {/* Tutorials Section */}

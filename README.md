@@ -17,13 +17,17 @@ Imam Mohammad Ibn Saud Islamic University.
    retrying a lecture requires confirming the completed document set again.
 4. **Add supporting material and inspect its analysis report.** Upload past papers,
    tutorial sheets, audio/video recordings, supported media URLs or typed notes. Upload
-   acceptance starts background work; wait for preparation and analysis to finish.
+   acceptance starts background work; wait for preparation and analysis to finish. Choose
+   **Quiz, Midterm or Final** for each past-exam upload; this owner-selected type is retained
+   for every paper in a merged PDF.
 5. **Choose your sources and study.** Select the lecture documents that define your scope,
    then the supporting materials to use. Generate an exam, flashcards or summary, or open
    the tutor. Existing saved outputs remain accessible while a course needs confirmation.
 
 Older uploads need explicit preparation from their saved originals before they can be
 used for new generation. Missing originals must be restored or replaced.
+Older past exams without a type also need explicit classification from the course page.
+Classification preserves their original files, analysis and saved source references.
 
 ## Study tools
 
@@ -78,6 +82,14 @@ inform one new paper; counts are not summed into an oversized exam. The requeste
 total determines the new exam's marks. Topic emphasis is a study signal, not a calibrated
 probability of future exam coverage. Unclear paper boundaries require review or splitting.
 
+**Past exams are separated by type.** Quizzes, Midterms and Finals use the database
+collections `historical_quizzes`, `historical_midterms` and `historical_finals`. The original
+analysis pipeline is shared. Exam generation uses an explicit type independently of total
+marks; summaries have their own past-exam type selector. Both workflows query only that
+category before checking readiness or building model context, and reject IDs from other
+categories. You can select individual papers within the chosen type or deselect them all.
+Model-detected paper labels do not override the upload type.
+
 **Sources remain versioned.** Citations open the exact owned source version and location.
 They never silently open replacement content. Selected material that is unavailable,
 stale or unfinished produces actionable guidance. A source change during generation can
@@ -88,6 +100,10 @@ At the API, omitted or `null` source-ID lists select all owned material of that 
 `[]` excludes it. Exam, summary and flashcard generation require a nonempty lecture
 selection. The tutor instead falls back to the confirmed foundation for omitted or empty
 lecture selections. Invalid explicit IDs are rejected.
+For exam and summary requests, `historical_exam_type` scopes these past-exam ID rules to
+one of `quiz`, `midterm` or `final`. Older exam clients derive it from a recognized
+`exam_type`; generic/custom labels and older summary clients default to `final`.
+An omitted category never widens these requests to all three types.
 
 ## Architecture
 
@@ -248,6 +264,10 @@ merged papers, source previews and generated PDFs with your configured services.
 - Data endpoints require `Authorization: Bearer <Firebase ID token>`. Upload routes return
   **202 Accepted** for background work; use document detail and supporting status/report
   endpoints to follow progress. See the local API docs for request schemas.
+- Past-exam uploads require multipart `exam_type`. Lists accept `?exam_type=quiz` (or
+  `midterm`/`final`); an unfiltered course overview includes all types and legacy uploads.
+  `POST /api/historical-exams/{id}/classify` accepts `{"exam_type":"quiz"}` to classify an
+  owned legacy upload. A previously assigned type cannot be changed through this endpoint.
 - The course foundation endpoints expose readiness and confirmation. Both the interface
   and API enforce the lecture prerequisite, including retries and recovered jobs.
 - Original files and source previews are served through authenticated routes. New cloud

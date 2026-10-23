@@ -160,7 +160,7 @@ def _strings(papers, key):
 
 
 def build_exam_blueprint(historical_analysis: list, total_marks: int | None = None,
-                         exam_type: str = "Final") -> dict | None:
+                         exam_type: str = "Final", *, authoritative_exam_type=None) -> dict | None:
     """Build a typical paper, never the sum of a collection's question counts.
 
     Structure uses papers matching the requested type when available. Known
@@ -169,13 +169,17 @@ def build_exam_blueprint(historical_analysis: list, total_marks: int | None = No
     evidence defaults to two marks per question (five questions without marks).
     Topics and difficulty retain equally weighted evidence from all papers.
     """
+    if authoritative_exam_type is not None:
+        from src.utils.historical_exam_types import normalize_historical_exam_type
+        normalize_historical_exam_type(authoritative_exam_type)
     if total_marks is not None and (type(total_marks) is not int or total_marks < 1):
         raise ValueError("Exam marks must be a positive integer")
     detected = flatten_exam_papers(historical_analysis)
     papers = [paper for paper in detected if _paper_count(paper)]
     if not papers: return None
     requested = _exam_type(exam_type)
-    matching = [paper for paper in papers if _exam_type(paper.get("examType")) == requested]
+    matching = (papers if authoritative_exam_type is not None else
+                [paper for paper in papers if _exam_type(paper.get("examType")) == requested])
     cohort = matching or papers
     known = [paper for paper in cohort if _number(paper.get("totalMarks"))]
     if total_marks is not None and known:
@@ -249,7 +253,8 @@ def build_exam_blueprint(historical_analysis: list, total_marks: int | None = No
             "structuredPaperCount": sum(not paper["_legacy"] for paper in papers),
             "legacyPaperCount": sum(paper["_legacy"] for paper in papers),
             "structurePaperCount": len(cohort), "knownMarksPaperCount": len(known),
-            "structureCohort": "matching_exam_type" if matching else "all_papers_fallback",
+            "structureCohort": ("selected_upload_category" if authoritative_exam_type is not None else
+                                "matching_exam_type" if matching else "all_papers_fallback"),
             "structureFallback": not bool(matching), "countMethod": count_method,
             "typeDistribution": [{"type": kind, "percentage": float(value * 100)} for kind, value in sorted(all_types.items())],
             "sources": sources,

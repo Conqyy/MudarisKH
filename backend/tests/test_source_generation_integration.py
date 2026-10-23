@@ -313,7 +313,7 @@ def test_supporting_api_calls_supply_guide_original_and_atomic_publication(sourc
             generate, update = agent.analyze_tutorial, db.update_tutorial
             assert result['status'] == 'queued' and result['kind'] == 'tutorial'
         else:
-            result = asyncio.run(api.upload_historical_exam(upload, 'owner', 'course', title='Past', uid='owner'))
+            result = asyncio.run(api.upload_historical_exam(upload, 'owner', 'course', exam_type='final', title='Past', uid='owner'))
             generate, update = agent.analyze_pdf, db.update_historical_exam
             assert result['status'] == 'queued' and result['kind'] == 'historical_exam'
         assert db.upload_file_to_storage.call_args.args[0] == b'synthetic'

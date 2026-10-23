@@ -51,7 +51,8 @@ def test_supporting_source_work_allows_event_loop_progress(source_api, monkeypat
         pytest.fail('The expected synchronous source stage was never reached')
 
     async def run():
-        result, _ = await asyncio.gather(route(upload, 'untrusted-owner', 'course', title='Source', uid='owner'), other_task())
+        result, _ = await asyncio.gather(route(upload, 'untrusted-owner', 'course', title='Source', uid='owner',
+            **({'exam_type': 'final'} if kind == 'historical' else {})), other_task())
         return result
 
     result = asyncio.run(run())

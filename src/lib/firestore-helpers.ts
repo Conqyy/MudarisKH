@@ -165,6 +165,7 @@ export interface AudioRecording {
 
 // ============ HISTORICAL EXAMS (Model 3) ============
 export interface HistoricalExam {
+  examType?: import("./historical-exam-types").HistoricalExamType;
   materialId?: string;
   kind?: "historical_exam";
   jobId?: string | null;

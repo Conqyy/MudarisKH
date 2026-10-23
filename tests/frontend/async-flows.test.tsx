@@ -237,9 +237,38 @@ describe("tutor request ownership", () => {
 });
 
 describe("study loaders", () => {
+  it.each([
+    { kind: "summary", Page: SummaryPage, identity: "course" }, { kind: "exam", Page: ExamGenerationPage, identity: "course" },
+    { kind: "summary", Page: SummaryPage, identity: "account" }, { kind: "exam", Page: ExamGenerationPage, identity: "account" },
+  ])("keeps $kind selections empty across a $identity identity boundary until its new category resolves", async ({ kind, Page, identity }) => {
+    const nextCategory = deferred<any>();
+    let sent: any;
+    const readyPaper = (id: string) => ({ id, examType: "final", title: `${id} paper`, status: "completed", jobId: "j1", sourceRevision: "s1", reportRevision: "r1" });
+    let changed = false;
+    mocks.api.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") { sent = JSON.parse(init.body as string); return new Promise(() => {}); }
+      if (url.includes("/historical-exams/")) return changed ? nextCategory.promise : response({ historical_exams: [readyPaper("old-selected")] });
+      if (url.includes("/documents/")) return response({ documents: [{ ...doc, status: "completed" }] });
+      return response({});
+    });
+    const view = render(<Page />);
+    expect((await screen.findByRole("checkbox", { name: /old-selected paper/ }) as HTMLInputElement).checked).toBe(true);
+    changed = true;
+    if (identity === "course") { mocks.routeId = "c2"; mocks.course = { ...mocks.course, id: "c2" }; }
+    else { mocks.user = { uid: "u2" }; mocks.course = { ...mocks.course, userId: "u2" }; }
+    view.rerender(<Page />);
+    expect(screen.queryByText("old-selected paper")).toBeNull();
+    expect(screen.queryByRole("button", { name: /generate (summary|exam)/i })).toBeNull();
+    expect(sent).toBeUndefined();
+    await act(async () => nextCategory.resolve(response({ historical_exams: [readyPaper("new-selected")] })));
+    await screen.findByRole("checkbox", { name: /new-selected paper/ });
+    fireEvent.click(screen.getByRole("button", { name: kind === "summary" ? /generate summary/i : /generate exam/i }));
+    await waitFor(() => expect(sent).toMatchObject({ user_id: identity === "account" ? "u2" : "u1", course_id: identity === "course" ? "c2" : "c1", historical_exam_type: "final", historical_exam_ids: ["new-selected"] }));
+    view.unmount();
+  });
   it.each([["summary", SummaryPage], ["exam", ExamGenerationPage], ["flashcards", FlashcardsPage], ["tutor", TutorPage]] as const)("clears %s supporting rows immediately on a course switch", async (_, Page) => {
     mocks.api.mockImplementation(async (url: string) => {
-      if (url.includes("historical-exams/")) return response({ historical_exams: [{ id: mocks.routeId === "c1" ? "old" : "new", title: mocks.routeId === "c1" ? "Old private exam" : "New course exam", status: "queued", jobId: "j1" }] });
+      if (url.includes("historical-exams/")) return response({ historical_exams: [{ id: mocks.routeId === "c1" ? "old" : "new", examType: "final", title: mocks.routeId === "c1" ? "Old private exam" : "New course exam", status: "queued", jobId: "j1" }] });
       return response({});
     });
     const view = render(<Page />);
@@ -250,12 +279,13 @@ describe("study loaders", () => {
     await screen.findByText("New course exam");
   });
   it("clears a summary source from the previous account before the next load resolves", async () => {
-    mocks.api.mockImplementation(async (url: string) => url.includes("historical-exams/") ? response({ historical_exams: [{ id: "old", title: "Old account exam", status: "queued", jobId: "j1" }] }) : response({}));
+    mocks.api.mockImplementation(async (url: string) => url.includes("historical-exams/") ? response({ historical_exams: [{ id: "old", examType: "final", title: "Old account exam", status: "queued", jobId: "j1" }] }) : response({}));
     const view = render(<SummaryPage />);
     await screen.findByText("Old account exam");
     mocks.user = { uid: "u2" }; mocks.course = { id: "c1", userId: "u2", code: "CS", name: "Course", color: "sage" };
     view.rerender(<SummaryPage />);
     expect(screen.queryByText("Old account exam")).toBeNull();
+    view.unmount();
   });
   it.each([["summary", SummaryPage], ["flashcards", FlashcardsPage]] as const)("tracks a saved %s opened with the keyboard", async (kind, Page) => {
     mocks.api.mockImplementation(async (url: string) => {

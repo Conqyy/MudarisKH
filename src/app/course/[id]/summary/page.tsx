@@ -22,6 +22,8 @@ import { ordered } from "@/lib/ordering";
 import { apiFetch, apiJson } from "@/lib/api";
 import { citationsForPath, CanonicalProvenance, firstSupportingBlocker, retainSelectedRows, supportingPresentation, SupportingRow } from "@/lib/supporting-materials";
 import SupportingSelectionNotice from "@/components/SupportingSelectionNotice";
+import HistoricalExamTypeSelect from "@/components/HistoricalExamTypeSelect";
+import { useHistoricalExamSelection } from "@/hooks/useHistoricalExamSelection";
 // Inline-markdown renderer: the AI writes **bold** / *italic* / `code` inside
 // summary text — render it instead of showing raw asterisks. Paragraphs unwrap
 // to fragments so it also works inside list items and styled containers.
@@ -58,11 +60,6 @@ interface DocItem {
   analysis?: { topics?: string[] };
 }
 
-interface HistExamItem extends SupportingRow {
-  id: string;
-  title: string;
-  status: string;
-}
 
 interface TutorialItem extends SupportingRow {
   id: string;
@@ -145,7 +142,8 @@ function SummaryPageContent() {
   const [course, setCourse] = useState<Course | null>(null);
   const [allCourses, setAllCourses] = useState<Course[]>([]);
   const [documents, setDocuments] = useState<DocItem[]>([]);
-  const [histExams, setHistExams] = useState<HistExamItem[]>([]);
+  const historical = useHistoricalExamSelection(courseId, user?.uid, course);
+  const { rows: histExams, category: historicalExamType, selected: selectedHist, setSelected: setSelectedHist } = historical;
   const [tutorials, setTutorials] = useState<TutorialItem[]>([]);
   const [audioRecs, setAudioRecs] = useState<AudioItem[]>([]);
   const [savedSummaries, setSavedSummaries] = useState<SavedSummary[]>([]);
@@ -156,7 +154,6 @@ function SummaryPageContent() {
   useEffect(() => () => { loadRequest.current?.abort(); }, [courseId, user?.uid]);
 
   const [selectedDocs, setSelectedDocs] = useState<Set<string>>(new Set());
-  const [selectedHist, setSelectedHist] = useState<Set<string>>(new Set());
   const [selectedTut, setSelectedTut] = useState<Set<string>>(new Set());
   const [selectedAudio, setSelectedAudio] = useState<Set<string>>(new Set());
   const initialSupportingSelection = useRef("");
@@ -231,6 +228,7 @@ function SummaryPageContent() {
     const controller = new AbortController();
     loadRequest.current = controller;
     setLoadError("");
+    if (course) void historical.refresh();
     setPageLoading(true);
     try {
       const [courseData, allCoursesData] = await Promise.all([
@@ -245,9 +243,8 @@ function SummaryPageContent() {
       setCourse(courseData);
       setAllCourses(allCoursesData);
 
-      const [docsRes, histRes, sumRes, tutRes, audioRes] = await Promise.all([
+      const [docsRes, sumRes, tutRes, audioRes] = await Promise.all([
         apiJson(`${API_URL}/api/documents/${courseId}`, { signal: controller.signal }),
-        apiJson(`${API_URL}/api/historical-exams/${courseId}`, { signal: controller.signal }),
         apiJson(`${API_URL}/api/summaries/list/${courseId}`, { signal: controller.signal }),
         apiJson(`${API_URL}/api/tutorials/${courseId}`, { signal: controller.signal }),
         apiJson(`${API_URL}/api/audio/${courseId}`, { signal: controller.signal }),
@@ -261,13 +258,6 @@ function SummaryPageContent() {
       );
       setDocuments(completedDocs);
       setSelectedDocs(new Set(completedDocs.map((d: DocItem) => d.id)));
-
-      const completedHist = ordered<HistExamItem>(
-        histRes.historical_exams || [],
-        courseData?.examOrder,
-        courseData?.titleOverrides
-      );
-      setHistExams(previous => retainSelectedRows(completedHist, previous, selectionRef.current.hist));
 
       const completedTut = ordered<TutorialItem>(
         tutRes.tutorials || [],
@@ -284,7 +274,6 @@ function SummaryPageContent() {
       setAudioRecs(previous => retainSelectedRows(completedAudio, previous, selectionRef.current.audio));
       if (initialSupportingSelection.current !== `${user.uid}:${courseId}`) {
         initialSupportingSelection.current = `${user.uid}:${courseId}`;
-        setSelectedHist(new Set(completedHist.filter(row => supportingPresentation(row) === "usable").map(row => row.id)));
         setSelectedTut(new Set(completedTut.filter(row => supportingPresentation(row) === "usable").map(row => row.id)));
         setSelectedAudio(new Set(completedAudio.filter(row => supportingPresentation(row) === "usable").map(row => row.id)));
       }
@@ -306,6 +295,7 @@ function SummaryPageContent() {
   };
 
   const handleGenerate = async () => {
+    if (historical.loading || historical.error) return;
     if (!user || !course || !foundationReadyRef.current || !documents.some((doc) => selectedDocs.has(doc.id))) return;
     if (supportingBlocker) { setErrorMsg(t("Selected material is unavailable. Retry or deselect it.")); return; }
     studyRequest.current?.abort();
@@ -344,7 +334,8 @@ function SummaryPageContent() {
           user_id: user.uid,
           course_id: courseId,
           document_ids: Array.from(selectedDocs),
-          historical_exam_ids: Array.from(selectedHist),
+          historical_exam_ids: histExams.filter(row => selectedHist.has(row.id)).map(row => row.id),
+          historical_exam_type: historicalExamType,
           tutorial_ids: Array.from(selectedTut),
           audio_ids: Array.from(selectedAudio),
           instructions: instructions.trim(),
@@ -575,7 +566,7 @@ function SummaryPageContent() {
 
   if (loadError && !pageLoading) return <><Navbar /><div className="pt-28 px-6 text-center" role="alert"><p>{loadError}</p><button onClick={() => loadData()} className="mt-4 underline">Retry loading</button></div></>;
 
-  if (loading || pageLoading) {
+  if (loading || pageLoading || (course && historical.initialLoading)) {
     return (
       <>
         <Navbar />
@@ -688,6 +679,12 @@ function SummaryPageContent() {
         )}
       </div>
 
+      <div>
+        <HistoricalExamTypeSelect value={historicalExamType} onChange={historical.setCategory} />
+        {historical.loading && <p role="status" className="text-sm text-ink-soft">{t("Loading past exams…")}</p>}
+        {historical.error && <div role="alert" className="text-sm text-accent">{historical.error}<button type="button" onClick={() => void historical.refresh()} className="ml-3 underline">{t("Retry")}</button></div>}
+        {!historical.loading && !historical.error && histExams.length === 0 && <p className="text-sm text-ink-soft">{t("No past exams in this category. Classify existing papers on the course page or upload this type.")}</p>}
+      </div>
       {histExams.length > 0 && (
         <div>
           <h3 className="font-serif text-xl font-medium mb-1 tracking-tight">
@@ -882,10 +879,10 @@ function SummaryPageContent() {
         />
       </div>
 
-      <SupportingSelectionNotice blocker={supportingBlocker} onDeselect={deselectBlocking} onRefresh={() => void loadDataRef.current?.()} />
+      <SupportingSelectionNotice blocker={supportingBlocker} onDeselect={deselectBlocking} onRefresh={() => { void loadDataRef.current?.(); }} />
       <button
         onClick={handleGenerate}
-        disabled={!foundationReady || !!supportingBlocker || !documents.some((doc) => selectedDocs.has(doc.id))}
+        disabled={!foundationReady || historical.loading || !!historical.error || !!supportingBlocker || !documents.some((doc) => selectedDocs.has(doc.id))}
         className="w-full bg-ink text-paper py-4 rounded-full text-sm font-medium hover:bg-accent transition-all hover:-translate-y-0.5 hover:shadow-lift disabled:opacity-50 disabled:cursor-not-allowed"
       >
         Generate Summary →

@@ -42,7 +42,7 @@ def test_blocked_workflows_reject_before_upload_model_or_save(api_module, founda
     monkeypatch.setattr(api, '_spawn_audio_job', spawn)
     with pytest.raises(api.HTTPException) as error:
         if kind == 'past':
-            asyncio.run(api.upload_historical_exam(upload, 'owner', 'course', title='Past', uid='owner'))
+            asyncio.run(api.upload_historical_exam(upload, 'owner', 'course', exam_type='final', title='Past', uid='owner'))
         elif kind == 'tutorial':
             asyncio.run(api.upload_tutorial(upload, 'owner', 'course', title='Tutorial', uid='owner'))
         elif kind == 'audio':

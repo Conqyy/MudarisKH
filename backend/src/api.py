@@ -10,7 +10,7 @@ import math
 import threading
 from copy import deepcopy
 from contextlib import asynccontextmanager
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Literal
 from pathlib import Path
 
 # إضافة مسار المشروع الرئيسي لحل أي تعارضات في الاستدعاء تلقائياً
@@ -54,6 +54,9 @@ from src.utils.storage_paths import UPLOADS_ROOT, build_storage_path, resolve_st
 from src.utils.ai_contracts import align_printed_marks, validate_exam_contract
 from src.utils.text_normalization import context_coverage
 from src.utils.exam_blueprint import build_exam_blueprint
+from src.utils.historical_exam_types import (
+    normalize_historical_exam_type, new_historical_exam_id, HISTORICAL_EXAM_COLLECTIONS,
+)
 from src.utils.topic_scope import retag_topic_weights
 from src.utils.media_safety import FFMPEG_INPUT_OPTIONS
 from starlette.concurrency import run_in_threadpool
@@ -253,7 +256,8 @@ def _source_verify(reader, rows):
 
 
 def _compile_supporting_context(reader, uid, course_id, *, historical_ids, audio_ids,
-                                tutorial_ids, purpose, discussion_query=None):
+                                tutorial_ids, purpose, discussion_query=None,
+                                historical_exam_type=None):
     """Compile from the original selection, before legacy projections can drop a row."""
     from src.supporting.context import SupportingContextCompiler
     from src.supporting.alignment import SupportingAligner
@@ -263,7 +267,8 @@ def _compile_supporting_context(reader, uid, course_id, *, historical_ids, audio
         return compiler.compile(user_id=uid, course_id=course_id, scope=reader.scope,
             selected={'historical_ids': historical_ids, 'audio_ids': audio_ids,
                       'tutorial_ids': tutorial_ids}, purpose=purpose,
-            discussion_query=discussion_query)
+            discussion_query=discussion_query,
+            **({'historical_exam_type': historical_exam_type} if historical_exam_type is not None else {}))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -827,7 +832,7 @@ def delete_audio_endpoint(rec_id: str, uid: str = Depends(require_uid)):
 @app.delete("/api/historical-exams/{exam_id}")
 def delete_historical_exam_endpoint(exam_id: str, uid: str = Depends(require_uid)):
     assert_owner(db_client.get_historical_exam(exam_id), uid, "Exam")
-    exam = db_client._flat_get("historical_exams", exam_id)
+    exam = db_client.get_historical_exam(exam_id)
     if not exam:
         raise HTTPException(status_code=404, detail="Historical exam not found")
     _require_record_storage(exam, uid, "historical_exams")
@@ -971,6 +976,7 @@ async def upload_historical_exam(
     file: UploadFile = File(...),
     user_id: str = Form(...),
     course_id: str = Form(...),
+    exam_type: Literal['quiz', 'midterm', 'final'] = Form(...),
     title: str = Form(""), uid: str = Depends(require_uid),):
     user_id = uid  # the token decides the owner, not the form field
     foundation = await run_in_threadpool(_require_document_foundation, course_id, uid)
@@ -991,20 +997,38 @@ async def upload_historical_exam(
     file_size = len(file_bytes)
     exam_title = title or (file.filename or "Untitled Exam")
 
-    exam_id = 'historical_exams_' + uuid.uuid4().hex
+    exam_id = new_historical_exam_id(exam_type)
     storage_path = _upload_path(uid, course_id, "historical_exams", file.filename)
     accepted = await run_in_threadpool(_queue_supporting_acceptance,
         {'userId': uid, 'courseId': course_id, 'kind': 'historical_exam', 'materialId': exam_id},
-        foundation['revision'], {'title': exam_title, 'fileType': 'pdf' if is_pdf else 'image',
+        foundation['revision'], {'title': exam_title, 'examType': exam_type,
+        'fileType': 'pdf' if is_pdf else 'image',
         'fileSize': file_size, 'uploadedAt': int(_time.time() * 1000)},
         original_bytes=file_bytes, storage_path=storage_path)
-    return {**accepted, 'exam_id': exam_id, 'title': exam_title}
+    return {**accepted, 'exam_id': exam_id, 'title': exam_title, 'examType': exam_type}
+
+
+class HistoricalExamClassificationRequest(BaseModel):
+    exam_type: Literal['quiz', 'midterm', 'final']
+
+
+@app.post('/api/historical-exams/{exam_id}/classify')
+def classify_historical_exam_endpoint(payload: HistoricalExamClassificationRequest,
+                                      exam_id: str, uid: str = Depends(require_uid)):
+    row = assert_owner(db_client.get_historical_exam(exam_id), uid, 'Past exam')
+    _require_course(row['courseId'], uid)
+    classified = db_client.classify_historical_exam(
+        exam_id, payload.exam_type, uid, course_id=row['courseId'])
+    return {'status': 'success', 'historical_exam': _supporting_projection(classified, 'historical_exam')}
 
 
 @app.get("/api/historical-exams/{course_id}")
-def get_course_historical_exams(course_id: str, uid: str = Depends(require_uid)):
+def get_course_historical_exams(course_id: str,
+                               exam_type: Optional[Literal['quiz', 'midterm', 'final']] = Query(None),
+                               uid: str = Depends(require_uid)):
     _require_course(course_id, uid)
-    exams = owned_only(db_client.get_course_historical_exams(course_id, user_id=uid), uid)
+    exams = owned_only(db_client.get_course_historical_exams(course_id, user_id=uid,
+        **({'exam_type': exam_type} if exam_type is not None else {})), uid)
     exams = [_supporting_projection(row, 'historical_exam') for row in exams if row.get('courseId') == course_id]
     return {"status": "success", "historical_exams": exams}
 
@@ -1341,7 +1365,7 @@ def _supporting_projection(row, kind):
             'coverage': None, 'legacy': True, 'stale': True,
             'errorMessage': row.get('errorMessage')}
     return {**status, 'id': row['id'], 'courseId': row['courseId'], **{key: row.get(key) for key in
-        ('title', 'fileSize', 'uploadedAt', 'processedAt', 'sourceType', 'lectureId') if key in row}}
+        ('title', 'fileSize', 'uploadedAt', 'processedAt', 'sourceType', 'lectureId', 'examType') if key in row}}
 
 
 def _legacy_public_content(value):
@@ -1746,6 +1770,7 @@ def get_course_audio_recordings(course_id: str, uid: str = Depends(require_uid))
 class SourceSelectionRequest(BaseModel):
     document_ids: Optional[List[str]] = None
     historical_exam_ids: Optional[List[str]] = None
+    historical_exam_type: Optional[Literal['quiz', 'midterm', 'final']] = None
     tutorial_ids: Optional[List[str]] = None
     audio_ids: Optional[List[str]] = None
 
@@ -1762,16 +1787,22 @@ class SourceSelectionRequest(BaseModel):
 
 def _require_selected_supporting_ready(course_id, uid, *, foundation_revision=None,
                                        historical_exam_ids=None, tutorial_ids=None,
-                                       audio_ids=None):
+                                       audio_ids=None, historical_exam_type=None):
     """Validate selection before legacy completed-only projections can hide rows."""
     groups = (
-        ('historical_exam', db_client.get_course_historical_exams(course_id, user_id=uid), historical_exam_ids),
-        ('tutorial', db_client.get_course_tutorials(course_id, user_id=uid), tutorial_ids),
-        ('audio', db_client.get_course_audio_recordings(course_id, user_id=uid), audio_ids),
+        ('historical_exam', lambda: db_client.get_course_historical_exams(course_id, user_id=uid,
+            **({'exam_type': historical_exam_type} if historical_exam_type is not None else {})), historical_exam_ids),
+        ('tutorial', lambda: db_client.get_course_tutorials(course_id, user_id=uid), tutorial_ids),
+        ('audio', lambda: db_client.get_course_audio_recordings(course_id, user_id=uid), audio_ids),
     )
     unavailable = []
-    for category, values, selected_ids in groups:
+    for category, read_values, selected_ids in groups:
+        if selected_ids == []:
+            continue
+        values = read_values()
         rows = [row for row in owned_only(values, uid) if row.get('courseId') == course_id]
+        if category == 'historical_exam' and historical_exam_type is not None:
+            rows = [row for row in rows if row.get('examType') == historical_exam_type]
         by_id = {row['id']: row for row in rows}
         if selected_ids is None:
             selected = rows
@@ -1832,6 +1863,19 @@ class EnhancedExamGenerateRequest(SourceSelectionRequest):
     cues: str = "Standard academic prep."
     university: str = "Imam Mohammad Ibn Saud Islamic University"
     college: str = "College of Computer and Information Sciences"
+
+
+def _historical_generation_type(payload, *, exam=False):
+    """Older clients default within one category; never widen to a union read."""
+    value = payload.historical_exam_type
+    if value is None:
+        value = payload.exam_type.strip().casefold() if exam else 'final'
+        if value not in HISTORICAL_EXAM_COLLECTIONS:
+            value = 'final'
+    try:
+        return normalize_historical_exam_type(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 def _normalize_marks(rubrics: dict, total_marks: int):
     """Scale each question's max_score so they sum to exactly total_marks.
@@ -2012,9 +2056,11 @@ def _make_compilable_answer_key(exam: dict, *, reader, lecture_evidence) -> dict
 @app.post("/api/exams/generate-enhanced")
 def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: str = Depends(require_uid)):
     payload.user_id = uid  # ignore any client-supplied owner
+    historical_type = _historical_generation_type(payload, exam=True)
     foundation = _require_document_foundation(payload.course_id, uid)
     _require_selected_supporting_ready(payload.course_id, uid,
         foundation_revision=foundation['revision'],
+        historical_exam_type=historical_type,
         historical_exam_ids=payload.historical_exam_ids,
         tutorial_ids=payload.tutorial_ids, audio_ids=payload.audio_ids)
     import uuid
@@ -2026,6 +2072,7 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
 
     intelligence = db_client.get_course_intelligence(
         payload.course_id,
+        historical_exam_type=historical_type,
         document_ids=payload.document_ids,
         historical_exam_ids=payload.historical_exam_ids,
         tutorial_ids=payload.tutorial_ids,
@@ -2038,10 +2085,11 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
     lecture_evidence = _source_prepare(reader, "exam")
     supporting = _compile_supporting_context(reader, uid, payload.course_id,
         historical_ids=payload.historical_exam_ids, audio_ids=payload.audio_ids,
-        tutorial_ids=payload.tutorial_ids, purpose='exam')
+        tutorial_ids=payload.tutorial_ids, purpose='exam', historical_exam_type=historical_type)
     from src.supporting.context import historical_projection
     historical = historical_projection(supporting)
-    exam_blueprint = build_exam_blueprint(historical, payload.total_marks, payload.exam_type)
+    exam_blueprint = build_exam_blueprint(historical, payload.total_marks, payload.exam_type,
+                                          authoritative_exam_type=historical_type)
     if historical and not exam_blueprint:
         raise HTTPException(status_code=422, detail='The selected past papers do not have enough reliable structure to predict an exam. Re-analyze or re-upload them.')
 
@@ -2163,6 +2211,7 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
         "rubrics": rubrics,
         "totalMarks": payload.total_marks,
         "examType": payload.exam_type,
+        "historicalExamType": historical_type,
         "examBlueprint": exam_blueprint,
         "foundationRevision": foundation['revision'],
         "status": "generated",
@@ -2202,7 +2251,7 @@ def generate_enhanced_exam_endpoint(payload: EnhancedExamGenerateRequest, uid: s
 def _public_exam(exam):
     """Project display metadata; never return caches, rubrics or storage pointers."""
     fields = ('id', 'examId', 'userId', 'courseId', 'status', 'createdAt', 'totalMarks',
-              'examType', 'pdfStatus', 'foundationRevision', 'modelId', 'promptVersion',
+              'examType', 'historicalExamType', 'pdfStatus', 'foundationRevision', 'modelId', 'promptVersion',
               'solutionName', 'solutionType', 'solutionUploadedAt', 'grade')
     result = {key: exam[key] for key in fields if key in exam and not isinstance(exam[key], (dict, list))}
     result['texContent'] = re.sub(r'<secret-rubrics>.*?</secret-rubrics>', '', exam.get('texContent', ''), flags=re.DOTALL)
@@ -2818,9 +2867,11 @@ def _apply_summary_scope(summary: dict, document_analyses: list, *, source_reade
 @app.post("/api/summaries/generate")
 def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depends(require_uid)):
     payload.user_id = uid  # ignore any client-supplied owner
+    historical_type = _historical_generation_type(payload)
     foundation = _require_document_foundation(payload.course_id, uid)
     _require_selected_supporting_ready(payload.course_id, uid,
         foundation_revision=foundation['revision'],
+        historical_exam_type=historical_type,
         historical_exam_ids=payload.historical_exam_ids,
         tutorial_ids=payload.tutorial_ids, audio_ids=payload.audio_ids)
     import uuid
@@ -2831,6 +2882,7 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depend
 
     intelligence = db_client.get_course_intelligence(
         payload.course_id,
+        historical_exam_type=historical_type,
         document_ids=payload.document_ids,
         historical_exam_ids=payload.historical_exam_ids,
         tutorial_ids=payload.tutorial_ids,
@@ -2843,10 +2895,11 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depend
     lecture_evidence = _source_prepare(reader, "summary")
     supporting = _compile_supporting_context(reader, uid, payload.course_id,
         historical_ids=payload.historical_exam_ids, audio_ids=payload.audio_ids,
-        tutorial_ids=payload.tutorial_ids, purpose='summary')
+        tutorial_ids=payload.tutorial_ids, purpose='summary', historical_exam_type=historical_type)
     from src.supporting.context import historical_projection
     projection = historical_projection(supporting)
-    checked_blueprint = build_exam_blueprint(projection)
+    checked_blueprint = build_exam_blueprint(projection, exam_type=historical_type.title(),
+                                             authoritative_exam_type=historical_type)
     scoped_hist = [checked_blueprint] if checked_blueprint else []
     summary = summary_agent.generate_summary(
         academic_data={},
@@ -2911,6 +2964,7 @@ def generate_summary_endpoint(payload: SummaryGenerateRequest, uid: str = Depend
     _require_document_foundation(payload.course_id, uid, foundation['revision'])
     doc_db_id = db_client.save_summary(payload.user_id, payload.course_id, {
         "summaryId": summary_id,
+        "historicalExamType": historical_type,
         "title": title,
         "overview": summary.get("overview", ""),
         "sections": summary.get("sections", []),

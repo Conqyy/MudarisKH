@@ -167,7 +167,10 @@ class SupportingContextCompiler:
         self.library = library
         self.aligner = aligner
 
-    def compile(self, *, user_id, course_id, scope, selected, purpose, discussion_query=None):
+    def compile(self, *, user_id, course_id, scope, selected, purpose, discussion_query=None,
+                historical_exam_type=None):
+        from src.utils.historical_exam_types import normalize_historical_exam_type
+        historical_exam_type = normalize_historical_exam_type(historical_exam_type, allow_none=True)
         validate_component(user_id, 'user ID')
         validate_component(course_id, 'course ID')
         if not isinstance(scope, dict) or not isinstance(scope.get('scopeRevision'), str):
@@ -193,8 +196,12 @@ class SupportingContextCompiler:
         for key, category in _SELECTION_KINDS.items():
             requested = selected[key]
             if requested == []: continue
-            owned = [row for row in readers[key](course_id, user_id=user_id)
-                     if row.get('userId') == user_id and row.get('courseId') == course_id]
+            kwargs = ({'exam_type': historical_exam_type}
+                      if key == 'historical_ids' and historical_exam_type is not None else {})
+            owned = [row for row in readers[key](course_id, user_id=user_id, **kwargs)
+                     if row.get('userId') == user_id and row.get('courseId') == course_id
+                     and (key != 'historical_ids' or historical_exam_type is None
+                          or row.get('examType') == historical_exam_type)]
             by_id = {row['id']: row for row in owned}
             if requested is None:
                 chosen = sorted(owned, key=lambda row: row['id'])
@@ -207,6 +214,9 @@ class SupportingContextCompiler:
         prepared = []
         for identity in identities:
             row = self.repository.get_owned(identity)
+            if (identity['kind'] == 'historical_exam' and historical_exam_type is not None
+                    and row.get('examType') != historical_exam_type):
+                raise ValueError('Selected past exam belongs to another category; choose papers again')
             analysis, job = row.get('supportingAnalysis') or {}, row.get('processingJob') or {}
             expected = {key: analysis.get(key) for key in ('sourceRevision', 'reportRevision', 'analysisId')}
             ready = (row.get('status') == analysis.get('state') == job.get('stage') == 'completed'
@@ -337,6 +347,8 @@ class SupportingContextCompiler:
                                    'itemParentIds': {item['id']: item.get('parentId') for item in report['items']
                                        if item.get('paperId') == paper['paperId']}})
         snap = {'version': 1, 'materials': snapshot}
+        if historical_exam_type is not None:
+            snap['historicalExamType'] = historical_exam_type
         self.repository.assert_snapshot(snap, scope_revision=scope['scopeRevision'])
         return {'version': 1, 'purpose': purpose, 'scopeSnapshot': _scope_snapshot(packet_scope or scope), 'snapshot': snap,
                 'academicItems': academic, 'qualifiedItems': qualified, 'structuralPapers': papers,

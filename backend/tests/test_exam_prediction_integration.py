@@ -169,6 +169,7 @@ def test_generation_uses_and_saves_one_combined_prediction(monkeypatch, api_modu
     versions = {}
     for source_id, kind, count in [('a', 'mcq', 1), ('b', 'written', 3)]:
         versions[source_id] = _publish_paper(library, source_id, kind, count)
+        library.repository.database.classify_historical_exam(source_id, 'final', 'u', course_id='c')
     seen = _install_generation(monkeypatch, api, library)
     result = api.generate_enhanced_exam_endpoint(api.EnhancedExamGenerateRequest(
         user_id='u', course_id='c', total_marks=5, exam_type='Final',
@@ -227,6 +228,8 @@ def test_generation_stops_if_selected_past_source_disappears_on_refresh(monkeypa
     db = library.repository.database
     _publish_paper(library, 'a', 'mcq', 1)
     _publish_paper(library, 'b', 'written', 3)
+    for source_id in ('a', 'b'):
+        db.classify_historical_exam(source_id, 'final', 'u', course_id='c')
     deleted = []
 
     def disappear():

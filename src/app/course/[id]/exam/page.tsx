@@ -22,6 +22,9 @@ import { ordered } from "@/lib/ordering";
 import { apiFetch, apiJson } from "@/lib/api";
 import { firstSupportingBlocker, retainSelectedRows, supportingPresentation, SupportingRow } from "@/lib/supporting-materials";
 import SupportingSelectionNotice from "@/components/SupportingSelectionNotice";
+import HistoricalExamTypeSelect from "@/components/HistoricalExamTypeSelect";
+import { useHistoricalExamSelection } from "@/hooks/useHistoricalExamSelection";
+import { EXAM_TYPE_LABELS } from "@/lib/historical-exam-types";
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
@@ -46,12 +49,6 @@ interface SavedExam {
   grade?: { totalScore: number; maxScore: number; percentage: number };
 }
 
-interface HistExamItem extends SupportingRow {
-  id: string;
-  title: string;
-  status: string;
-  analysis?: { totalQuestions?: number; paperCount?: number };
-}
 
 interface TutorialItem extends SupportingRow {
   id: string;
@@ -101,7 +98,8 @@ function ExamPageContent() {
   const [course, setCourse] = useState<Course | null>(null);
   const [allCourses, setAllCourses] = useState<Course[]>([]);
   const [documents, setDocuments] = useState<DocItem[]>([]);
-  const [histExams, setHistExams] = useState<HistExamItem[]>([]);
+  const historical = useHistoricalExamSelection(courseId, user?.uid, course);
+  const { rows: histExams, category: historicalExamType, selected: selectedHist, setSelected: setSelectedHist } = historical;
   const [tutorials, setTutorials] = useState<TutorialItem[]>([]);
   const [audioRecs, setAudioRecs] = useState<AudioItem[]>([]);
   const [savedExams, setSavedExams] = useState<SavedExam[]>([]);
@@ -112,7 +110,6 @@ function ExamPageContent() {
   useEffect(() => () => { loadRequest.current?.abort(); }, [courseId, user?.uid]);
 
   const [selectedDocs, setSelectedDocs] = useState<Set<string>>(new Set());
-  const [selectedHist, setSelectedHist] = useState<Set<string>>(new Set());
   const [selectedTut, setSelectedTut] = useState<Set<string>>(new Set());
   const [selectedAudio, setSelectedAudio] = useState<Set<string>>(new Set());
   const initialSupportingSelection = useRef("");
@@ -127,14 +124,6 @@ function ExamPageContent() {
   const [topics, setTopics] = useState("");
   const [preference, setPreference] = useState("");
   const [totalMarks, setTotalMarks] = useState(40);
-
-  // Labels only at the defined bands; the 10-20 and 30-40 gaps are unlabeled.
-  const examType = (marks: number) => {
-    if (marks <= 10) return "Quiz";
-    if (marks >= 20 && marks <= 30) return "Midterm";
-    if (marks >= 40) return "Final";
-    return "";
-  };
 
   const [pageState, setPageState] = useState<PageState>("configure");
   const [texContent, setTexContent] = useState("");
@@ -242,6 +231,7 @@ function ExamPageContent() {
     const controller = new AbortController();
     loadRequest.current = controller;
     setLoadError("");
+    if (course) void historical.refresh();
     setPageLoading(true);
     try {
       const [courseData, allCoursesData] = await Promise.all([
@@ -256,9 +246,8 @@ function ExamPageContent() {
       setCourse(courseData);
       setAllCourses(allCoursesData);
 
-      const [docsRes, histRes, examsRes, intRes, tutRes, audioRes] = await Promise.all([
+      const [docsRes, examsRes, intRes, tutRes, audioRes] = await Promise.all([
         apiJson(`${API_URL}/api/documents/${courseId}`, { signal: controller.signal }),
-        apiJson(`${API_URL}/api/historical-exams/${courseId}`, { signal: controller.signal }),
         apiJson(`${API_URL}/api/exams/list/${courseId}`, { signal: controller.signal }),
         apiJson(`${API_URL}/api/intelligence/${courseId}`, { signal: controller.signal }),
         apiJson(`${API_URL}/api/tutorials/${courseId}`, { signal: controller.signal }),
@@ -276,13 +265,6 @@ function ExamPageContent() {
       setDocuments(completedDocs);
       setSelectedDocs(new Set(completedDocs.map((d: DocItem) => d.id)));
 
-      const completedHist = ordered<HistExamItem>(
-        histRes.historical_exams || [],
-        courseData?.examOrder,
-        courseData?.titleOverrides
-      );
-      setHistExams(previous => retainSelectedRows(completedHist, previous, selectionRef.current.hist));
-
       const completedTut = ordered<TutorialItem>(
         tutRes.tutorials || [],
         courseData?.tutorialOrder,
@@ -298,7 +280,6 @@ function ExamPageContent() {
       setAudioRecs(previous => retainSelectedRows(completedAudio, previous, selectionRef.current.audio));
       if (initialSupportingSelection.current !== `${user.uid}:${courseId}`) {
         initialSupportingSelection.current = `${user.uid}:${courseId}`;
-        setSelectedHist(new Set(completedHist.filter(row => supportingPresentation(row) === "usable").map(row => row.id)));
         setSelectedTut(new Set(completedTut.filter(row => supportingPresentation(row) === "usable").map(row => row.id)));
         setSelectedAudio(new Set(completedAudio.filter(row => supportingPresentation(row) === "usable").map(row => row.id)));
       }
@@ -370,6 +351,7 @@ function ExamPageContent() {
   };
 
   const handleGenerate = async () => {
+    if (historical.loading || historical.error) return;
     if (!user || !course || !foundationReadyRef.current || !documents.some((doc) => selectedDocs.has(doc.id))) return;
     if (supportingBlocker) { setErrorMsg(t("Selected material is unavailable. Retry or deselect it.")); return; }
     studyRequest.current?.abort();
@@ -415,11 +397,12 @@ function ExamPageContent() {
           topics: topicsList.length > 0 ? topicsList : [course.title],
           preference: preference.trim() || "Generate based on historical exam format.",
           document_ids: Array.from(selectedDocs),
-          historical_exam_ids: Array.from(selectedHist),
+          historical_exam_ids: histExams.filter(row => selectedHist.has(row.id)).map(row => row.id),
+          historical_exam_type: historicalExamType,
           tutorial_ids: Array.from(selectedTut),
           audio_ids: Array.from(selectedAudio),
           total_marks: totalMarks,
-          exam_type: examType(totalMarks) || "Exam",
+          exam_type: EXAM_TYPE_LABELS[historicalExamType],
         }),
       });
 
@@ -480,7 +463,7 @@ function ExamPageContent() {
 
   if (loadError && !pageLoading) return <><Navbar /><div className="pt-28 px-6 text-center" role="alert"><p>{loadError}</p><button onClick={() => loadData()} className="mt-4 underline">Retry loading</button></div></>;
 
-  if (loading || pageLoading) {
+  if (loading || pageLoading || (course && historical.initialLoading)) {
     return (
       <>
         <Navbar />
@@ -606,6 +589,12 @@ function ExamPageContent() {
       </div>
 
       {/* Past exam selection */}
+      <div>
+        <HistoricalExamTypeSelect value={historicalExamType} onChange={historical.setCategory} />
+        {historical.loading && <p role="status" className="text-sm text-ink-soft">{t("Loading past exams…")}</p>}
+        {historical.error && <div role="alert" className="text-sm text-accent">{historical.error}<button type="button" onClick={() => void historical.refresh()} className="ml-3 underline">{t("Retry")}</button></div>}
+        {!historical.loading && !historical.error && histExams.length === 0 && <p className="text-sm text-ink-soft">{t("No past exams in this category. Classify existing papers on the course page or upload this type.")}</p>}
+      </div>
       {histExams.length > 0 && (
         <div>
           <h3 className="font-serif text-xl font-medium mb-1 tracking-tight">
@@ -797,7 +786,7 @@ function ExamPageContent() {
 
       {/* Intelligence summary */}
       {intelligence &&
-        (intelligence.historical_exams > 0 ||
+        (histExams.length > 0 ||
           intelligence.audio > 0 ||
           intelligence.tutorials > 0) && (
           <div className="bg-paper border border-line rounded-2xl p-5">
@@ -808,10 +797,10 @@ function ExamPageContent() {
               Topics are weighted by how often they appeared (and the marks they earned) in your past exams; rarely-tested topics get less coverage. Tutorials add practice-problem ideas (reused with different numbers) — never marks or format.
             </p>
             <div className="flex flex-wrap gap-3 text-xs font-mono">
-              {intelligence.historical_exams > 0 && (
+              {histExams.length > 0 && (
                 <span className="bg-accent/10 text-accent px-2.5 py-1 rounded-full">
-                  {intelligence.historical_exams} past exam
-                  {intelligence.historical_exams > 1 ? "s" : ""} (topic weighting)
+                  {histExams.length} past exam
+                  {histExams.length > 1 ? "s" : ""} (topic weighting)
                 </span>
               )}
               {intelligence.audio > 0 && (
@@ -839,17 +828,17 @@ function ExamPageContent() {
             Exam total marks
           </label>
           <div className="flex items-center gap-2">
-            {examType(totalMarks) && (
+            {EXAM_TYPE_LABELS[historicalExamType] && (
               <span
                 className={`text-xs font-mono uppercase px-3 py-1 rounded-full ${
-                  examType(totalMarks) === "Final"
+                  EXAM_TYPE_LABELS[historicalExamType] === "Final"
                     ? "bg-accent/10 text-accent"
-                    : examType(totalMarks) === "Midterm"
+                    : EXAM_TYPE_LABELS[historicalExamType] === "Midterm"
                     ? "bg-gold/10 text-gold"
                     : "bg-sage/10 text-sage"
                 }`}
               >
-                {examType(totalMarks)}
+                {t(EXAM_TYPE_LABELS[historicalExamType])}
               </span>
             )}
             <span className="font-mono text-sm bg-bg-alt px-3 py-1.5 rounded-lg min-w-[3.5rem] text-center">
@@ -868,33 +857,7 @@ function ExamPageContent() {
           className="w-full accent-accent"
         />
 
-        {/* Labeled zones */}
-        <div className="relative mt-2 h-5 text-[11px] font-mono">
-          <span
-            className={`absolute left-0 ${
-              examType(totalMarks) === "Quiz" ? "text-sage font-medium" : "text-ink-mute"
-            }`}
-          >
-            Quiz
-            <span className="opacity-60"> ≤10</span>
-          </span>
-          <span
-            className={`absolute left-1/2 -translate-x-1/2 ${
-              examType(totalMarks) === "Midterm" ? "text-gold font-medium" : "text-ink-mute"
-            }`}
-          >
-            Midterm
-            <span className="opacity-60"> 20–30</span>
-          </span>
-          <span
-            className={`absolute right-0 ${
-              examType(totalMarks) === "Final" ? "text-accent font-medium" : "text-ink-mute"
-            }`}
-          >
-            <span className="opacity-60">40 </span>
-            Final
-          </span>
-        </div>
+
       </div>
 
       {/* Topics */}
@@ -928,10 +891,10 @@ function ExamPageContent() {
       </div>
 
       {/* Generate button */}
-      <SupportingSelectionNotice blocker={supportingBlocker} onDeselect={deselectBlocking} onRefresh={() => void loadDataRef.current?.()} />
+      <SupportingSelectionNotice blocker={supportingBlocker} onDeselect={deselectBlocking} onRefresh={() => { void loadDataRef.current?.(); }} />
       <button
         onClick={handleGenerate}
-        disabled={!foundationReady || !!supportingBlocker || !documents.some((doc) => selectedDocs.has(doc.id))}
+        disabled={!foundationReady || historical.loading || !!historical.error || !!supportingBlocker || !documents.some((doc) => selectedDocs.has(doc.id))}
         className="w-full bg-ink text-paper py-4 rounded-full text-sm font-medium hover:bg-accent transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2.5 disabled:opacity-50 disabled:cursor-not-allowed"
       >
         Generate Exam <span>→</span>

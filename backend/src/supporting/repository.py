@@ -13,6 +13,10 @@ from src.supporting.contracts import (
     validate_identity, digest, canonical_bytes, CLAIM_LEASE_MS, DEFAULT_MODEL_CALL_BUDGET,
 )
 from src.utils.storage_paths import validate_component, validate_supporting_storage_path, supporting_artifact_prefix, SUPPORTING_CATEGORIES
+from src.utils.historical_exam_types import (
+    normalize_historical_exam_type, historical_exam_type_from_id,
+    ALL_HISTORICAL_EXAM_COLLECTIONS,
+)
 
 COLLECTIONS = {'historical_exam': 'historical_exams', 'tutorial': 'tutorials', 'audio': 'audio_recordings', 'notes': 'audio_recordings'}
 VERSIONS = 'supporting_material_versions'
@@ -37,6 +41,12 @@ class SupportingRepository:
     def __init__(self, database):
         self.database = database
 
+    def _collection(self, identity, *, local=None, transaction=None):
+        if identity['kind'] == 'historical_exam':
+            return self.database.resolve_historical_exam_collection(identity['materialId'], local=local,
+                transaction=transaction, identity=identity)
+        return COLLECTIONS[identity['kind']]
+
     @staticmethod
     def _row(identity, row, *, allow_missing=False, allow_deleting=False):
         if not row and allow_missing: return
@@ -45,6 +55,10 @@ class SupportingRepository:
             raise DataConflict('Supporting material is no longer available')
         if identity['kind'] in ('audio', 'notes') and ((row.get('sourceType') == 'notes') != (identity['kind'] == 'notes')):
             raise DataConflict('Supporting source type changed')
+        if identity['kind'] == 'historical_exam':
+            category = historical_exam_type_from_id(identity['materialId'])
+            if category is not None and row.get('examType') != category:
+                raise DataConflict('Historical exam category does not match its identity')
 
     @staticmethod
     def _descriptor(identity, row):
@@ -56,7 +70,7 @@ class SupportingRepository:
                 allow_deleting=False, require_parent=True, version_ids=()):
         identity = validate_identity(identity)
         db = self.database
-        collection, material = COLLECTIONS[identity['kind']], identity['materialId']
+        material = identity['materialId']
         tombstone = version_id(identity, 'tombstone', 'deleted')
         keys = list(dict.fromkeys([tombstone, *version_ids]))
 
@@ -77,6 +91,7 @@ class SupportingRepository:
             with db._local_transaction():
                 if require_parent: db._assert_write_allowed(identity['userId'], identity['courseId'])
                 local = db._read_local_db()
+                collection = self._collection(identity, local=local)
                 db._assert_foundation_current(identity['userId'], identity['courseId'], foundation_revision, local=local)
                 row = local.get(collection, {}).get(material, {})
                 versions = {key: local.get(VERSIONS, {}).get(key, {}) for key in keys}
@@ -86,12 +101,13 @@ class SupportingRepository:
                 if updated is not None or writes: db._write_local_db(local)
                 return result
         from google.cloud import firestore
-        reference = db.db.collection(collection).document(material)
         references = {key: db.db.collection(VERSIONS).document(key) for key in keys}
         @firestore.transactional
         def transaction(tx):
             if require_parent: db._assert_write_allowed(identity['userId'], identity['courseId'], tx)
             db._assert_foundation_current(identity['userId'], identity['courseId'], foundation_revision, transaction=tx)
+            collection = self._collection(identity, transaction=tx)
+            reference = db.db.collection(collection).document(material)
             snap = reference.get(transaction=tx)
             row = snap.to_dict() or {} if snap.exists else {}
             versions = {}
@@ -135,6 +151,11 @@ class SupportingRepository:
             if initial_data is not None:
                 if row: raise DataConflict('An existing material cannot be overwritten')
                 row = deepcopy(initial_data)
+                if identity['kind'] == 'historical_exam':
+                    category = normalize_historical_exam_type(row.get('examType'), allow_none=True)
+                    encoded = historical_exam_type_from_id(identity['materialId'])
+                    if category != encoded:
+                        raise ValueError('New historical exam type must match its collection identity')
                 if any(key in row for key in ('processingJob', 'supportingAnalysis', 'sourceRevision')):
                     raise ValueError('Initial material cannot supply processed state')
                 row.update(userId=identity['userId'], courseId=identity['courseId'])
@@ -475,6 +496,8 @@ class SupportingRepository:
     def assert_snapshot(self, snapshot, *, transaction=None, local=None, scope_revision=None):
         if not isinstance(snapshot, dict) or snapshot.get('version') != 1 or not isinstance(snapshot.get('materials'), list):
             raise DataConflict('Supporting snapshot is unavailable')
+        category = (normalize_historical_exam_type(snapshot['historicalExamType'])
+                    if 'historicalExamType' in snapshot else None)
         db = self.database
         if scope_revision is not None: _hash(scope_revision)
         if transaction is None and local is None:
@@ -498,8 +521,10 @@ class SupportingRepository:
             marker = canonical_bytes(identity)
             if marker in seen: raise ValueError('Duplicate supporting snapshot identity')
             seen.add(marker)
-            row = read(COLLECTIONS[identity['kind']], identity['materialId'])
+            row = read(self._collection(identity, local=local, transaction=transaction), identity['materialId'])
             self._row(identity, row)
+            if identity['kind'] == 'historical_exam' and category is not None and row.get('examType') != category:
+                raise DataConflict('Selected historical exam category changed; retry generation')
             if not self._expected(row, entry): raise DataConflict('Selected supporting source changed; retry generation')
             foundation = _hash(row['processingJob'].get('foundationRevision'))
             db._assert_foundation_current(identity['userId'], identity['courseId'], foundation,
@@ -537,8 +562,10 @@ class SupportingRepository:
                 for snap in page: yield {**snap.to_dict(), 'id': snap.id}
                 if len(page) < page_size: return
                 query = query.start_after(page[-1])
-        for kind, collection in COLLECTIONS.items():
-            if kind == 'notes': continue
+        recovery_collections = [('historical_exam', name) for name in ALL_HISTORICAL_EXAM_COLLECTIONS]
+        recovery_collections += [(kind, collection) for kind, collection in COLLECTIONS.items()
+                                 if kind not in ('historical_exam', 'notes')]
+        for kind, collection in recovery_collections:
             for row in candidates(collection):
                 job = row.get('processingJob') or {}
                 if job.get('stage') not in ACTIVE_STAGES or job.get('leaseUntil', 0) > now_ms: continue
@@ -581,5 +608,5 @@ class SupportingRepository:
             categories=(SUPPORTING_CATEGORIES[identity['kind']],))
         for descriptor in descriptors:
             if descriptor['id'] != tombstone: db._flat_delete(VERSIONS, descriptor['id'])
-        if row: db._flat_delete(COLLECTIONS[identity['kind']], identity['materialId'])
+        if row: db._flat_delete(self._collection(identity), identity['materialId'])
         return {'materials': int(bool(row)), 'files': len(paths)}

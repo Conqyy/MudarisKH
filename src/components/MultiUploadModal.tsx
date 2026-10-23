@@ -8,6 +8,7 @@ import {
   useEffect,
   ChangeEvent,
   DragEvent,
+  ReactNode,
 } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { useLang } from "@/lib/i18n";
@@ -50,6 +51,9 @@ interface Props {
   actualStep?: { documentId: string; step: number } | null;
   acceptedId?: "document_id" | "exam_id" | "tutorial_id";
   completionMode?: "analyzed" | "queued";
+  extraFields?: Record<string, string>;
+  selectionFields?: ReactNode;
+  selectionValid?: boolean;
 }
 
 type Phase = "select" | "processing" | "done";
@@ -80,6 +84,9 @@ export default function MultiUploadModal({
   actualStep,
   acceptedId = "document_id",
   completionMode = "analyzed",
+  extraFields,
+  selectionFields,
+  selectionValid = true,
 }: Props) {
   const dialogRef = useDialog(() => { if (phase !== "processing") onClose(); });
   const { user } = useAuth();
@@ -191,6 +198,7 @@ export default function MultiUploadModal({
     formData.append("user_id", user!.uid);
     formData.append("course_id", courseId);
     formData.append("title", file.name.replace(/\.[^/.]+$/, ""));
+    Object.entries(extraFields || {}).forEach(([key, value]) => formData.append(key, value));
 
     const res = await apiFetch(`${API_URL}${endpoint}`, {
       method: "POST",
@@ -252,7 +260,7 @@ export default function MultiUploadModal({
   };
 
   const startProcessing = async () => {
-    if (!user) return;
+    if (!user || !selectionValid) return;
     if (items.length === 0) {
       setError(`Please add at least one ${fileNoun}.`);
       return;
@@ -347,6 +355,7 @@ export default function MultiUploadModal({
               {t(heading)}
             </h2>
             <p className="text-ink-soft text-sm mb-7">{t(subtitle)}</p>
+            {selectionFields}
 
             {error && (
               <div
@@ -429,7 +438,7 @@ export default function MultiUploadModal({
             <button
               type="button"
               onClick={startProcessing}
-              disabled={items.length === 0}
+              disabled={items.length === 0 || !selectionValid}
               className="w-full bg-[var(--accent)] text-paper py-3.5 rounded-full font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {items.length > 0

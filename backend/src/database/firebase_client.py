@@ -12,6 +12,10 @@ from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
 from src.utils.storage_paths import BACKEND_ROOT, UPLOADS_ROOT, resolve_storage_path, validate_component, STORAGE_CATEGORIES, document_artifact_prefix
+from src.utils.historical_exam_types import (
+    normalize_historical_exam_type, historical_exam_collection, historical_exam_type_from_id,
+    new_historical_exam_id, ALL_HISTORICAL_EXAM_COLLECTIONS, HISTORICAL_EXAM_LOCATIONS,
+)
 
 logger = logging.getLogger("MudarisDatabase")
 
@@ -202,7 +206,7 @@ class FirebaseClient:
 
     @local_locked
     def _flat_save(self, collection_name: str, data: dict, *, expected_foundation_revision=None,
-                   expected_supporting_snapshot=None, scope_revision=None) -> str:
+                   expected_supporting_snapshot=None, scope_revision=None, document_id=None) -> str:
         if expected_supporting_snapshot is not None:
             data = {**data, 'supportingSnapshot': deepcopy(expected_supporting_snapshot)}
         validate_record_size(data)
@@ -220,7 +224,7 @@ class FirebaseClient:
             self._assert_supporting_snapshot(user_id, course_id, expected_supporting_snapshot,
                                              local=local, scope_revision=scope_revision)
             local.setdefault(collection_name, {})
-            doc_id = f"{collection_name}_{uuid.uuid4().hex}"
+            doc_id = document_id or f"{collection_name}_{uuid.uuid4().hex}"
             if collection_name == 'courses':
                 self._assert_write_allowed(user_id, doc_id, parent_required=False)
             if collection_name == 'documents':
@@ -229,7 +233,7 @@ class FirebaseClient:
             local[collection_name][doc_id] = data
             self._write_local_db(local)
             return doc_id
-        doc_ref = self.db.collection(collection_name).document()
+        doc_ref = self.db.collection(collection_name).document(document_id) if document_id else self.db.collection(collection_name).document()
         from google.cloud import firestore
         @firestore.transactional
         def save(transaction):
@@ -260,10 +264,15 @@ class FirebaseClient:
             if expected_legacy_audio and (collection_name != 'audio_recordings' or
                                           current and current.get('supportingAnalysis')):
                 raise DataConflict('Legacy audio worker cannot update a managed supporting material')
+        def check_historical(current):
+            if collection_name in ALL_HISTORICAL_EXAM_COLLECTIONS and current and 'examType' in data:
+                if current.get('examType') != data['examType']:
+                    raise DataConflict('Historical exam type is immutable; classify an untyped paper explicitly')
         if self.use_local:
             local = self._read_local_db()
             check_exam(local.get(collection_name, {}).get(doc_id))
             check_legacy_audio(local.get(collection_name, {}).get(doc_id))
+            check_historical(local.get(collection_name, {}).get(doc_id))
             if collection_name in local and doc_id in local[collection_name]:
                 current = local[collection_name][doc_id]
                 if collection_name == 'documents' and current.get('status') == 'deleting':
@@ -283,6 +292,7 @@ class FirebaseClient:
             snapshot = reference.get(transaction=transaction)
             check_exam(snapshot.to_dict() if snapshot.exists else None)
             check_legacy_audio(snapshot.to_dict() if snapshot.exists else None)
+            check_historical(snapshot.to_dict() if snapshot.exists else None)
             if not snapshot.exists:
                 return False
             current = snapshot.to_dict() or {}
@@ -459,17 +469,117 @@ class FirebaseClient:
     # --- Historical Exams (Model 3) ---
     def save_historical_exam(self, user_id: str, course_id: str, data: dict) -> str:
         data.update({"userId": user_id, "courseId": course_id})
-        return self._flat_save("historical_exams", data)
+        category = normalize_historical_exam_type(data.get('examType'), allow_none=True)
+        if category is None: return self._flat_save('historical_exams', data)
+        return self._flat_save(historical_exam_collection(category), data, document_id=new_historical_exam_id(category))
+
+    def resolve_historical_exam_collection(self, exam_id, *, transaction=None, local=None, identity=None):
+        """Resolve one exact location, without scanning category collections.
+
+        Opaque legacy IDs move only through an ownership-bound locator. Read the
+        locator in the caller's transaction so classification and worker writes
+        conflict instead of recreating the old location.
+        """
+        validate_component(exam_id, 'historical exam ID')
+        category = historical_exam_type_from_id(exam_id)
+        if category is not None: return historical_exam_collection(category)
+        def read(collection):
+            if local is not None: return local.get(collection, {}).get(exam_id, {})
+            if self.use_local: return self._read_local_db().get(collection, {}).get(exam_id, {})
+            snap = self.db.collection(collection).document(exam_id).get(transaction=transaction)
+            return (snap.to_dict() or {}) if snap.exists else {}
+        locator = read(HISTORICAL_EXAM_LOCATIONS)
+        if not locator: return 'historical_exams'
+        category = normalize_historical_exam_type(locator.get('examType'))
+        collection = historical_exam_collection(category)
+        if (locator.get('collection') != collection or locator.get('materialId') != exam_id
+                or not locator.get('userId') or not locator.get('courseId')):
+            raise DataConflict('Historical exam location is invalid')
+        if identity and any(locator.get(key) != identity.get(key) for key in ('userId', 'courseId')):
+            raise DataConflict('Historical exam location belongs to another owner')
+        row = read(collection)
+        if row and (any(row.get(key) != locator.get(key) for key in ('userId', 'courseId', 'examType'))):
+            raise DataConflict('Historical exam location ownership changed')
+        return collection
+
+    @local_locked
+    def classify_historical_exam(self, exam_id, exam_type, user_id, course_id=None):
+        """Move an explicitly classified legacy row, retaining its exact identity."""
+        category = normalize_historical_exam_type(exam_type)
+        target = historical_exam_collection(category)
+        validate_component(exam_id, 'historical exam ID')
+        validate_component(user_id, 'user ID')
+        def validate(row, locator, existing):
+            if (not row or row.get('userId') != user_id or (course_id is not None and row.get('courseId') != course_id)
+                    or row.get('status') == 'deleting'):
+                raise DataConflict('Historical exam is no longer available or not owned')
+            encoded_type = historical_exam_type_from_id(exam_id)
+            if encoded_type is not None and row.get('examType') != encoded_type:
+                raise DataConflict('Historical exam category does not match its identity')
+            old_type = row.get('examType')
+            if old_type is not None and old_type != category:
+                raise DataConflict('Historical exam type is immutable')
+            if locator and any(locator.get(key) != row.get(key) for key in ('userId', 'courseId')):
+                raise DataConflict('Historical exam location belongs to another owner')
+            if existing and old_type is None:
+                raise DataConflict('Historical exam target already exists')
+        if self.use_local:
+            with self._local_transaction():
+                local = self._read_local_db()
+                source = self.resolve_historical_exam_collection(exam_id, local=local)
+                row = local.get(source, {}).get(exam_id, {})
+                locator = local.get(HISTORICAL_EXAM_LOCATIONS, {}).get(exam_id, {})
+                validate(row, locator, local.get(target, {}).get(exam_id, {}) if source != target else {})
+                self._assert_write_allowed(user_id, row['courseId'])
+                if row.get('examType') == category: return {**row, 'id': exam_id}
+                moved = {**row, 'examType': category}
+                local.setdefault(target, {})[exam_id] = moved
+                local.get(source, {}).pop(exam_id, None)
+                local.setdefault(HISTORICAL_EXAM_LOCATIONS, {})[exam_id] = {
+                    'userId': user_id, 'courseId': row['courseId'], 'materialId': exam_id,
+                    'examType': category, 'collection': target}
+                self._write_local_db(local)
+                return {**moved, 'id': exam_id}
+        from google.cloud import firestore
+        @firestore.transactional
+        def classify(tx):
+            source = self.resolve_historical_exam_collection(exam_id, transaction=tx)
+            source_ref = self.db.collection(source).document(exam_id)
+            target_ref = self.db.collection(target).document(exam_id)
+            location_ref = self.db.collection(HISTORICAL_EXAM_LOCATIONS).document(exam_id)
+            def read(ref):
+                snap = ref.get(transaction=tx)
+                return (snap.to_dict() or {}) if snap.exists else {}
+            row, locator = read(source_ref), read(location_ref)
+            existing = read(target_ref) if source != target else {}
+            validate(row, locator, existing)
+            self._assert_write_allowed(user_id, row['courseId'], tx)
+            if row.get('examType') == category: return {**row, 'id': exam_id}
+            moved = {**row, 'examType': category}
+            tx.set(target_ref, moved)
+            tx.set(location_ref, {'userId': user_id, 'courseId': row['courseId'], 'materialId': exam_id,
+                                 'examType': category, 'collection': target})
+            tx.delete(source_ref)
+            return {**moved, 'id': exam_id}
+        return classify(self.db.transaction())
 
     def update_historical_exam(self, exam_id: str, data: dict, *, expected_foundation_revision=None):
-        self._flat_update("historical_exams", exam_id, data, expected_foundation_revision=expected_foundation_revision)
+        self._flat_update(self.resolve_historical_exam_collection(exam_id), exam_id, data, expected_foundation_revision=expected_foundation_revision)
 
-    def get_course_historical_exams(self, course_id: str, user_id: str = None) -> list:
-        return self._flat_query_by_course("historical_exams", course_id, user_id)
+    def get_course_historical_exams(self, course_id: str, user_id: str = None, exam_type=None) -> list:
+        category = normalize_historical_exam_type(exam_type, allow_none=True)
+        collections = (historical_exam_collection(category),) if category else ALL_HISTORICAL_EXAM_COLLECTIONS
+        return [row for collection in collections for row in self._flat_query_by_course(collection, course_id, user_id)
+                if category is None or (row.get('examType') == category
+                    and historical_exam_type_from_id(row['id']) in (None, category))]
 
     def get_historical_exam(self, exam_id: str) -> dict:
         # Needed to check ownership before update/delete.
-        return self._flat_get("historical_exams", exam_id)
+        row = self._flat_get(self.resolve_historical_exam_collection(exam_id), exam_id)
+        category = historical_exam_type_from_id(exam_id)
+        if row and category is not None and row.get('examType') != category:
+            raise DataConflict('Historical exam category does not match its identity')
+        return row
 
     def delete_historical_exam(self, exam_id: str):
         row = self.get_historical_exam(exam_id)
@@ -477,7 +587,7 @@ class FirebaseClient:
             from src.supporting.repository import SupportingRepository
             return SupportingRepository(self).delete({'userId': row['userId'], 'courseId': row['courseId'],
                 'kind': 'historical_exam', 'materialId': exam_id})
-        self._flat_delete("historical_exams", exam_id)
+        self._flat_delete(self.resolve_historical_exam_collection(exam_id), exam_id)
 
     # --- Tutorials (practice problems — ideas only, no grading weight/format) ---
     def save_tutorial(self, user_id: str, course_id: str, data: dict) -> str:
@@ -874,10 +984,11 @@ class FirebaseClient:
                                 historical_exam_ids: list = None,
                                 tutorial_ids: list = None,
                                 audio_ids: list = None,
-                                user_id: str = None) -> dict:
+                                user_id: str = None, historical_exam_type=None) -> dict:
         docs = self.get_course_documents(course_id, user_id)
         audio = self.get_course_audio_recordings(course_id, user_id)
-        historical = self.get_course_historical_exams(course_id, user_id)
+        historical = (self.get_course_historical_exams(course_id, user_id, exam_type=historical_exam_type)
+                      if historical_exam_type is not None else self.get_course_historical_exams(course_id, user_id))
         tutorials = self.get_course_tutorials(course_id, user_id)
 
         # course_id arrives from the client, so scope every source to the
@@ -1048,7 +1159,8 @@ class FirebaseClient:
                 os.unlink(temporary)
 
     # --- Ownership, restart recovery, and application-data lifecycle ---
-    OWNED_COLLECTIONS = ("documents", "audio_recordings", "historical_exams",
+    OWNED_COLLECTIONS = ("documents", "audio_recordings", *ALL_HISTORICAL_EXAM_COLLECTIONS,
+                         HISTORICAL_EXAM_LOCATIONS,
                          "tutorials", "exams", "flashcard_sets", "summaries",
                          "tutor_chats", "schedule_entries", "lectures", "_schedule_versions",
                          "document_foundations", "supporting_material_versions")

@@ -3,6 +3,18 @@
 // The "Mudaris" persona speaks in the first person ("مدرّس بيشوف… يحلّل…").
 
 export const AR: Record<string, string> = {
+  "Past exam type": "نوع الاختبار السابق",
+  "Choose an exam type": "اختر نوع الاختبار",
+  "Quizzes": "الكويزات",
+  "Midterms": "الاختبارات النصفية",
+  "Finals": "الاختبارات النهائية",
+  "Needs classification": "يحتاج تصنيف",
+  "Classify": "صنّف",
+  "Assign a type before using these papers for exams or summaries.": "حدد نوع هذه الأوراق قبل استخدامها في الاختبارات أو الملخصات.",
+  "This type applies to every file and every paper in a merged PDF. Upload different types separately.": "ينطبق هذا النوع على كل ملف وكل اختبار داخل ملف PDF مدمج. ارفع الأنواع المختلفة بشكل منفصل.",
+  "Loading past exams…": "جارٍ تحميل الاختبارات السابقة…",
+  "No past exams in this category. Classify existing papers on the course page or upload this type.": "ما فيه اختبارات سابقة من هذا النوع. صنّف الأوراق الموجودة من صفحة المقرر أو ارفع اختبارات من هذا النوع.",
+  "Could not classify past exam.": "تعذّر تصنيف الاختبار السابق.",
   "Supporting material report": "تقرير المواد المساندة",
   "Supported by lecture": "تدعمه المحاضرة",
   "Related supplement": "مادة مساندة مرتبطة",
