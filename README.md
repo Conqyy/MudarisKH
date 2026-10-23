@@ -16,8 +16,8 @@ inside the same backend process, not six separate network services or necessaril
 different LLMs. Analysis, generation, and tutoring use the configured OpenRouter model;
 transcription uses Groq separately.
 
-Agents return their results to the API. The API and document/audio workers persist
-results through `FirebaseClient`. A request-local source reader supplies selected original
+Agents return their results to the API. The API and document/supporting-material workers
+persist results through `FirebaseClient`. A request-local source reader supplies selected original
 lecture passages and images, the automatic guide, and source references to downstream
 agents. Agents do not send messages directly to one another. Firestore holds compact
 records and conversation history; original files and complete source manifests are private
@@ -47,12 +47,21 @@ New results carry source-version references and execution coverage. Publication 
 confirmed foundation and current owned document identities/stages atomically, so changed
 or retried material cannot authorize a late save.
 
-1. **Document Processor** — supports complete location-aware preparation of lecture PDF / PPTX / DOCX, extraction-only visual reading, and an automatic guide of sections, concepts, visual references, and warnings. PDF pages, PPTX slides/text/tables/notes/images, and DOCX paragraph/table/image locations remain addressable. The guide does not regenerate a full set of definitions or formulas; agents read those from the originals. Its dedicated **tutorial mode** captures each practice *problem* (statement, given data/tables, what it asks, the concept, and the solving method), with lecture evidence for alignment.
-2. **Audio Intelligence** — transcribes professor recordings (Groq-hosted **Whisper-large-v3**) and produces a full **lecture summary** ("what the professor said") plus exam hints, key emphasis, and chapter mapping. Accepts audio files, **video files (MP4/MOV — audio auto-extracted to MP3)**, and **video URLs** (YouTube/Vimeo via yt-dlp; direct media through a validated downloader); long files are chunked within the upload, duration, and processing limits. Transcripts are biased to the lecture's language(s) — tuned here for mixed **Arabic/English** — with stray foreign-script text filtered out, Whisper's silence hallucinations (prompt echo / subtitle credits) stripped, and bidirectional (RTL/LTR) text rendered correctly. The analysis is written in English, but the professor's **direct quotes stay verbatim in his own words** (Arabic stays Arabic), and an explicit mark statement ("this chapter is 8 marks") is treated as the strongest exam signal. The full analysis can be **downloaded as a PDF** (compiled with XeLaTeX so inline Arabic quotes render correctly).
-3. **Historical Exam Analyzer** — detects individual papers inside merged PDFs, inspects every page in sequential batches, and analyzes each paper for topic weights, question types, difficulty, and grading patterns. It stores per-paper evidence plus normalized aggregate statistics; the typical question count is separate from the collection total. Phone photos are auto-rotated and analyzed individually. Unclear paper boundaries fail with guidance to split the file, rather than silently treating a collection as one paper.
+1. **Document Processor** — prepares lecture PDF / PPTX / DOCX originals and automatically creates a lightweight guide of sections, concepts, visual references, and warnings. PDF pages, PPTX slides/text/tables/notes/images, and DOCX paragraph/table/image locations remain addressable. The guide helps navigation; downstream agents read definitions, formulas and diagrams from the originals.
+2. **Audio Intelligence** — transcribes recordings through Groq-hosted **Whisper-large-v3**. It accepts audio, video files, and supported media URLs, preserving the captured original and transcript segments. Supporting analysis then inventories teaching points, examples, emphasis and exam hints, and checks their relationship to lecture evidence. Available timestamps refer to the actual transcript chunks; missing timestamps remain unavailable. Typed notes preserve the exact submitted text and are labeled student-reported, never direct professor speech.
+3. **Historical Exam Analyzer** — detects separate papers in merged uploads and inventories every question, subpart, shared premise and topic across all pages. Each requirement is checked against the lecture originals. A covered subpart does not certify the entire question. Original paper counts and question types describe format separately from which topics are eligible for study generation. Unclear boundaries require review or splitting the file; a collection is never silently treated as one oversized paper.
 4. **Exam Generator** — produces a **predicted single exam** from all selected past papers, its **model-answer key**, and flashcards. Each paper contributes normalized evidence equally. Structure favors the requested Quiz/Midterm/Final type where known; typical question density or count and the requested marks determine the new blueprint. Upload order does not choose a reference paper. The blueprint and provenance are saved with the exam, and validators check its question mix, complete rubrics, and printed marks. The header is branded **"Mudaris University of {your major}"**. Long generations use a bounded continuation loop; incomplete output is rejected.
 5. **Summary Generator** — independently produces structured summaries with length determined by relevant content, complexity, importance, and student instructions, without fixed section/paragraph/term targets. It excludes course outlines/maps, textbook lists, and logistics by default while retaining substantive introductory concepts. Shared context-formatting helpers are neutral; its prompt, model call, and validation are separate from exams.
 6. **AI Tutor** — a chat tutor that reads relevant selected original lecture evidence alongside supporting materials and saved history. Academic replies require validated source references and factual checks; social/clarification replies may be reference-free after a separate nonacademic check.
+
+The shared `supporting/` pipeline handles past exams, tutorial problem sheets, recordings
+and typed notes. It preserves each original, builds an addressable inventory, then aligns
+each requirement or teaching point with the lecture foundation. Reports distinguish
+lecture-supported content, related supplementary teaching, content outside the selected
+scope, content not found, unresolved review, and conflicts. A failed or incomplete search
+never proves that something is outside the course. Required shared premises are checked
+alongside questions; verified hypothetical data can remain without becoming a new
+academic requirement.
 
 > **Tutorials** are not another model — they're analyzed by the Document Processor's tutorial
 > mode and supplied as practice-problem context. They do not define an exam's question mix
@@ -64,17 +73,17 @@ or retried material cannot authorize a late save.
 ## Features
 
 - **AI Tutor** — chat about the course using individually selected lectures, recordings, past exams, and tutorials. Original lectures ground academic replies; exact-version citations open source previews. Conversations and their per-reply provenance are saved and can be resumed/deleted.
-- **Practice Exam** — select lecture documents, past papers, tutorials, and **lecture recordings**, choose total marks (auto-labeled **Quiz / Midterm / Final**), and generate a predicted paper based on recurring patterns across all selected papers. Merged PDFs are separated into individual papers; selected older uploads are rescanned from saved originals and cached before generation. Question counts are never summed across a collection. You **solve it yourself**, then reveal a **model-answer key PDF** with answers in **red**, including real code where required. Optionally upload your own solved paper for side-by-side comparison.
+- **Practice Exam** — select lecture documents, past papers, tutorials, and **lecture recordings**, choose total marks (auto-labeled **Quiz / Midterm / Final**), and generate a predicted paper based on recurring patterns across all selected papers. Merged PDFs are separated into individual papers; older uploads require explicit preparation from their saved originals before use. Question counts are never summed across a collection. You **solve it yourself**, then reveal a **model-answer key PDF** with answers in **red**, including real code where required. Optionally upload your own solved paper for side-by-side comparison.
 - **Tutorials** — upload practice-problem / exercise sheets. They're analyzed for their problem types and methods, then selectable as a source for exam generation, flashcards, and summaries (they add *problem ideas only* — never marks or format).
 - **Flashcards** — up to 20 cards, prioritized by exam likelihood from past exams + professor hints, including how-to-solve cards from tutorials and points from selected **recordings**; 3-D flip study view.
 - **Summary** — content-sized study notes with important explanations, key terms, and tutorial-solving methods. Related ideas can share a section; no numeric size quota encourages padding. Course administration is omitted by default. Sections follow the **course's chapter order**. Exam weights are relative study signals derived from matching historical topic weights where available; otherwise model estimates remain. They are not calibrated probabilities of future exam coverage.
 - **Selectable sources** — exam generation, summaries, flashcards, and the AI Tutor use selected documents, past exams, tutorials, and **lecture recordings**. At the API, omitted/null ID lists include all of that type; `[]` excludes all. Exam/summary/flashcard generation requires a nonempty lecture selection. For tutoring, a confirmed document foundation remains required and is included when no documents are selected. Explicit source order is preserved and duplicate IDs are removed. Exam prediction combines all detected papers without giving the first upload special authority.
-- **Multi-file upload** — documents, past exams, tutorials, and **recordings** can be uploaded many at once (recordings also via **multiple video URLs**, past exams also as **photos**). The interface processes files sequentially with a live "done / total" counter. Document acceptance starts polling; a file counts as done only after preparation and guide creation both succeed. Failed files retain their reasons and the batch can continue.
+- **Multi-file upload** — documents, past exams, tutorials, and **recordings** can be uploaded many at once (recordings also via **multiple video URLs**, past exams also as **photos**). The interface submits files sequentially. A lecture document is ready only after preparation and guide creation both succeed. Accepted supporting uploads show queued work, followed by actual analysis progress and reports. Failed files retain their reasons and the batch can continue.
 - **Original sources and citations** — the document viewer shows guide sections/concepts, source-unit metadata, and preparation warnings. Authenticated original PDF viewing remains available while locked. Prepared PPTX/DOCX files use source units; legacy Office files show preparation guidance instead of an empty Content view. Summary sections, flashcards, exam-question metadata, and tutor replies link to exact source versions; unavailable versions show guidance and never open replacement content at the same page/slide position. Machine references stay off the printed exam sheet.
 - **Weekly calendar** — Sunday–Thursday lecture schedule with start/finish times, hall notes, and no double-booking; click a lecture to edit.
 - **Arabic (Najdi) + RTL** — the interface supports right-to-left layout and a one-tap **عربي ⇄ EN** toggle in the navbar (remembered per device). The copy uses a Najdi dialect and a first-person **"مُدرّس"** persona (e.g. on upload: *"مُدرّس بيقرأ مستندك ويحلّله…"*). Interface translations are available; some study-workflow labels still use English fallback. Your **course content stays in its own language** (an English curriculum's topic names, exam hints, and generated material are never translated).
 - **Dark mode** — a ☾/☀ toggle in the navbar flips the whole app to a warm dark theme (remembered per device, applied before first paint — no flash). The palette is CSS-variable based, so every component follows automatically.
-- **Watermarked PDFs** — generated exams, summaries, and audio-analysis PDFs carry a "Mudaris" mark.
+- **Watermarked PDFs** — generated exams, summaries, and retained legacy audio-analysis PDFs carry a "Mudaris" mark. New recording/note analysis uses the evidence report; the legacy PDF route requires retained structured insights.
 - **Retries and isolated chats** — document jobs have durable stage checkpoints, leases and startup recovery; incomplete preparation can retry from the saved original, while a failed guide can reuse completed preparation. Failed/legacy documents are retried explicitly. Audio analysis, previews and answer-key PDFs retain retry controls. Late uploads/previews/replies are fenced on account/course/selection changes, and concurrent tutor replies cannot overwrite the same saved history.
 - **Cascading deletion** — course/account deletion uses authenticated backend cleanup for owned materials, chats, schedules, rubrics, solutions, and local/cloud uploads. Account cleanup requires recent authentication and completes before deleting the Auth account. Failed cleanup can be retried.
 
@@ -90,11 +99,30 @@ topic is absent. Supporting topics need actual selected-source support before in
 academic content, while historical counts/types/marks remain independent structural
 evidence for the predicted exam.
 
+The supporting context compiler checks every selected material before scoped analysis.
+For supporting selections, omitted/null means all owned material of that category and
+`[]` means none. An unready, stale or missing selected source produces an error; it is
+never silently omitted. Narrowing lecture chapters rechecks recordings, tutorials, notes
+and past exams against that scope. The packet retains eligible original question text,
+required verified context and evidence identities, rather than passing only topic weights.
+Historical topic names are normalized across papers, and only eligible question evidence
+contributes to topic emphasis. Unknown marks and formats remain unknown.
+
+Exams and flashcards require lecture-supported knowledge. Summaries and tutoring may
+include clearly attributed supplementary teaching with a selected lecture anchor. Student
+notes keep their reported attribution. Direct tutor discussions of conflicts or
+out-of-scope material retain an explicit qualification; they do not expand the syllabus.
+Final output verification reads the cited originals and checks academic text, including
+summary overview/terms/focus, both flashcard sides, exam shared context and answer criteria.
+Citation metadata is kept separate from the academic claims being checked.
+
 Tutor requests validate explicit nonempty document selections before filtering resources;
 missing, foreign or unavailable IDs reject the request, including mixed valid/invalid
 selections. Only omitted/null or intentionally empty tutor document selections use the
-confirmed foundation. Async historical/tutorial uploads run blocking lecture readiness,
-source preparation and topic alignment in worker threads alongside their provider calls.
+confirmed foundation. Supporting uploads return HTTP 202 after preserving the source and
+queuing durable work. Status polling reports actual preparation, extraction and alignment
+progress. Restart recovery resumes claimed jobs; retry starts a fresh attempt so a stale
+worker cannot publish over it.
 
 Exam, summary and flashcard requests read all selected source units in bounded batches.
 Coverage records successful text ranges and original image submissions, including partial
@@ -110,6 +138,20 @@ New citations use `{documentId, sourceRevision, unitId}` and are checked against
 selection, exact versions and the server's successful-submission ledger. These checks
 establish provenance and enforce model judgments of factual support; they do not prove
 perfect OCR, complete understanding, or accurate future-exam predictions.
+
+Supporting citations have a separate identity:
+`{kind, materialId, sourceRevision, unitId}`. Authenticated previews resolve that exact
+owned version, including source text, available timing and original-file access. They do
+not reinterpret a supporting citation as a lecture citation or substitute a newer upload.
+Reports are paged and remain readable when stale; old analyses remain readable but need
+explicit preparation before they can authorize new generation.
+
+Generated outputs retain the exact selected supporting-source snapshot. Publication
+checks that snapshot and the lecture foundation inside the database write, including
+tutor turns. Exams and hidden answer rubrics publish together. A retry or replacement of
+a selected source rejects a late result; changes to unselected material do not. Saved
+exam repair restores its own original lecture and supporting versions instead of using
+today's materials. Missing historical evidence requires restore/regenerate guidance.
 
 Saved exam detail is a read and never starts model rescue. Available saved TeX can compile
 while the course is locked. Answer keys first try a valid cache, then complete saved
@@ -252,7 +294,7 @@ do not deploy Firebase rules. Then open **http://localhost:3000** and sign in.
 1. Sign in → create a course (it appears on the dashboard; add lectures to the weekly calendar there too).
 2. Upload all intended **lecture documents**. Follow the upload, preparation and lightweight-analysis stages; retry a failed stage or explicitly prepare a legacy upload. Missing originals or unresolved source coverage must be restored/replaced before confirmation.
 3. When every document finishes both stages, select **I've uploaded all lecture documents**. Adding, removing, replacing or retrying lecture documents locks new supporting/AI work until the completed set is confirmed again.
-4. Upload **voice recordings**, **past exams**, and **tutorials**. Then use **AI Tutor**, **Practice Exam**, **Flashcards**, or **Summary**, choosing the source items for each request. Selected lecture documents define academic scope; supporting material cannot reintroduce an unselected chapter.
+4. Upload **voice recordings**, **past exams**, **tutorials**, or typed notes. Acceptance starts background preparation and analysis; inspect progress and the evidence report, and retry failed or outdated material. Choose the source items for **AI Tutor**, **Practice Exam**, **Flashcards**, or **Summary**. Selected lecture documents define academic scope; supporting material cannot reintroduce an unselected chapter.
 5. For an exam, choose total marks (Quiz/Midterm/Final) and generate one predicted paper informed by all selected past papers. Solve it yourself, then **Reveal model answers** to open the red answer-key PDF. Optionally attach your own solved file for comparison. Completion time depends on the provider, source size and required source readings.
 
 ---
@@ -283,6 +325,7 @@ MudarisKH/
         ├── config/                   # settings + prompts
         ├── database/firebase_client.py
         ├── services/                 # private source library, preparation pipeline, request-local evidence reader
+        ├── supporting/               # supporting originals, durable jobs, extraction, alignment and evidence packets
         └── utils/                    # validated storage, AI contracts, jobs, media and PDF helpers
 ```
 
@@ -292,16 +335,22 @@ MudarisKH/
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/api/documents/upload` · `/api/audio/upload` · `/api/historical-exams/upload` · `/api/tutorials/upload` | Upload material; documents return 202 and run mandatory preparation + guide jobs; audio defaults to background processing; the UI waits per file |
-| POST | `/api/audio/upload-url` · `/api/audio/upload-notes` | Ingest a supported media URL or analyze typed lecture notes |
+| POST | `/api/documents/upload` · `/api/audio/upload` · `/api/historical-exams/upload` · `/api/tutorials/upload` | Preserve uploads and return 202 for background work; acceptance does not mean analysis is complete |
+| POST | `/api/audio/upload-url` · `/api/audio/upload-notes` | Queue supported media capture or analysis of exact student-reported notes |
 | POST | `/api/documents/{doc_id}/prepare` · `/api/documents/{doc_id}/reanalyze` | Prepare/upgrade a saved lecture source or retry its guide; returns accepted identity for status polling |
 | GET | `/api/documents/detail/{doc_id}` · `/api/documents/{doc_id}/sources` | Poll document stages or inspect compact source-unit/coverage metadata |
 | GET | `/api/documents/{doc_id}/original` | View the owned current original while locked; independent of citation-version resolution |
 | GET | `/api/documents/{doc_id}/sources/{unit_id}?source_revision=...` | Preview an owned exact source version/location; never fall back to a replacement source |
 | POST | `/api/audio/{rec_id}/reanalyze` | Retry saved recording analysis |
+| POST | `/api/supporting/{kind}/{material_id}/prepare` | Prepare a legacy material or retry supporting analysis; returns 202 and an opaque job identity |
+| GET | `/api/supporting/{kind}/{material_id}/status` | Read stages, completed/total units, coverage, current revisions and actionable errors |
+| GET | `/api/supporting/{kind}/{material_id}/report?revision=...&offset=0&limit=100` | Read an exact owned report page with questions, teaching points, alignment and coverage |
+| GET | `/api/supporting/{kind}/{material_id}/source?revision=...&unit_id=...` | Preview an exact supporting source unit and available timing/page information |
+| GET | `/api/supporting/{kind}/{material_id}/original?revision=...` | Read the preserved original for the exact supporting source version |
+| GET | `/api/supporting/{kind}/{material_id}/legacy-analysis` | Read retained legacy analysis without treating it as verified generation evidence |
 | GET/POST | `/api/courses/{course_id}/foundation` · `/api/courses/{course_id}/foundation/confirm` | Read readiness or confirm the displayed completed lecture-set revision |
 | GET | `/api/files/serve?path=...` | Serve an owned upload through Firebase token authentication |
-| GET | `/api/audio/{rec_id}/pdf` | Download a recording's analysis (summary, hints, emphasis, chapters) as a PDF |
+| GET | `/api/audio/{rec_id}/pdf` | Download retained legacy structured audio/note analysis; returns 409 when those insights are unavailable |
 | GET/DELETE | `/api/tutorials/{course_id}` · `/api/tutorials/{id}` | List / delete course tutorials |
 | POST | `/api/exams/generate-enhanced` | Generate an exam (selected docs + recordings + past exams + tutorials, total marks) |
 | GET | `/api/exams/{id}/pdf` | Recompile + serve the watermarked exam PDF |
@@ -373,26 +422,19 @@ New uploads are private and served through the authenticated file endpoint. The 
 `firestore.rules` must be published to the intended Firebase project before client-side
 write restrictions apply there. Existing public blobs require a separate ACL cleanup.
 
-Source-first implementation reports cover backend extraction/library/jobs/scope/agent
-integration and frontend stages/citations/lifecycle regressions. Tests use deterministic
-provider stubs and local or simulated cloud boundaries; they do not delete live accounts
-or spend credits. They establish wiring and guarded behavior, not live provider/cloud
-performance. After the 15 October review fixes, 856 backend tests plus 6 subtests passed,
-with one existing Cloud durability boundary skip; 166 frontend tests, TypeScript and the
-production build passed. Lint retains the existing layout-font warning. Installed-compiler
-checks and visual inspection passed for English, Arabic and mixed structured answer
-fallbacks, including code indentation; this does not establish every possible PDF input.
-The four whole-branch findings are fixed and independently approved; the reviewer also
-passed 21 focused backend and 5 focused frontend regressions on the final code.
-The backend is running locally at `127.0.0.1:8000` and its root health response is Online.
-The verified `.next-source-verify` production build is served locally at `localhost:3000`;
-reload and sign-up/sign-in navigation passed with no new browser errors after 15:49 UTC.
-A development-only first-load `layout.js` syntax error recurred at 15:47 UTC, then reload
-worked. The generated file and two later served bodies matched and parsed, including all
-30 embedded module bodies; the failed response was not captured and the cause remains
-unknown. No source fix is claimed for that development error. Browser checks remain
-signed out; no authenticated upload/generation, live provider/cloud transaction or
-short-slide/merged-exam quality, latency or cost improvement is claimed from these gates.
+Regression tests cover original extraction, immutable source storage, recovery, alignment,
+source selection, generation inputs, saved versions, reports and citation lifecycles.
+They use deterministic provider stubs and local or simulated cloud boundaries; they do
+not delete live accounts or spend credits. These tests establish wiring and guarded
+behavior, not live provider accuracy or cloud concurrency performance. The existing
+environment-dependent cloud durability test is reported separately when skipped.
+
+Evaluate real output against selected lecture originals and representative merged exams,
+tutorial sheets, recordings and typed notes. Check question/subpart counts, required
+context, source citations, attribution and unresolved coverage. Measure latency and cost
+on those actual inputs; a shorter guide or passing mocked tests do not establish an
+improvement. A health response or signed-out browser check does not establish an
+authenticated upload-to-generation flow.
 
 ## Processing and deployment limits
 
@@ -413,11 +455,19 @@ short-slide/merged-exam quality, latency or cost improvement is claimed from the
 - Document work uses a bounded local executor plus durable records, claim-token leases,
   checkpoints and recovery. Guide failure reuses completed preparation; incomplete
   preparation restarts from its preserved original. Failed/legacy jobs require explicit
-  retry/upgrade. Audio retains its separate bounded worker lifecycle. Canceling a browser
+  retry/upgrade. Supporting work has its own durable queue with two workers by default,
+  bounded pending work and periodic recovery. New recording jobs use this pipeline;
+  retained legacy audio workers cannot overwrite an upgraded material. Canceling a browser
   request prevents stale UI updates but does not guarantee cancellation of provider work.
+- Supporting extraction accounts for every source location, with 160-page and
+  600,000-character document limits, bounded requests of eight images and 24,000 characters,
+  and a default 512 returned model-call budget per attempt. Audio segments are not treated
+  as PDF pages. Report storage chunks contain at most 100 items and 500,000 bytes. An exhausted
+  budget or unresolved source coverage produces actionable failure, not silent truncation.
 - Public hosting needs explicit backend bind/CORS configuration for the intended HTTPS
-  frontend and durable storage. Document acceptance requires a durably preserved original;
-  other existing upload paths retain their own storage behavior. Missing derived lecture
+  frontend and durable storage. File and notes acceptance requires a durably preserved
+  original; URL jobs capture the media once and retry against those exact bytes after
+  capture succeeds. Missing derived lecture
   artifacts can be restored from a digest-verified preserved original, while a missing
   original requires restore/replace guidance. Local JSON fallback does not supply offline
   authentication or AI providers.
