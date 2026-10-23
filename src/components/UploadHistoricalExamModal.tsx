@@ -36,8 +36,6 @@ export default function UploadHistoricalExamModal({ courseId, onClose, onSuccess
       onClose={onClose}
       onSuccess={onSuccess}
       endpoint="/api/historical-exams/upload"
-      accent="#c8472f"
-      icon="📋"
       acceptExts={["pdf", "jpg", "jpeg", "png", "webp", "heic", "heif"]}
       acceptAttr="application/pdf,.pdf,image/*"
       heading="Upload past exams"

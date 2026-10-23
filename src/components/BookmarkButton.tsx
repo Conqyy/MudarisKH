@@ -1,6 +1,8 @@
 "use client";
 
 import { useAuth } from "@/lib/auth-context";
+import { useLang } from "@/lib/i18n";
+import Icon from "@/components/Icon";
 import {
   ActivityItem,
   toggleBookmark,
@@ -19,6 +21,7 @@ export default function BookmarkButton({
   className = "",
 }: Props) {
   const { user } = useAuth();
+  const { t } = useLang();
   const marked = useIsBookmarked(item?.kind, item?.id);
 
   if (!item) return null;
@@ -30,22 +33,16 @@ export default function BookmarkButton({
     toggleBookmark(user.uid, item);
   };
 
-  const dims =
-    size === "sm" ? "w-7 h-7 text-sm" : "w-9 h-9 text-base";
-
   return (
     <button
       type="button"
       onClick={click}
-      title={marked ? "Remove bookmark" : "Add bookmark"}
-      aria-label={marked ? "Remove bookmark" : "Add bookmark"}
-      className={`${dims} rounded-full border transition flex items-center justify-center flex-shrink-0 ${
-        marked
-          ? "bg-gold/15 border-gold text-gold"
-          : "border-line text-ink-mute hover:bg-bg-alt hover:text-ink"
-      } ${className}`}
+      title={t(marked ? "Remove bookmark" : "Add bookmark")}
+      aria-label={t(marked ? "Remove bookmark" : "Add bookmark")}
+      aria-pressed={marked}
+      className={`icon-button ${marked ? "is-active" : ""} ${className}`}
     >
-      {marked ? "★" : "☆"}
+      <Icon name="bookmark" size={size === "sm" ? 18 : 20} className={marked ? "fill-current" : ""} />
     </button>
   );
 }

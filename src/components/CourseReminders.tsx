@@ -1,5 +1,8 @@
 "use client";
 
+import Icon from "@/components/Icon";
+import { REMINDER_ICONS } from "@/components/material-presentation";
+
 import { useState, FormEvent } from "react";
 import { CourseReminder, ReminderType } from "@/lib/firestore-helpers";
 import { useLang } from "@/lib/i18n";
@@ -13,19 +16,18 @@ interface Props {
 
 const TYPE_META: Record<
   ReminderType,
-  { label: string; icon: string; chip: string }
+  { label: string; chip: string }
 > = {
-  quiz: { label: "Quiz", icon: "✏️", chip: "bg-gold/10 text-gold" },
-  midterm: { label: "Midterm", icon: "📝", chip: "bg-accent/10 text-accent" },
-  final: { label: "Final", icon: "🎓", chip: "bg-accent/10 text-accent" },
-  assignment: { label: "Assignment", icon: "📌", chip: "bg-sage/10 text-sage" },
-  project: { label: "Project", icon: "🧩", chip: "bg-[#3d7a8c]/10 text-[#3d7a8c]" },
+  quiz: { label: "Quiz", chip: "bg-gold/10 text-gold" },
+  midterm: { label: "Midterm", chip: "bg-accent/10 text-accent" },
+  final: { label: "Final", chip: "bg-accent/10 text-accent" },
+  assignment: { label: "Assignment", chip: "bg-sage/10 text-sage" },
+  project: { label: "Project", chip: "bg-accent/10 text-accent" },
   presentation: {
     label: "Presentation",
-    icon: "🎤",
-    chip: "bg-[#8a6fa7]/10 text-[#8a6fa7]",
+    chip: "bg-accent/10 text-accent",
   },
-  other: { label: "Other", icon: "🔔", chip: "bg-bg-alt text-ink-soft" },
+  other: { label: "Other", chip: "bg-bg-alt text-ink-soft" },
 };
 
 const TYPE_ORDER: ReminderType[] = [
@@ -59,8 +61,8 @@ function dueLabel(
 ): { text: string; tone: string } | null {
   const d = daysUntil(dateStr);
   if (d === null) return null;
-  if (d < 0) return { text: `${t("Overdue")} ${Math.abs(d)}${t("d")}`, tone: "text-accent" };
-  if (d === 0) return { text: t("Today"), tone: "text-accent" };
+  if (d < 0) return { text: `${t("Overdue")} ${Math.abs(d)}${t("d")}`, tone: "text-danger" };
+  if (d === 0) return { text: t("Today"), tone: "text-danger" };
   if (d === 1) return { text: t("Tomorrow"), tone: "text-gold" };
   if (d <= 7) return { text: `${t("In")} ${d}${t("d")}`, tone: "text-gold" };
   return { text: `${t("In")} ${d}${t("d")}`, tone: "text-ink-mute" };
@@ -176,27 +178,27 @@ export default function CourseReminders({ reminders, onChange }: Props) {
   return (
     <section className="mb-12">
       {actionError && <p role="alert" className="text-sm text-accent mb-3">{actionError}</p>}
-      <div className="flex items-center justify-between mb-6">
-        <h2 className="font-serif text-2xl font-medium tracking-tight flex items-center gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+        <h2 className="section-heading flex flex-wrap items-center gap-3">
           {t("Reminders")}
           {openCount > 0 && (
-            <span className="text-xs font-mono text-accent bg-accent/10 px-2.5 py-1 rounded-full">
+            <span className="text-xs tabular-nums text-accent bg-accent/10 px-2.5 py-1 rounded-full">
               {openCount} {t("upcoming")}
             </span>
           )}
         </h2>
         <button
           onClick={openAdd}
-          className="bg-ink text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-accent transition flex items-center gap-2"
+          className="ui-button primary"
         >
-          <span>+</span> {t("Add")}
+          <Icon name="plus" size={17} /> {t("Add")}
         </button>
       </div>
 
       {reminders.length === 0 ? (
-        <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
-          <div className="text-4xl mb-3 opacity-60">🔔</div>
-          <h3 className="font-serif text-xl font-medium mb-2">
+        <div className="ui-panel p-8 text-center">
+          <span className="material-upload-symbol mx-auto mb-4"><Icon name="calendar" size={26} /></span>
+          <h3 className="font-sans text-xl font-medium mb-2">
             {t("No reminders yet")}
           </h3>
           <p className="text-ink-soft text-sm mb-5 max-w-md mx-auto">
@@ -204,20 +206,20 @@ export default function CourseReminders({ reminders, onChange }: Props) {
           </p>
           <button
             onClick={openAdd}
-            className="bg-ink text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-accent transition"
+            className="ui-button primary"
           >
-            + {t("Add your first reminder")}
+            <Icon name="plus" size={17} /> {t("Add your first reminder")}
           </button>
         </div>
       ) : (
-        <div className="bg-paper border border-line rounded-3xl overflow-hidden">
+        <div className="ui-panel overflow-hidden">
           {sorted.map((r, idx) => {
             const meta = TYPE_META[r.type];
             const due = dueLabel(r.date, t);
             return (
               <div
                 key={r.id}
-                className={`group flex items-center gap-4 p-5 transition ${
+                className={`material-reminder-row ${
                   idx !== 0 ? "border-t border-line" : ""
                 } ${r.done ? "opacity-55" : "hover:bg-bg-alt"}`}
               >
@@ -225,30 +227,24 @@ export default function CourseReminders({ reminders, onChange }: Props) {
                 <button
                   onClick={() => toggleDone(r.id)}
                   title={r.done ? t("Mark as not done") : t("Mark as done")}
-                  className={`w-6 h-6 rounded-full border flex items-center justify-center text-xs flex-shrink-0 transition ${
-                    r.done
-                      ? "bg-sage border-sage text-paper"
-                      : "border-line hover:border-accent text-transparent hover:text-accent"
-                  }`}
-                >
-                  ✓
-                </button>
+                  className="material-toggle" aria-pressed={r.done} aria-label={t(r.done ? "Mark as not done" : "Mark as done")}
+                ><Icon name="check" size={18} className={r.done ? "" : "opacity-0"} /></button>
 
                 {/* Type icon */}
                 <div className="w-9 h-9 rounded-xl bg-bg-alt flex items-center justify-center text-base flex-shrink-0">
-                  {meta.icon}
+                  <Icon name={REMINDER_ICONS[r.type]} size={18} />
                 </div>
 
                 {/* Title + meta */}
-                <div className="flex-1 min-w-0">
+                <div className="material-row-copy">
                   <div
-                    className={`font-medium truncate ${
+                    dir="auto" className={`font-semibold break-words ${
                       r.done ? "line-through text-ink-mute" : ""
                     }`}
                   >
                     {r.title}
                   </div>
-                  <div className="text-xs text-ink-mute font-mono mt-0.5 flex items-center gap-2 flex-wrap">
+                  <div className="text-xs text-ink-mute tabular-nums mt-0.5 flex items-center gap-2 flex-wrap">
                     <span
                       className={`px-2 py-0.5 rounded-full ${meta.chip}`}
                     >
@@ -267,7 +263,7 @@ export default function CourseReminders({ reminders, onChange }: Props) {
                       <span className={due.tone}>· {due.text}</span>
                     )}
                     {r.notes && (
-                      <span className="text-ink-mute/70 truncate">
+                      <span dir="auto" className="text-ink-soft break-words">
                         · {r.notes}
                       </span>
                     )}
@@ -279,17 +275,13 @@ export default function CourseReminders({ reminders, onChange }: Props) {
                   <button
                     onClick={() => openEdit(r)}
                     title={t("Edit")}
-                    className="w-8 h-8 rounded-full text-ink-mute hover:bg-bg-alt hover:text-ink transition flex items-center justify-center text-sm opacity-0 group-hover:opacity-100"
-                  >
-                    ✎
-                  </button>
+                    className="icon-button"
+                  ><Icon name="edit" size={17} /></button>
                   <button
                     onClick={() => remove(r)}
                     title={t("Delete")}
-                    className="w-8 h-8 rounded-full text-ink-mute hover:bg-accent hover:text-paper transition flex items-center justify-center text-sm opacity-0 group-hover:opacity-100"
-                  >
-                    🗑
-                  </button>
+                    className="icon-button danger"
+                  ><Icon name="trash" size={17} /></button>
                 </div>
               </div>
             );
@@ -301,22 +293,20 @@ export default function CourseReminders({ reminders, onChange }: Props) {
       {showForm && (
         <div
           ref={dialogRef} role="dialog" aria-modal="true" aria-label={editing ? t("Edit reminder") : t("New reminder")} tabIndex={-1}
-          className="fixed inset-0 bg-ink/50 backdrop-blur-md z-[100] flex items-center justify-center p-6 animate-fade-in"
+          className="dialog-overlay"
           onClick={closeForm}
         >
           <div
-            className="bg-paper rounded-3xl p-8 max-w-md w-full shadow-lift relative max-h-[90vh] overflow-y-auto"
+            className="dialog-panel material-dialog max-w-md"
             onClick={(e) => e.stopPropagation()}
           >
             <button
               onClick={closeForm}
               disabled={saving} aria-label={t("Close reminder")}
-              className="absolute top-5 right-5 text-2xl text-ink-soft hover:text-ink leading-none w-8 h-8 flex items-center justify-center rounded-full hover:bg-bg-alt transition"
-            >
-              ×
-            </button>
+              className="icon-button material-dialog-close"
+            ><Icon name="close" /></button>
 
-            <h2 className="font-serif text-2xl font-medium mb-1 tracking-tight">
+            <h2 className="font-sans text-2xl font-medium mb-1 tracking-tight">
               {editing ? t("Edit reminder") : t("New reminder")}
             </h2>
             <p className="text-ink-soft text-sm mb-6">
@@ -324,7 +314,7 @@ export default function CourseReminders({ reminders, onChange }: Props) {
             </p>
 
             {error && (
-              <div className="bg-accent/10 border border-accent text-accent text-sm rounded-xl p-3 mb-5">
+              <div role="alert" className="material-inline-notice danger mb-5">
                 {error}
               </div>
             )}
@@ -341,13 +331,14 @@ export default function CourseReminders({ reminders, onChange }: Props) {
                       key={rt}
                       type="button"
                       onClick={() => setType(rt)}
-                      className={`px-3 py-1.5 rounded-full text-xs font-medium border transition flex items-center gap-1.5 ${
+                      aria-pressed={type === rt}
+                      className={`ui-button text-xs ${
                         type === rt
                           ? "bg-ink text-paper border-ink"
                           : "border-line text-ink-soft hover:bg-bg-alt"
                       }`}
                     >
-                      <span>{TYPE_META[rt].icon}</span>
+                      <Icon name={REMINDER_ICONS[rt]} size={15} />
                       {t(TYPE_META[rt].label)}
                     </button>
                   ))}
@@ -356,15 +347,15 @@ export default function CourseReminders({ reminders, onChange }: Props) {
 
               {/* Title */}
               <div>
-                <label className="block text-sm font-medium text-ink-soft mb-2">
+                <label htmlFor="reminder-title" className="block text-sm font-medium text-ink-soft mb-2">
                   {t("Title")} <span className="text-accent">*</span>
                 </label>
-                <input
+                <input id="reminder-title"
                   type="text"
                   value={title}
                   onChange={(e) => setTitle(e.target.value)}
                   placeholder={t("e.g. Quiz 2 — Chapters 3–4")}
-                  className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition"
+                  className="ui-input w-full"
                   maxLength={100}
                   autoFocus
                 />
@@ -373,42 +364,42 @@ export default function CourseReminders({ reminders, onChange }: Props) {
               {/* Date + time */}
               <div className="flex gap-3">
                 <div className="flex-1">
-                  <label className="block text-sm font-medium text-ink-soft mb-2">
+                  <label htmlFor="reminder-date" className="block text-sm font-medium text-ink-soft mb-2">
                     {t("Date")}{" "}
                     <span className="text-ink-mute font-normal">({t("optional")})</span>
                   </label>
-                  <input
+                  <input id="reminder-date"
                     type="date"
                     value={date}
                     onChange={(e) => setDate(e.target.value)}
-                    className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition"
+                    className="ui-input w-full"
                   />
                 </div>
                 <div className="w-32">
-                  <label className="block text-sm font-medium text-ink-soft mb-2">
+                  <label htmlFor="reminder-time" className="block text-sm font-medium text-ink-soft mb-2">
                     {t("Time")}
                   </label>
-                  <input
+                  <input id="reminder-time"
                     type="time"
                     value={time}
                     onChange={(e) => setTime(e.target.value)}
-                    className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition"
+                    className="ui-input w-full"
                   />
                 </div>
               </div>
 
               {/* Notes */}
               <div>
-                <label className="block text-sm font-medium text-ink-soft mb-2">
+                <label htmlFor="reminder-notes" className="block text-sm font-medium text-ink-soft mb-2">
                   {t("Notes")}{" "}
                   <span className="text-ink-mute font-normal">({t("optional")})</span>
                 </label>
-                <textarea
+                <textarea id="reminder-notes"
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                   placeholder={t("e.g. Closed book, bring calculator")}
                   rows={2}
-                  className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition resize-none"
+                  className="ui-input w-full resize-none"
                   maxLength={200}
                 />
               </div>
@@ -417,14 +408,14 @@ export default function CourseReminders({ reminders, onChange }: Props) {
                 <button
                   type="button"
                   onClick={closeForm}
-                  className="flex-1 border border-line py-3 rounded-full text-sm font-medium hover:bg-bg-alt transition"
+                  className="ui-button secondary flex-1"
                 >
                   {t("Cancel")}
                 </button>
                 <button
                   type="submit"
                   disabled={saving}
-                  className="flex-1 bg-ink text-paper py-3 rounded-full text-sm font-medium hover:bg-accent transition"
+                  className="ui-button primary flex-1"
                 >
                   {editing ? t("Save changes") : t("Add reminder")}
                 </button>

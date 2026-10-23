@@ -3,8 +3,10 @@
 import { useEffect, useState, useRef } from "react";
 import { useRouter, useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import Navbar from "@/components/Navbar";
-import Sidebar from "@/components/Sidebar";
+import AppShell from "@/components/AppShell";
+import Icon from "@/components/Icon";
+import CourseJourney from "@/components/CourseJourney";
+import { resolveCourseView } from "@/lib/course-navigation";
 import EditCourseModal from "@/components/EditCourseModal";
 import BookmarkButton from "@/components/BookmarkButton";
 import { useAuth } from "@/lib/auth-context";
@@ -43,14 +45,6 @@ import { kindForRow } from "@/lib/supporting-materials";
 import HistoricalExamTypeSelect from "@/components/HistoricalExamTypeSelect";
 import { EXAM_GROUP_LABELS, HISTORICAL_EXAM_TYPES, HistoricalExamType } from "@/lib/historical-exam-types";
 
-function StudyAction({ ready, href, label, className, reason }: { ready: boolean; href: string; label: string; className: string; reason: string }) {
-  return ready ? <Link href={href} className={className}>{label} →</Link> : (
-    <div>
-      <p className="mb-3 text-xs text-ink-soft">{reason}</p>
-      <button disabled aria-describedby="foundation-lock-reason" className={`${className} w-full opacity-50 cursor-not-allowed`}><span aria-hidden="true">🔒</span> {label}</button>
-    </div>
-  );
-}
 // Reorder an array of items to match a list of ids.
 function applyOrder<T extends { id: string }>(
   items: T[],
@@ -66,6 +60,7 @@ export default function CoursePage() {
   const params = useParams();
   const searchParams = useSearchParams();
   const courseId = params.id as string;
+  const view = resolveCourseView(searchParams || new URLSearchParams());
   const { t } = useLang();
   const { foundation, loading: foundationLoading, error: foundationError, refresh: refreshFoundation, confirm: confirmFoundation } = useCourseFoundation(courseId);
 
@@ -117,7 +112,7 @@ export default function CoursePage() {
 
   useEffect(() => {
     if (!pageLoading && searchParams?.get("section") === "documents") {
-      document.getElementById("documents")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+      document.getElementById("documents")?.scrollIntoView?.({ behavior: "auto", block: "start" });
     }
   }, [pageLoading, searchParams]);
 
@@ -492,151 +487,28 @@ export default function CoursePage() {
     );
   };
 
-  if (loadError && !pageLoading) return <><Navbar /><div className="pt-28 px-6 text-center" role="alert"><p>{loadError}</p><button onClick={() => loadData()} className="mt-4 underline">Retry loading</button></div></>;
-
-  if (loading || pageLoading) {
-    return (
-      <>
-        <Navbar />
-        <div className="pt-20 min-h-screen flex items-center justify-center">
-          <div className="font-mono text-sm text-ink-mute">Loading…</div>
-        </div>
-      </>
-    );
-  }
-
+  if (loadError && !pageLoading) return <AppShell courses={allCourses}><main className="workspace-main"><div role="alert" className="ui-notice danger mt-8"><Icon name="alert" /><div><p>{loadError}</p><button onClick={() => void loadData()} className="ui-button secondary mt-3">{t("Retry loading")}</button></div></div></main></AppShell>;
+  if (loading || pageLoading) return <AppShell courses={allCourses}><main className="workspace-main"><div className="course-loading"><Icon name="loader" className="animate-spin" /><p>{t("Loading…")}</p></div></main></AppShell>;
   if (!user) return null;
+  if (!course) return <AppShell courses={allCourses}><main className="workspace-main"><div className="dashboard-empty ui-panel mt-8"><Icon name="search" size={30} /><h1>{t("Course not found")}</h1><p>{t("This course may have been deleted or doesn't exist.")}</p><Link href="/dashboard" className="ui-button primary">{t("Back to Dashboard")}</Link></div></main></AppShell>;
 
-  if (!course) {
-    return (
-      <>
-        <Navbar />
-        <div className="pt-20 min-h-screen flex items-center justify-center">
-          <div className="text-center max-w-md px-6">
-            <div className="text-6xl mb-6">🔍</div>
-            <h1 className="font-serif text-3xl font-medium mb-3">
-              Course not found
-            </h1>
-            <p className="text-ink-soft mb-8">
-              This course may have been deleted or doesn&apos;t exist.
-            </p>
-            <Link
-              href="/dashboard"
-              className="inline-block bg-ink text-paper px-6 py-3 rounded-full text-sm font-medium hover:bg-accent transition"
-            >
-              ← Back to Dashboard
-            </Link>
+  return (<>
+    <AppShell courses={allCourses} course={course} courseId={courseId} activeTab={view}>
+      <main className="workspace-main course-page">
+        <header className="page-header">
+          <div><div className="course-page-code"><span className="course-color-dot" style={{ background: course.color }} />{course.code}</div><h1 className="page-heading">{course.title}</h1><p className="page-subtitle flex items-center gap-2"><Icon name="user" size={15} />{course.instructor || "—"}</p></div>
+          <div className="flex flex-wrap items-center gap-2">
+            <BookmarkButton item={{ kind: "course", id: course.id, title: course.code + " — " + course.title, href: "/course/" + course.id, courseCode: course.code, courseColor: course.color }} />
+            <button className="ui-button secondary" onClick={() => setShowEdit(true)}><Icon name="edit" size={15} />{t("Edit")}</button>
+            <button className="icon-button danger" aria-label={t("Delete")} title={t("Delete course")} onClick={handleDelete}><Icon name="trash" size={17} /></button>
           </div>
-        </div>
-      </>
-    );
-  }
-
-  const completedDocs = documents.filter((d) => d.status === "completed").length;
-  const completedHist = historicalExams.filter((h) => h.status === "completed").length;
-  const examReady = foundationReady && completedDocs > 0 && completedHist > 0;
-
-  return (
-    <>
-      <Navbar />
-
-      <div className="pt-20 flex">
-        <Sidebar courses={allCourses} />
-
-        <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-7xl mx-auto w-full">
-          {/* Breadcrumb */}
-          <div className="my-8">
-            <Link
-              href="/dashboard"
-              className="text-xs font-mono text-ink-soft hover:text-accent transition"
-            >
-              ← Dashboard
-            </Link>
-          </div>
-
-          {/* Course Header */}
-          <div
-            className="bg-paper border border-line rounded-3xl p-8 md:p-10 mb-10 relative overflow-hidden"
-            style={{ borderTop: `6px solid ${course.color}` }}
-          >
-            <div className="absolute top-6 right-6 flex gap-2 items-center">
-              <BookmarkButton
-                item={{
-                  kind: "course",
-                  id: course.id,
-                  title: `${course.code} — ${course.title}`,
-                  href: `/course/${course.id}`,
-                  courseCode: course.code,
-                  courseColor: course.color,
-                }}
-                size="sm"
-              />
-              <button
-                onClick={() => setShowEdit(true)}
-                className="px-4 py-2 border border-line rounded-full text-xs font-medium hover:bg-bg-alt transition"
-              >
-                ✎ Edit
-              </button>
-              <button
-                onClick={handleDelete}
-                className="px-4 py-2 border border-line rounded-full text-xs font-medium text-ink-mute hover:bg-accent hover:text-paper hover:border-accent transition"
-              >
-                Delete
-              </button>
-            </div>
-
-            <div className="font-mono text-xs text-ink-mute uppercase tracking-widest mb-3">
-              {course.code}
-            </div>
-            <h1 className="font-serif text-3xl md:text-5xl font-medium tracking-tight leading-tight mb-3 pr-32">
-              {course.title}
-            </h1>
-            <div className="flex flex-wrap gap-x-6 gap-y-2 text-ink-soft text-sm">
-              <span className="flex items-center gap-2">
-                <span className="opacity-60">👤</span>
-                {course.instructor}
-              </span>
-            </div>
-          </div>
-
-
-          <CourseFoundationGate courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} onRetry={refreshFoundation} />
-          {!foundationReady && <p id="foundation-lock-reason" className="mb-6 text-sm text-ink-soft">{lockReason}</p>}
-          {foundation?.state === "confirmation_required" && !foundationLoading && !documentChanging && !showDocUpload && (
-            <div className="mb-8 bg-paper border border-sage/30 rounded-2xl p-6">
-              <p className="text-sm text-ink-soft mb-4">{t("Upload every lecture document you intend to study before confirming. Adding, deleting, or reanalyzing a document will require confirmation again.")}</p>
-              <button disabled={!stagesComplete} onClick={() => { if (stagesComplete) void confirmFoundation(); }} className="disabled:opacity-50 disabled:cursor-not-allowed bg-sage text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition">{t("I've uploaded all lecture documents")}</button>
-            </div>
-          )}
-
-          {/* Exam readiness bar */}
-          {foundationReady && <div className="mb-12 bg-paper border border-line rounded-2xl px-6 py-4 flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <span
-                className={`w-2.5 h-2.5 rounded-full ${
-                  examReady ? "bg-sage" : "bg-gold"
-                }`}
-              />
-              <span className="text-sm text-ink-soft">
-                {examReady ? (
-                  <>{t("This course is")} <span className="text-sage font-medium">{t("exam-ready")}</span> {t("— documents and past exams analyzed.")}</>
-                ) : completedDocs === 0 ? (
-                  t("Upload lecture documents to start building practice exams.")
-                ) : completedHist === 0 ? (
-                  t("Add a past exam so generated exams match its format.")
-                ) : (
-                  t("Ready to generate practice exams.")
-                )}
-              </span>
-            </div>
-          </div>}
-
-          {/* Reminders */}
-          <CourseReminders
-            reminders={course.reminders || []}
-            onChange={handleRemindersChange}
-          />
-
+        </header>
+        {view === "overview" ? <>
+          <CourseJourney courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} ready={foundationReady}
+            onRetry={refreshFoundation} onUpload={() => setShowDocUpload(true)} onConfirm={confirmFoundation} canConfirm={stagesComplete}
+            showConfirmation={foundation?.state === "confirmation_required" && !foundationLoading && !documentChanging && !showDocUpload}
+            supportCount={historicalExams.length + tutorials.length + audioRecordings.length} />
+          <div className="course-overview-bottom"><div><CourseReminders reminders={course.reminders || []} onChange={handleRemindersChange} /></div><div className="course-intelligence">
           {/* Intelligence Summary */}
           {(documents.some(d => d.status === "completed") ||
             audioRecordings.some(a => a.status === "completed") ||
@@ -644,39 +516,39 @@ export default function CoursePage() {
             tutorials.some(t => t.status === "completed")) && (
             <section className="mb-12">
               <div className="bg-paper border border-line rounded-3xl p-7">
-                <h2 className="font-serif text-2xl font-medium tracking-tight mb-4">
+                <h2 className="font-sans text-2xl font-medium tracking-tight mb-4">
                   {t("Intelligence Summary")}
                 </h2>
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   <div className="bg-bg rounded-2xl p-4 text-center">
-                    <div className="font-serif text-2xl font-medium text-sage">
+                    <div className="font-sans text-2xl font-medium text-sage">
                       {documents.filter(d => d.status === "completed").length}
                     </div>
-                    <div className="text-xs text-ink-mute font-mono mt-1">{t("Documents")}</div>
+                    <div className="text-xs text-ink-mute font-sans mt-1">{t("Documents")}</div>
                   </div>
                   <div className="bg-bg rounded-2xl p-4 text-center">
-                    <div className="font-serif text-2xl font-medium text-accent">
+                    <div className="font-sans text-2xl font-medium text-accent">
                       {historicalExams.filter(h => h.status === "completed").length}
                     </div>
-                    <div className="text-xs text-ink-mute font-mono mt-1">{t("Past Exams")}</div>
+                    <div className="text-xs text-ink-mute font-sans mt-1">{t("Past Exams")}</div>
                   </div>
                   <div className="bg-bg rounded-2xl p-4 text-center">
-                    <div className="font-serif text-2xl font-medium text-[#3f6f7d]">
+                    <div className="font-sans text-2xl font-medium text-accent">
                       {tutorials.filter(t => t.status === "completed").length}
                     </div>
-                    <div className="text-xs text-ink-mute font-mono mt-1">{t("Tutorials")}</div>
+                    <div className="text-xs text-ink-mute font-sans mt-1">{t("Tutorials")}</div>
                   </div>
                   <div className="bg-bg rounded-2xl p-4 text-center">
-                    <div className="font-serif text-2xl font-medium text-gold">
+                    <div className="font-sans text-2xl font-medium text-gold">
                       {audioRecordings.filter(a => a.status === "completed").length}
                     </div>
-                    <div className="text-xs text-ink-mute font-mono mt-1">{t("Audio")}</div>
+                    <div className="text-xs text-ink-mute font-sans mt-1">{t("Audio")}</div>
                   </div>
                 </div>
 
                 {historicalExams.some(h => h.status === "completed" && h.analysis?.topicWeights?.length) && (
                   <div className="mt-4 pt-4 border-t border-line">
-                    <div className="text-xs font-mono text-ink-mute uppercase tracking-widest mb-2">{t("Top Exam Topics")}</div>
+                    <div className="text-xs font-sans text-ink-mute  mb-2">{t("Top Exam Topics")}</div>
                     <div className="flex flex-wrap gap-2">
                       {historicalExams
                         .filter(h => h.status === "completed" && h.analysis?.topicWeights)
@@ -693,7 +565,7 @@ export default function CoursePage() {
 
                 {tutorials.some(t => t.status === "completed" && t.analysis?.problems?.length) && (
                   <div className="mt-4 pt-4 border-t border-line">
-                    <div className="text-xs font-mono text-ink-mute uppercase tracking-widest mb-2">
+                    <div className="text-xs font-sans text-ink-mute  mb-2">
                       {t("Practice Problems · likely to reappear with new numbers")}
                     </div>
                     <div className="flex flex-wrap gap-2">
@@ -714,7 +586,7 @@ export default function CoursePage() {
                           <span
                             key={i}
                             className="text-xs px-3 py-1 rounded-full"
-                            style={{ backgroundColor: "#3f6f7d1a", color: "#3f6f7d" }}
+                            style={{ backgroundColor: "rgb(var(--c-depth))", color: "rgb(var(--c-accent))" }}
                           >
                             {concept}
                           </span>
@@ -725,7 +597,7 @@ export default function CoursePage() {
 
                 {audioRecordings.some(a => a.status === "completed" && a.insights?.examHints?.length) && (
                   <div className="mt-4 pt-4 border-t border-line">
-                    <div className="text-xs font-mono text-ink-mute uppercase tracking-widest mb-2">{t("Exam Hints")}</div>
+                    <div className="text-xs font-sans text-ink-mute  mb-2">{t("Exam Hints")}</div>
                     <div className="space-y-1.5">
                       {audioRecordings
                         .filter(a => a.status === "completed" && a.insights?.examHints)
@@ -744,82 +616,21 @@ export default function CoursePage() {
             </section>
           )}
 
-          {/* Study tools */}
-          <section className="mb-12 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-            <div className="bg-paper border border-line rounded-3xl p-7 flex flex-col justify-between gap-5">
-              <div>
-                <div className="text-2xl mb-2">🎓</div>
-                <h2 className="font-serif text-xl font-medium tracking-tight mb-1">
-                  {t("AI Coach")}
-                </h2>
-                <p className="text-sm text-ink-soft">
-                  {t("Chat with a coach grounded in your documents, recordings, and past exams.")}
-                </p>
-              </div>
-              <StudyAction ready={foundationReady} reason={lockReason} label={t("Ask the Coach")}
-                href={`/course/${courseId}/tutor`}
-                className="bg-accent text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2"
-              />
-            </div>
-
-            <div className="bg-paper border border-line rounded-3xl p-7 flex flex-col justify-between gap-5">
-              <div>
-                <div className="text-2xl mb-2">📝</div>
-                <h2 className="font-serif text-xl font-medium tracking-tight mb-1">
-                  {t("Practice Exam")}
-                </h2>
-                <p className="text-sm text-ink-soft">
-                  {t("An AI exam from your documents, matched to your past exams.")}
-                </p>
-              </div>
-              <StudyAction ready={foundationReady} reason={lockReason} label={t("Generate Exam")}
-                href={`/course/${courseId}/exam`}
-                className="bg-[#3f6f7d] text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2"
-              />
-            </div>
-
-            <div className="bg-paper border border-line rounded-3xl p-7 flex flex-col justify-between gap-5">
-              <div>
-                <div className="text-2xl mb-2">🗂️</div>
-                <h2 className="font-serif text-xl font-medium tracking-tight mb-1">
-                  {t("Flashcards")}
-                </h2>
-                <p className="text-sm text-ink-soft">
-                  {t("Study cards weighted by past exams and lecture emphasis.")}
-                </p>
-              </div>
-              <StudyAction ready={foundationReady} reason={lockReason} label={t("Make Flashcards")}
-                href={`/course/${courseId}/flashcards`}
-                className="bg-sage text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2"
-              />
-            </div>
-
-            <div className="bg-paper border border-line rounded-3xl p-7 flex flex-col justify-between gap-5">
-              <div>
-                <div className="text-2xl mb-2">📝</div>
-                <h2 className="font-serif text-xl font-medium tracking-tight mb-1">
-                  {t("Summary")}
-                </h2>
-                <p className="text-sm text-ink-soft">
-                  {t("A structured study summary, focused on what your exams test.")}
-                </p>
-              </div>
-              <StudyAction ready={foundationReady} reason={lockReason} label={t("Make Summary")}
-                href={`/course/${courseId}/summary`}
-                className="bg-gold text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2"
-              />
-            </div>
-          </section>
-
+          </div></div>
+        </> : <div className="course-materials">
+          <div className="section-heading"><div><h2>{t("Course materials")}</h2><p className="page-subtitle">{t("Your lecture foundation and supporting sources, in one place.")}</p></div><Link href={"/course/" + courseId} className="ui-button ghost">{t("Back to overview")}<Icon name="arrow-right" size={15} /></Link></div>
+          <CourseFoundationGate courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} onRetry={refreshFoundation} />
+          {!foundationReady && <p id="foundation-lock-reason" className="text-sm text-ink-soft mb-4">{lockReason}</p>}
+          <nav className="materials-groups" aria-label={t("Material groups")}><a href="#documents"><Icon name="file" size={17} />{t("Documents")}<span>{documents.length}</span></a><a href="#past-exams"><Icon name="exam" size={17} />{t("Past Exams")}<span>{historicalExams.length}</span></a><a href="#tutorials"><Icon name="book" size={17} />{t("Tutorials")}<span>{tutorials.length}</span></a><a href="#recordings"><Icon name="audio" size={17} />{t("Audio Recordings")}<span>{audioRecordings.length}</span></a></nav>
           {/* Documents Section */}
           <section id="documents" className="mb-12 scroll-mt-24" aria-label={t("Documents")}>
             <div className="flex items-center justify-between mb-6">
-              <h2 className="font-serif text-2xl font-medium tracking-tight">
+              <h2 className="font-sans text-2xl font-medium tracking-tight">
                 {t("Documents")}
               </h2>
               <button
                 onClick={() => setShowDocUpload(true)}
-                className="bg-sage text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2"
+                className="ui-button primary"
               >
                 <span>+</span> {t("Upload")}
               </button>
@@ -827,8 +638,8 @@ export default function CoursePage() {
 
             {documents.length === 0 ? (
               <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
-                <div className="text-4xl mb-3 opacity-60">📄</div>
-                <h3 className="font-serif text-xl font-medium mb-2">
+                <div className="text-4xl mb-3 opacity-60">{<Icon name="file" size={22} />}</div>
+                <h3 className="font-sans text-xl font-medium mb-2">
                   {t("No documents yet")}
                 </h3>
                 <p className="text-ink-soft text-sm mb-5 max-w-md mx-auto">
@@ -836,7 +647,7 @@ export default function CoursePage() {
                 </p>
                 <button
                   onClick={() => setShowDocUpload(true)}
-                  className="bg-sage text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition"
+                  className="ui-button primary"
                 >
                   + {t("Upload your first document")}
                 </button>
@@ -852,7 +663,7 @@ export default function CoursePage() {
                   handleDeleteItem("documents", doc.id, doc.title)
                 }
                 renderIcon={(doc) => (
-                  <div className="w-10 h-10 rounded-xl bg-sage/10 flex items-center justify-center text-sage text-sm font-mono uppercase">
+                  <div className="w-10 h-10 rounded-xl bg-sage/10 flex items-center justify-center text-sage text-sm font-sans uppercase">
                     {doc.fileType}
                   </div>
                 )}
@@ -883,17 +694,17 @@ export default function CoursePage() {
           </section>
 
           {/* Historical Exams Section */}
-          <section className="mb-12">
+          <section id="past-exams" className="mb-12">
             <div className="flex items-center justify-between mb-6">
-              <h2 className="font-serif text-2xl font-medium tracking-tight">
+              <h2 className="font-sans text-2xl font-medium tracking-tight">
                 {t("Past Exams")}
               </h2>
               <button
                 onClick={() => setShowHistExamUpload(true)}
                 disabled={!foundationReady} aria-describedby="foundation-lock-reason"
-                className="bg-accent text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="ui-button primary"
               >
-                <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload")}
+                <span aria-hidden="true">{<Icon name={foundationReady ? "plus" : "lock"} size={16} />}</span> {t("Upload")}
               </button>
             </div>
 
@@ -901,8 +712,8 @@ export default function CoursePage() {
 
             {historicalExams.length === 0 && (
               <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
-                <div className="text-4xl mb-3 opacity-60">📋</div>
-                <h3 className="font-serif text-xl font-medium mb-2">
+                <div className="text-4xl mb-3 opacity-60">{<Icon name="exam" size={22} />}</div>
+                <h3 className="font-sans text-xl font-medium mb-2">
                   {t("No past exams yet")}
                 </h3>
                 <p className="text-ink-soft text-sm mb-5 max-w-md mx-auto">
@@ -911,9 +722,9 @@ export default function CoursePage() {
                 <button
                   onClick={() => setShowHistExamUpload(true)}
                   disabled={!foundationReady} aria-describedby="foundation-lock-reason"
-                  className="bg-accent text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="ui-button primary"
                 >
-                  <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload your first past exam")}
+                  <span aria-hidden="true">{<Icon name={foundationReady ? "plus" : "lock"} size={16} />}</span> {t("Upload your first past exam")}
                 </button>
               </div>
             )}
@@ -923,7 +734,7 @@ export default function CoursePage() {
               if (type === "uncategorized" && !exams.length) return null;
               const label = type === "uncategorized" ? "Needs classification" : EXAM_GROUP_LABELS[type];
               return <section key={type} aria-label={t(label)} className="mb-6">
-                <h3 className="font-serif text-xl font-medium mb-3">{t(label)} <span className="font-mono text-sm text-ink-mute">{exams.length}</span></h3>
+                <h3 className="font-sans text-xl font-medium mb-3">{t(label)} <span className="font-sans text-sm text-ink-mute">{exams.length}</span></h3>
                 {type === "uncategorized" && <p className="text-sm text-ink-soft mb-3">{t("Assign a type before using these papers for exams or summaries.")}</p>}
               <ReorderableList<HistoricalExam>
                 items={exams}
@@ -934,7 +745,7 @@ export default function CoursePage() {
                 }
                 renderIcon={() => (
                   <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center text-accent">
-                    📋
+                    {<Icon name="exam" size={22} />}
                   </div>
                 )}
                 renderMeta={(exam) => (
@@ -955,10 +766,10 @@ export default function CoursePage() {
           </section>
 
           {/* Tutorials Section */}
-          <section className="mb-12">
+          <section id="tutorials" className="mb-12">
             <div className="flex items-center justify-between mb-6">
               <div>
-                <h2 className="font-serif text-2xl font-medium tracking-tight">
+                <h2 className="font-sans text-2xl font-medium tracking-tight">
                   {t("Tutorials")}
                 </h2>
                 <p className="text-ink-soft text-sm mt-1">
@@ -968,9 +779,9 @@ export default function CoursePage() {
               <button
                 onClick={() => setShowTutorialUpload(true)}
                 disabled={!foundationReady} aria-describedby="foundation-lock-reason"
-                className="bg-[#3f6f7d] text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2 flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="ui-button primary"
               >
-                <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload")}
+                <span aria-hidden="true">{<Icon name={foundationReady ? "plus" : "lock"} size={16} />}</span> {t("Upload")}
               </button>
             </div>
 
@@ -978,8 +789,8 @@ export default function CoursePage() {
 
             {tutorials.length === 0 ? (
               <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
-                <div className="text-4xl mb-3 opacity-60">✏️</div>
-                <h3 className="font-serif text-xl font-medium mb-2">
+                <div className="text-4xl mb-3 opacity-60">{<Icon name="book" size={22} />}</div>
+                <h3 className="font-sans text-xl font-medium mb-2">
                   {t("No tutorials yet")}
                 </h3>
                 <p className="text-ink-soft text-sm mb-5 max-w-md mx-auto">
@@ -988,9 +799,9 @@ export default function CoursePage() {
                 <button
                   onClick={() => setShowTutorialUpload(true)}
                   disabled={!foundationReady} aria-describedby="foundation-lock-reason"
-                  className="bg-[#3f6f7d] text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="ui-button primary"
                 >
-                  <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload your first tutorial")}
+                  <span aria-hidden="true">{<Icon name={foundationReady ? "plus" : "lock"} size={16} />}</span> {t("Upload your first tutorial")}
                 </button>
               </div>
             ) : (
@@ -1002,8 +813,8 @@ export default function CoursePage() {
                   handleDeleteItem("tutorials", tut.id, tut.title)
                 }
                 renderIcon={() => (
-                  <div className="w-10 h-10 rounded-xl bg-[#3f6f7d]/10 flex items-center justify-center text-[#3f6f7d]">
-                    ✏️
+                  <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center text-accent">
+                    {<Icon name="book" size={22} />}
                   </div>
                 )}
                 renderMeta={(tut) => (
@@ -1020,17 +831,17 @@ export default function CoursePage() {
           </section>
 
           {/* Audio Recordings Section */}
-          <section className="mb-12">
+          <section id="recordings" className="mb-12">
             <div className="flex items-center justify-between mb-6">
-              <h2 className="font-serif text-2xl font-medium tracking-tight">
+              <h2 className="font-sans text-2xl font-medium tracking-tight">
                 {t("Audio Recordings")}
               </h2>
               <button
                 onClick={() => setShowAudioUpload(true)}
                 disabled={!foundationReady} aria-describedby="foundation-lock-reason"
-                className="bg-gold text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="ui-button primary"
               >
-                <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload")}
+                <span aria-hidden="true">{<Icon name={foundationReady ? "plus" : "lock"} size={16} />}</span> {t("Upload")}
               </button>
             </div>
 
@@ -1038,8 +849,8 @@ export default function CoursePage() {
 
             {audioRecordings.length === 0 ? (
               <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
-                <div className="text-4xl mb-3 opacity-60">🎙️</div>
-                <h3 className="font-serif text-xl font-medium mb-2">
+                <div className="text-4xl mb-3 opacity-60">{<Icon name="audio" size={22} />}</div>
+                <h3 className="font-sans text-xl font-medium mb-2">
                   {t("No recordings yet")}
                 </h3>
                 <p className="text-ink-soft text-sm mb-5 max-w-md mx-auto">
@@ -1048,9 +859,9 @@ export default function CoursePage() {
                 <button
                   onClick={() => setShowAudioUpload(true)}
                   disabled={!foundationReady} aria-describedby="foundation-lock-reason"
-                  className="bg-gold text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="ui-button primary"
                 >
-                  <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload your first recording")}
+                  <span aria-hidden="true">{<Icon name={foundationReady ? "plus" : "lock"} size={16} />}</span> {t("Upload your first recording")}
                 </button>
               </div>
             ) : (
@@ -1063,7 +874,7 @@ export default function CoursePage() {
                 onDelete={(rec) => handleDeleteItem("audio", rec.id, rec.title)}
                 renderIcon={() => (
                   <div className="w-10 h-10 rounded-xl bg-gold/10 flex items-center justify-center text-gold">
-                    🎙️
+                    {<Icon name="audio" size={22} />}
                   </div>
                 )}
                 renderMeta={(rec) => (
@@ -1078,8 +889,10 @@ export default function CoursePage() {
             )}
           </section>
 
-        </main>
-      </div>
+
+        </div>}
+      </main>
+    </AppShell>
 
       {showEdit && (
         <EditCourseModal

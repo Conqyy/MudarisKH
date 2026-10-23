@@ -1,5 +1,6 @@
 "use client";
 
+import Icon from "@/components/Icon";
 import { useDialog } from "@/lib/use-dialog";
 
 import {
@@ -31,10 +32,9 @@ interface Props {
   onSuccess: () => void;
   /** Backend upload endpoint, e.g. "/api/documents/upload". */
   endpoint: string;
-  /** Accent color as a 6-digit hex, e.g. "#c8472f". */
-  accent: string;
-  /** Emoji shown on the dropzone / file rows. */
-  icon: string;
+  /** Legacy presentation props are accepted for existing consumers. */
+  accent?: string;
+  icon?: string;
   /** Allowed extensions (lowercase, no dot), e.g. ["pdf","pptx","docx"]. */
   acceptExts: string[];
   /** `accept` attribute for the file input. */
@@ -70,8 +70,6 @@ export default function MultiUploadModal({
   onClose,
   onSuccess,
   endpoint,
-  accent,
-  icon,
   acceptExts,
   acceptAttr,
   heading,
@@ -310,272 +308,54 @@ export default function MultiUploadModal({
   const isBusy = phase === "processing";
   const isDone = phase === "done";
 
-  const statusBadge = (s: FileStatus) => {
-    if (s === "done") return <span className="text-sage">● {t("Done")}</span>;
-    if (s === "accepted") return <span className="text-gold">● {t("Uploaded; analysis is queued.")}</span>;
-    if (s === "failed") return <span className="text-accent">● {t("Failed")}</span>;
-    if (s === "processing")
-      return (
-        <span style={{ color: accent }} className="flex items-center gap-1.5">
-          <span
-            className="w-3 h-3 border-2 rounded-full animate-spin"
-            style={{ borderColor: `${accent}40`, borderTopColor: accent }}
-          />
-          {t("Analyzing…")}
-        </span>
-      );
-    return <span className="text-ink-mute">● {t("Queued")}</span>;
+
+  const statusBadge = (status: FileStatus) => {
+    if (status === "done") return <span className="status-badge success">● {t("Done")}</span>;
+    if (status === "accepted") return <span className="status-badge warning">{t("Uploaded; analysis is queued.")}</span>;
+    if (status === "failed") return <span className="status-badge danger">{t("Failed")}</span>;
+    if (status === "processing") return <span className="status-badge info"><Icon name="loader" size={14} className="animate-spin" />{t(pollAccepted && completionMode === "analyzed" ? "Analyzing…" : "Uploading materials…")}</span>;
+    return <span className="status-badge">{t("Queued")}</span>;
   };
 
   return (
-    <div
-      ref={dialogRef} role="dialog" aria-modal="true" aria-label="Upload materials" tabIndex={-1} className="fixed inset-0 bg-ink/50 backdrop-blur-md z-[100] flex items-center justify-center p-6 animate-fade-in"
-      style={{ ["--accent" as any]: accent }}
-      onClick={() => {
-        if (phase === "select") onClose();
-      }}
-    >
-      <div
-        className="bg-paper rounded-3xl p-8 md:p-10 max-w-lg w-full shadow-lift relative max-h-[90vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <button
-          onClick={onClose}
-          aria-label="Close dialog"
-          disabled={isBusy}
-          className="absolute top-5 right-5 text-2xl text-ink-soft hover:text-ink leading-none w-8 h-8 flex items-center justify-center rounded-full hover:bg-bg-alt transition disabled:opacity-30 disabled:cursor-not-allowed"
-        >
-          &times;
-        </button>
-
-        {/* ============ SELECT PHASE ============ */}
-        {phase === "select" && (
-          <>
-            <h2 className="font-serif text-3xl font-medium mb-2 tracking-tight">
-              {t(heading)}
-            </h2>
-            <p className="text-ink-soft text-sm mb-7">{t(subtitle)}</p>
-            {selectionFields}
-
-            {error && (
-              <div
-                className="text-sm rounded-xl p-3 mb-5"
-                style={{ backgroundColor: `${accent}1a`, color: accent }}
-              >
-                {error}
-              </div>
-            )}
-
-            <div
-              onDragEnter={handleDrag}
-              onDragOver={handleDrag}
-              onDragLeave={handleDrag}
-              onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
-              className="border-2 border-dashed rounded-2xl p-7 text-center cursor-pointer transition mb-5"
-              style={{
-                borderColor: dragActive ? accent : undefined,
-                backgroundColor: dragActive ? `${accent}0d` : undefined,
-              }}
-            >
-              <div className="text-4xl mb-3 opacity-50">
-                {dragActive ? "📥" : icon}
-              </div>
-              <div className="font-serif text-lg mb-1">
-                {dragActive
-                  ? t("Drop your files here")
-                  : t("Drop files or click to browse")}
-              </div>
-              <div className="text-xs text-ink-mute">
-                {acceptExts.join(", ").toUpperCase()} · {maxSizeMB}MB ·{" "}
-                {t("select multiple")}
-              </div>
-
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept={acceptAttr}
-                onChange={handleFileChange}
-                className="hidden"
-              />
-            </div>
-
-            {items.length > 0 && (
-              <div className="border border-line rounded-2xl divide-y divide-line mb-5 max-h-56 overflow-y-auto">
-                {items.map((it, idx) => (
-                  <div
-                    key={`${it.file.name}-${idx}`}
-                    className="flex items-center gap-3 px-4 py-3"
-                  >
-                    <div
-                      className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
-                      style={{ backgroundColor: `${accent}1a` }}
-                    >
-                      {icon}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium truncate">
-                        {it.file.name}
-                      </div>
-                      <div className="text-xs text-ink-mute">
-                        {formatFileSize(it.file.size)}
-                      </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => removeFile(idx)}
-                      className="text-ink-mute hover:text-accent text-lg leading-none px-1"
-                      aria-label="Remove"
-                    >
-                      &times;
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <button
-              type="button"
-              onClick={startProcessing}
-              disabled={items.length === 0 || !selectionValid}
-              className="w-full bg-[var(--accent)] text-paper py-3.5 rounded-full font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {items.length > 0
-                ? `${t("Upload & Analyze")} (${items.length}) →`
-                : `${t("Upload & Analyze")} →`}
-            </button>
-
-            <p className="text-xs text-ink-mute text-center pt-3">
-              {t(
-                footerNote ||
-                  "Files are analyzed one at a time — about 15–30 seconds each."
-              )}
-            </p>
-          </>
-        )}
-
-        {/* ============ PROCESSING / DONE PHASE ============ */}
-        {(phase === "processing" || phase === "done") && (
-          <div className="text-center py-1">
-            {/* Counter ring */}
-            <div className="w-24 h-24 mx-auto mb-6 relative">
-              <div
-                className={`w-24 h-24 border-[3px] rounded-full ${
-                  isDone ? "" : "animate-spin-slow"
-                }`}
-                style={
-                  isDone
-                    ? { borderColor: "#6b7d5b" }
-                    : {
-                        borderColor: "rgb(var(--c-bg-alt))",
-                        borderTopColor: accent,
-                      }
-                }
-              />
-              <div
-                className="absolute inset-0 flex items-center justify-center font-mono font-semibold text-2xl"
-                style={{ color: isDone ? "#6b7d5b" : accent }}
-              >
-                {finishedCount}/{total}
-              </div>
-            </div>
-
-            <h2 className="font-serif text-2xl md:text-3xl font-medium mb-2 tracking-tight">
-              {isDone
-                ? failedCount > 0
-                  ? t("Finished with some issues")
-                  : t(completionMode === "queued" ? "Uploaded; analysis is queued." : "All files analyzed!")
-                : t(completionMode === "queued" ? "Uploading materials…" : "Mudaris is analyzing…")}
-            </h2>
-            <p className="text-ink-soft text-sm mb-2 px-2">
-              <span className="font-medium text-ink">{doneCount}</span> /{" "}
-              <span className="font-medium text-ink">{total}</span> {t(completionMode === "queued" ? "uploaded" : "done")}
-              {failedCount > 0 && (
-                <span className="text-accent"> · {failedCount} {t("failed")}</span>
-              )}
-            </p>
-            {!isDone && items[currentIndex] && (
-              <p className="text-ink-mute text-xs mb-6 px-2 truncate">
-                {t("Now")}: &ldquo;{items[currentIndex].file.name}&rdquo; (
-                {currentIndex + 1}/{total})
-              </p>
-            )}
-            {isDone && <div className="mb-4" />}
-
-            {/* Current-file step pipeline */}
-            {!isDone && (
-              <div className="bg-bg border border-line rounded-2xl p-4 text-left mb-5">
-                {steps.map((step, i) => {
-                  const stepDone = completed.has(step.id);
-                  const isActive = i === currentStep && !stepDone;
-                  const isPending = i > currentStep;
-                  return (
-                    <div
-                      key={step.id}
-                      className={`flex items-center gap-3 py-2 ${
-                        i < steps.length - 1 ? "border-b border-line" : ""
-                      } ${isPending ? "opacity-40" : "opacity-100"}`}
-                    >
-                      <div
-                        className="w-7 h-7 rounded-full flex items-center justify-center font-mono text-xs font-semibold flex-shrink-0 transition-all"
-                        style={
-                          stepDone
-                            ? { backgroundColor: "#6b7d5b", color: "#faf7f2" }
-                            : isActive
-                            ? { backgroundColor: accent, color: "#faf7f2" }
-                            : { backgroundColor: "rgb(var(--c-bg-alt))", color: "rgb(var(--c-ink-mute))" }
-                        }
-                      >
-                        {stepDone ? "✓" : i + 1}
-                      </div>
-                      <div className="flex-1 text-sm font-medium">
-                        {t(step.label)}
-                      </div>
-                      <div className="font-mono text-[11px] text-ink-mute flex-shrink-0">
-                        {stepDone
-                          ? t("done")
-                          : isActive
-                          ? t("in progress…")
-                          : t("queued")}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* File list with statuses */}
-            <div className="border border-line rounded-2xl divide-y divide-line text-left max-h-48 overflow-y-auto">
-              {items.map((it, idx) => (
-                <div
-                  key={`${it.file.name}-${idx}`}
-                  className="flex items-center gap-3 px-4 py-2.5"
-                >
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium truncate">
-                      {it.file.name}
-                    </div>
-                    {it.status === "failed" && it.error && (
-                      <div className="text-xs text-accent truncate">
-                        {it.error}
-                      </div>
-                    )}
-                  </div>
-                  <div className="text-xs font-medium flex-shrink-0">
-                    {statusBadge(it.status)}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <p className="text-xs text-ink-mute mt-5 font-mono">
-              {isDone
-                ? t("Done — closing…")
-                : t("One file at a time — please keep this open.")}
-            </p>
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Upload materials" tabIndex={-1} className="dialog-overlay" onClick={() => { if (phase === "select") onClose(); }}>
+      <div className="dialog-panel material-dialog max-w-xl" onClick={event => event.stopPropagation()}>
+        <button type="button" onClick={onClose} aria-label={t("Close dialog")} disabled={isBusy} className="icon-button material-dialog-close"><Icon name="close" /></button>
+        {phase === "select" ? <>
+          <h2>{t(heading)}</h2>
+          <p className="text-ink-soft text-sm mt-2 mb-6">{t(subtitle)}</p>
+          {selectionFields}
+          {error && <div role="alert" className="material-inline-notice danger">{error}</div>}
+          <div className="material-upload-drop" data-active={dragActive} onDragEnter={handleDrag} onDragOver={handleDrag} onDragLeave={handleDrag} onDrop={handleDrop}>
+            <span className="material-upload-symbol"><Icon name="upload" size={26} /></span>
+            <p className="font-medium">{t(dragActive ? "Drop your files here" : "Drag and drop your files")}</p>
+            <p className="text-xs text-ink-soft">{acceptExts.join(", ").toUpperCase()} · {maxSizeMB}MB · {t("select multiple")}</p>
+            <button type="button" className="ui-button secondary" onClick={() => fileInputRef.current?.click()}>{t("Browse files")}</button>
+            <input ref={fileInputRef} type="file" multiple accept={acceptAttr} onChange={handleFileChange} className="hidden" aria-label={t("Choose files")} />
           </div>
-        )}
+          {items.length > 0 && <div className="material-upload-list">{items.map((item, index) => <div key={item.file.name + index} className="material-upload-file">
+            <Icon name="file" size={20} className="text-ink-soft shrink-0" />
+            <div className="material-file-copy"><p dir="auto">{item.file.name}</p><span className="text-xs text-ink-soft tabular-nums">{formatFileSize(item.file.size)}</span></div>
+            <button type="button" aria-label={t("Remove") + " " + item.file.name} className="icon-button" onClick={() => removeFile(index)}><Icon name="close" size={18} /></button>
+          </div>)}</div>}
+          <button type="button" disabled={!items.length || !selectionValid} className="ui-button primary w-full" onClick={startProcessing}><Icon name="upload" size={18} />{t("Upload & Analyze")}{items.length > 0 ? " (" + items.length + ")" : ""}</button>
+          {footerNote && <p className="text-xs text-ink-soft leading-relaxed mt-4">{t(footerNote)}</p>}
+        </> : <div className="text-center pt-4" aria-live="polite" aria-atomic="false">
+          <div className="material-progress-count">{finishedCount}/{total}</div>
+          <h2>{t(isDone ? failedCount ? "Finished with some issues" : completionMode === "queued" ? "Uploaded; analysis is queued." : "All files analyzed!" : "Uploading materials…")}</h2>
+          <p className="text-sm text-ink-soft mt-2 mb-5">{doneCount} {t("of")} {total} {t(completionMode === "queued" ? "uploaded" : "analyzed")}{failedCount > 0 ? " · " + failedCount + " " + t("failed") : ""}</p>
+          {!isDone && items[currentIndex] && <p className="text-sm text-ink-soft mb-4 break-words" dir="auto">{t("Now")}: {items[currentIndex].file.name}</p>}
+          {!isDone && pollAccepted && <div className="mb-4">{steps.map((step, index) => <div key={step.id} className="material-stage" data-active={index === currentStep && !completed.has(step.id)} data-done={completed.has(step.id)}>
+            <span className="material-stage-mark">{completed.has(step.id) ? <Icon name="check" size={16} /> : index + 1}</span>
+            <span className="flex-1 text-sm font-medium">{t(step.label)}</span>
+            <span className="text-xs text-ink-soft">{t(completed.has(step.id) ? "done" : index === currentStep ? "in progress…" : "queued")}</span>
+          </div>)}</div>}
+          <div className="material-upload-list">{items.map((item, index) => <div key={item.file.name + index} className="material-upload-file">
+            <div className="material-file-copy"><p dir="auto">{item.file.name}</p>{item.error && <p className="text-xs text-danger mt-1" role="alert">{item.error}</p>}</div>
+            {statusBadge(item.status)}
+          </div>)}</div>
+          <p className="text-xs text-ink-soft mt-5">{t(isDone ? "Done — closing…" : "One file at a time — please keep this open.")}</p>
+        </div>}
       </div>
     </div>
   );

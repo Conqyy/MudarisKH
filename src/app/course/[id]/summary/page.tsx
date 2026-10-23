@@ -8,8 +8,9 @@ import remarkGfm from "remark-gfm";
 import SourceCitation, { SourceRef } from "@/components/SourceCitation";
 import SupportingCitation from "@/components/SupportingCitation";
 import type { SupportingRef } from "@/lib/supporting-materials";
-import Navbar from "@/components/Navbar";
-import Sidebar from "@/components/Sidebar";
+import AppShell from "@/components/AppShell";
+import Icon from "@/components/Icon";
+import { StudyHeader, StudyBusy, StudySourceStatus } from "@/components/StudyWorkspace";
 import { CourseFoundationGate } from "@/components/CourseFoundationGate";
 import { useCourseFoundation } from "@/hooks/useCourseFoundation";
 import BookmarkButton from "@/components/BookmarkButton";
@@ -60,7 +61,6 @@ interface DocItem {
   analysis?: { topics?: string[] };
 }
 
-
 interface TutorialItem extends SupportingRow {
   id: string;
   title: string;
@@ -104,17 +104,7 @@ interface SavedSummary {
   createdAt: number;
 }
 
-type PageState = "configure" | "generating" | "view" | "error";
-
-// Pipeline steps shown while the summary is generated. The last step is held
-// "in progress" until the real backend request resolves.
-const GEN_STEPS = [
-  { label: "Reading lecture documents", duration: 2500 },
-  { label: "Weighting topics by past exams", duration: 2500 },
-  { label: "Folding in professor emphasis", duration: 2500 },
-  { label: "Adding tutorial problem methods", duration: 2500 },
-  { label: "Writing the study summary", duration: 4000 },
-];
+type PageState = "configure" | "generating" | "opening" | "view" | "error";
 
 export default function SummaryPage() {
   const { user } = useAuth();
@@ -174,27 +164,15 @@ function SummaryPageContent() {
   const [pdfNote, setPdfNote] = useState("");
   const [downloadingPdf, setDownloadingPdf] = useState(false);
 
-  // Generation pipeline animation state
-  const [genStep, setGenStep] = useState(0);
-  const [genCompleted, setGenCompleted] = useState<Set<number>>(new Set());
-  const [genTimings, setGenTimings] = useState<Record<number, number>>({});
-  const genCancelled = useRef(false);
-  const genFinished = useRef(false);
   const studyRequest = useRef<AbortController | null>(null);
   const generationRequest = useRef<AbortController | null>(null);
-  const genTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    genCancelled.current = false;
-    return () => { genCancelled.current = true; studyRequest.current?.abort(); if (genTimer.current) clearTimeout(genTimer.current); };
-  }, [courseId, user?.uid]);
+  useEffect(() => () => { studyRequest.current?.abort(); }, [courseId, user?.uid]);
 
   useEffect(() => {
     if (foundationLoading || foundationError || foundationReady || !generationRequest.current) return;
     generationRequest.current.abort();
     generationRequest.current = null;
-    genCancelled.current = true;
-    genFinished.current = true;
-    if (genTimer.current) clearTimeout(genTimer.current);
+
     setPageState("configure");
   }, [foundationReady, foundationLoading, foundationError]);
 
@@ -206,13 +184,6 @@ function SummaryPageContent() {
       openSavedRef.current?.(requestedId);
     }
   }, [user?.uid, pageLoading, loadError, requestedId]);
-
-  const formatGenTime = (ms: number) => {
-    const sec = Math.floor(ms / 1000);
-    const mins = Math.floor(sec / 60);
-    const secs = sec % 60;
-    return `${mins}:${String(secs).padStart(2, "0")}`;
-  };
 
   useEffect(() => {
     if (!loading && !user) router.push("/signin");
@@ -305,26 +276,6 @@ function SummaryPageContent() {
     setPageState("generating");
     setErrorMsg("");
 
-    // Reset + start the pipeline animation
-    setGenStep(0);
-    setGenCompleted(new Set());
-    setGenTimings({});
-    genCancelled.current = false;
-    genFinished.current = false;
-    const startTime = Date.now();
-
-    (async () => {
-      for (let i = 0; i < GEN_STEPS.length; i++) {
-        if (genCancelled.current || genFinished.current) return;
-        setGenStep(i);
-        if (i === GEN_STEPS.length - 1) return; // hold last step until result
-        await new Promise((r) => { genTimer.current = setTimeout(r, GEN_STEPS[i].duration); });
-        if (genCancelled.current || genFinished.current) return;
-        setGenCompleted((prev) => new Set(prev).add(i));
-        setGenTimings((prev) => ({ ...prev, [i]: Date.now() - startTime }));
-      }
-    })();
-
     try {
       const res = await apiFetch(`${API_URL}/api/summaries/generate`, {
         method: "POST",
@@ -347,7 +298,7 @@ function SummaryPageContent() {
           if (controller.signal.aborted) return;
           const currentFoundation = await refreshFoundation();
           if (currentFoundation?.ready) {
-            genFinished.current = true;
+
             setErrorMsg(err?.detail || `Backend returned ${res.status}`);
             setPageState("error");
           }
@@ -357,8 +308,7 @@ function SummaryPageContent() {
       }
       const data = await res.json();
       if (controller.signal.aborted || (!foundationReadyRef.current && !foundationUnknownRef.current)) return;
-      genFinished.current = true;
-      setGenCompleted(new Set(GEN_STEPS.map((_, i) => i)));
+
       setViewingId(data.doc_id || "");
       setSummary({
         sourceRefs: data.sourceRefs,
@@ -374,7 +324,7 @@ function SummaryPageContent() {
       loadData();
     } catch (e: any) {
       if (controller.signal.aborted) return;
-      genFinished.current = true;
+
       setErrorMsg(e.message || "Could not generate summary.");
       setPageState("error");
     } finally {
@@ -384,11 +334,10 @@ function SummaryPageContent() {
 
   const openSummary = async (id: string) => {
     studyRequest.current?.abort();
-    genCancelled.current = true;
-    if (genTimer.current) clearTimeout(genTimer.current);
+
     const controller = new AbortController();
     studyRequest.current = controller;
-    setPageState("generating");
+    setPageState("opening");
     try {
       const res = await apiFetch(`${API_URL}/api/summaries/detail/${id}`, { signal: controller.signal });
       if (!res.ok) throw new Error("Summary not found");
@@ -470,7 +419,7 @@ function SummaryPageContent() {
 
     const examFocus =
       (s.examFocus?.length ?? 0) > 0
-        ? `<div class="focus"><h3>🎯 Focus for the exam</h3><ul>${s
+        ? `<div class="focus"><h3>Focus for the exam</h3><ul>${s
             .examFocus!.map((f) => `<li>${md(f)}</li>`)
             .join("")}</ul></div>`
         : "";
@@ -490,18 +439,18 @@ function SummaryPageContent() {
     )}</title>
     <style>
       * { box-sizing: border-box; }
-      body { font-family: Georgia, 'Times New Roman', serif; color: #2b2b2b; max-width: 760px; margin: 40px auto; padding: 0 24px; line-height: 1.65; }
+      body { font-family: Manrope, Alexandria, Arial, sans-serif; color: #161923; max-width: 760px; margin: 40px auto; padding: 0 24px; line-height: 1.65; }
       h1 { font-size: 28px; margin: 0 0 12px; }
       h2 { font-size: 18px; margin: 0 0 8px; }
       h3 { font-size: 15px; margin: 0 0 8px; }
       p { margin: 0 0 10px; }
-      .overview { background: #f6f4ef; padding: 16px; border-radius: 8px; }
-      .focus { border: 1px solid rgba(200,71,47,.35); background: rgba(200,71,47,.05); padding: 16px; border-radius: 8px; margin: 20px 0; }
-      .sec { border: 1px solid #e6e2da; padding: 16px; border-radius: 8px; margin-bottom: 16px; }
+      .overview { background: #f1f3f8; padding: 16px; border-radius: 8px; }
+      .focus { border: 1px solid #dce1ec; background: #e3e9fc; padding: 16px; border-radius: 8px; margin: 20px 0; }
+      .sec { border: 1px solid #dce1ec; padding: 16px; border-radius: 8px; margin-bottom: 16px; }
       .terms p { padding: 8px 0; border-bottom: 1px solid #eee; }
-      .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #eee; font-family: monospace; }
-      .badge.high { background: rgba(200,71,47,.1); color: #c8472f; }
-      .badge.medium { background: rgba(184,146,58,.1); color: #b8923a; }
+      .badge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #eee; font-variant-numeric: tabular-nums; }
+      .badge.high { background: #eaf0ff; color: #354da8; }
+      .badge.medium { background: #fff2d8; color: #825000; }
       .badge.low { background: #eee; color: #777; }
       ul { padding-inline-start: 20px; margin: 0; }
       li { margin: 3px 0; }
@@ -564,57 +513,45 @@ function SummaryPageContent() {
     }
   };
 
-  if (loadError && !pageLoading) return <><Navbar /><div className="pt-28 px-6 text-center" role="alert"><p>{loadError}</p><button onClick={() => loadData()} className="mt-4 underline">Retry loading</button></div></>;
+  if (loadError && !pageLoading) return <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="summary"><main className="workspace-main study-workspace"><div className="ui-panel study-busy" role="alert"><Icon name="alert" size={28} /><p>{loadError}</p><button onClick={() => loadData()} className="ui-button secondary">{t("Retry loading")}</button></div></main></AppShell>;
 
   if (loading || pageLoading || (course && historical.initialLoading)) {
     return (
-      <>
-        <Navbar />
-        <div className="pt-20 min-h-screen flex items-center justify-center">
-          <div className="font-mono text-sm text-ink-mute">Loading...</div>
-        </div>
-      </>
+      <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="summary"><main className="workspace-main study-workspace"><StudyBusy loading title="Loading…" /></main></AppShell>
     );
   }
   if (!user) return null;
   if (!course) {
     return (
-      <>
-        <Navbar />
-        <div className="pt-20 min-h-screen flex items-center justify-center">
+      <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="summary"><main className="workspace-main study-workspace"><div className="ui-panel study-busy">
           <div className="text-center">
-            <h1 className="font-serif text-3xl font-medium mb-3">Course not found</h1>
+            <h1 className="font-sans text-3xl font-medium mb-3">{t("Course not found")}</h1>
             <Link href="/dashboard" className="inline-block bg-ink text-paper px-6 py-3 rounded-full text-sm font-medium hover:bg-accent transition">
-              Back to Dashboard
+              {t("Back to Dashboard")}
             </Link>
           </div>
-        </div>
-      </>
+        </div></main></AppShell>
     );
   }
 
   if (!foundationReady && pageState !== "view") {
     return (
-      <>
-        <Navbar />
-        <div className="pt-20 flex">
-          <Sidebar courses={allCourses} />
-          <main className="flex-1 px-6 md:px-10 py-8 max-w-4xl mx-auto w-full">
+      <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="summary"><main className="workspace-main study-workspace">
             <Link href={`/course/${courseId}`} className="inline-block mb-6 text-sm text-ink-soft hover:text-accent transition">
               ← {t("Back to course")}
             </Link>
             <CourseFoundationGate courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} onRetry={refreshFoundation} />
-          </main>
-        </div>
-      </>
+          </main></AppShell>
     );
   }
 
   const renderConfigure = () => (
-    <div className="space-y-8">
+    <div className="study-layout">
+      <aside className="ui-panel source-panel study-sources space-y-6">
+        <div className="study-source-title"><h2 className="section-heading">{t("Sources")}</h2><p className="page-subtitle">{t("Choose the material for this study session.")}</p></div>
       <div>
-        <h3 className="font-serif text-xl font-medium mb-1 tracking-tight">
-          Select lecture documents
+        <h3 className="font-sans text-xl font-medium mb-1 tracking-tight">
+          {t("Select lecture documents")}
         </h3>
         <p className="text-sm text-ink-soft mb-4">
           The summary covers <span className="text-ink font-medium">only</span> the
@@ -628,7 +565,7 @@ function SummaryPageContent() {
               No analyzed documents yet. Upload lecture PDFs on the course page first.
             </p>
             <Link href={`/course/${courseId}`} className="text-accent text-sm hover:underline">
-              Go to course page to upload
+              {t("Go to course page to upload")}
             </Link>
           </div>
         ) : (
@@ -646,20 +583,20 @@ function SummaryPageContent() {
                   onChange={() => toggle(selectedDocs, setSelectedDocs, doc.id)}
                   className="w-4 h-4 accent-accent rounded"
                 />
-                <div className="w-10 h-10 rounded-xl bg-sage/10 flex items-center justify-center text-sage text-xs font-mono uppercase flex-shrink-0">
+                <div className="w-10 h-10 rounded-xl bg-sage/10 flex items-center justify-center text-sage text-xs tabular-nums  flex-shrink-0">
                   {doc.fileType}
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="font-medium truncate">{doc.title}</div>
-                  <div className="text-xs text-ink-mute font-mono">
+                  <div className="text-xs text-ink-mute tabular-nums">
                     {doc.sourceRevision ? `${doc.unitCount ?? "—"} ${t("source units")} · ${doc.guide?.sections.length ?? "—"} ${t("guide sections")}` : `${doc.analysis?.topics?.length || 0} ${t("topics")}`}
                   </div>
                 </div>
               </label>
             ))}
             <div className="px-5 py-3 bg-bg-alt border-t border-line flex items-center justify-between">
-              <span className="text-xs text-ink-mute font-mono">
-                {selectedDocs.size} of {documents.length} selected
+              <span className="text-xs text-ink-mute tabular-nums">
+                {selectedDocs.size} {t("of")} {documents.length} {t("selected")}
               </span>
               <button
                 type="button"
@@ -672,7 +609,7 @@ function SummaryPageContent() {
                 }}
                 className="text-xs text-accent hover:underline"
               >
-                {selectedDocs.size === documents.length ? "Deselect all" : "Select all"}
+                {selectedDocs.size === documents.length ? t("Deselect all") : t("Select all")}
               </button>
             </div>
           </div>
@@ -687,8 +624,8 @@ function SummaryPageContent() {
       </div>
       {histExams.length > 0 && (
         <div>
-          <h3 className="font-serif text-xl font-medium mb-1 tracking-tight">
-            Weight by past exams
+          <h3 className="font-sans text-xl font-medium mb-1 tracking-tight">
+            {t("Weight by past exams")}
           </h3>
           <p className="text-sm text-ink-soft mb-4">
             Selected past exams tell the summary which topics to emphasize.
@@ -708,16 +645,16 @@ function SummaryPageContent() {
                   className="w-4 h-4 accent-accent rounded"
                 />
                 <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center text-accent flex-shrink-0">
-                  📋
+                  <Icon name="exam" size={18} />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium truncate">{h.title}</div>
+                  <div className="font-medium truncate">{h.title}</div><StudySourceStatus row={h} />
                 </div>
               </label>
             ))}
             <div className="px-5 py-3 bg-bg-alt border-t border-line flex items-center justify-between">
-              <span className="text-xs text-ink-mute font-mono">
-                {selectedHist.size} of {histExams.length} selected
+              <span className="text-xs text-ink-mute tabular-nums">
+                {selectedHist.size} {t("of")} {histExams.length} {t("selected")}
               </span>
               <button
                 type="button"
@@ -730,7 +667,7 @@ function SummaryPageContent() {
                 }}
                 className="text-xs text-accent hover:underline"
               >
-                {selectedHist.size === histExams.length ? "Deselect all" : "Select all"}
+                {selectedHist.size === histExams.length ? t("Deselect all") : t("Select all")}
               </button>
             </div>
           </div>
@@ -739,8 +676,8 @@ function SummaryPageContent() {
 
       {tutorials.length > 0 && (
         <div>
-          <h3 className="font-serif text-xl font-medium mb-1 tracking-tight">
-            Include tutorials
+          <h3 className="font-sans text-xl font-medium mb-1 tracking-tight">
+            {t("Include tutorials")}
           </h3>
           <p className="text-sm text-ink-soft mb-4">
             The summary will explain how to solve the practice-problem types from
@@ -759,27 +696,27 @@ function SummaryPageContent() {
                   checked={selectedTut.has(t.id)}
                   onChange={() => toggle(selectedTut, setSelectedTut, t.id)}
                   className="w-4 h-4 rounded"
-                  style={{ accentColor: "#3f6f7d" }}
+                  style={{ accentColor: "var(--accent)" }}
                 />
                 <div
                   className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
-                  style={{ backgroundColor: "#3f6f7d1a", color: "#3f6f7d" }}
+                  style={{ backgroundColor: "var(--bg-alt)", color: "var(--ink-soft)" }}
                 >
-                  ✏️
+                  <Icon name="edit" size={18} />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium truncate">{t.title}</div>
-                  <div className="text-xs text-ink-mute font-mono">
+                  <div className="font-medium truncate">{t.title}</div><StudySourceStatus row={t} />
+                  <div className="text-xs text-ink-mute tabular-nums">
                     {t.analysis?.problems?.length
                       ? `${t.analysis.problems.length} problems`
-                      : "analyzed"}
+                      : ""}
                   </div>
                 </div>
               </label>
             ))}
             <div className="px-5 py-3 bg-bg-alt border-t border-line flex items-center justify-between">
-              <span className="text-xs text-ink-mute font-mono">
-                {selectedTut.size} of {tutorials.length} selected
+              <span className="text-xs text-ink-mute tabular-nums">
+                {selectedTut.size} {t("of")} {tutorials.length} {t("selected")}
               </span>
               <button
                 type="button"
@@ -792,7 +729,7 @@ function SummaryPageContent() {
                 }}
                 className="text-xs text-accent hover:underline"
               >
-                {selectedTut.size === tutorials.length ? "Deselect all" : "Select all"}
+                {selectedTut.size === tutorials.length ? t("Deselect all") : t("Select all")}
               </button>
             </div>
           </div>
@@ -801,8 +738,8 @@ function SummaryPageContent() {
 
       {audioRecs.length > 0 && (
         <div>
-          <h3 className="font-serif text-xl font-medium mb-1 tracking-tight">
-            Include lecture recordings
+          <h3 className="font-sans text-xl font-medium mb-1 tracking-tight">
+            {t("Include lecture recordings")}
           </h3>
           <p className="text-sm text-ink-soft mb-4">
             The summary draws on what the professor said and emphasized in the
@@ -821,27 +758,27 @@ function SummaryPageContent() {
                   checked={selectedAudio.has(a.id)}
                   onChange={() => toggle(selectedAudio, setSelectedAudio, a.id)}
                   className="w-4 h-4 rounded"
-                  style={{ accentColor: "#b8923a" }}
+                  style={{ accentColor: "var(--accent)" }}
                 />
                 <div
                   className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
-                  style={{ backgroundColor: "#b8923a1a", color: "#b8923a" }}
+                  style={{ backgroundColor: "var(--bg-alt)", color: "var(--ink-soft)" }}
                 >
-                  🎙️
+                  <Icon name="layers" size={18} />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium truncate">{a.title}</div>
-                  <div className="text-xs text-ink-mute font-mono">
+                  <div className="font-medium truncate">{a.title}</div><StudySourceStatus row={a} />
+                  <div className="text-xs text-ink-mute tabular-nums">
                     {a.insights?.examHints?.length
                       ? `${a.insights.examHints.length} exam hints`
-                      : "analyzed"}
+                      : ""}
                   </div>
                 </div>
               </label>
             ))}
             <div className="px-5 py-3 bg-bg-alt border-t border-line flex items-center justify-between">
-              <span className="text-xs text-ink-mute font-mono">
-                {selectedAudio.size} of {audioRecs.length} selected
+              <span className="text-xs text-ink-mute tabular-nums">
+                {selectedAudio.size} {t("of")} {audioRecs.length} {t("selected")}
               </span>
               <button
                 type="button"
@@ -854,23 +791,28 @@ function SummaryPageContent() {
                 }}
                 className="text-xs text-accent hover:underline"
               >
-                {selectedAudio.size === audioRecs.length ? "Deselect all" : "Select all"}
+                {selectedAudio.size === audioRecs.length ? t("Deselect all") : t("Select all")}
               </button>
             </div>
           </div>
         </div>
       )}
 
+      </aside>
+      <div className="study-content space-y-6">
+      <section className="ui-panel study-options space-y-6">
+        <div><h2 className="section-heading">{t("Summary options")}</h2><p className="page-subtitle">{t("Make it fit the way you study.")}</p></div>
       <div>
-        <h3 className="font-serif text-xl font-medium mb-1 tracking-tight">
-          Custom instructions{" "}
-          <span className="text-ink-mute text-sm font-normal">(optional)</span>
+        <h3 className="font-sans text-xl font-medium mb-1 tracking-tight">
+          {t("Custom instructions")}{" "}
+          <span className="text-ink-mute text-sm font-normal">{t("(optional)")}</span>
         </h3>
         <p className="text-sm text-ink-soft mb-3">
           Tell the AI how you want the summary — e.g. focus areas, depth, format,
           or language.
         </p>
         <textarea
+          aria-label={t("Custom instructions")}
           value={instructions}
           onChange={(e) => setInstructions(e.target.value)}
           rows={3}
@@ -883,46 +825,45 @@ function SummaryPageContent() {
       <button
         onClick={handleGenerate}
         disabled={!foundationReady || historical.loading || !!historical.error || !!supportingBlocker || !documents.some((doc) => selectedDocs.has(doc.id))}
-        className="w-full bg-ink text-paper py-4 rounded-full text-sm font-medium hover:bg-accent transition-all hover:-translate-y-0.5 hover:shadow-lift disabled:opacity-50 disabled:cursor-not-allowed"
+        className="ui-button primary"
       >
-        Generate Summary →
+        {t("Generate Summary")} <Icon name="arrow-right" size={18} />
       </button>
 
+      </section>
+
       {savedSummaries.length > 0 && (
-        <div>
-          <h3 className="font-serif text-xl font-medium mb-4 tracking-tight">
-            Saved Summaries
+        <div className="study-library" id="study-library">
+          <h3 className="font-sans text-xl font-medium mb-4 tracking-tight">
+            {t("Saved library")}
           </h3>
           <div className="bg-paper border border-line rounded-2xl overflow-hidden">
             {savedSummaries.map((s, idx) => (
               <div
                 key={s.id}
-                role="button" tabIndex={0}
-                onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openSummary(s.id); } }}
-                onClick={() => openSummary(s.id)}
-                className={`flex items-center justify-between p-5 hover:bg-bg-alt transition cursor-pointer ${
+                className={`study-library-row ${
                   idx !== 0 ? "border-t border-line" : ""
                 }`}
               >
-                <div className="flex items-center gap-4">
+                <button type="button" className="study-library-open" onClick={() => openSummary(s.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openSummary(s.id); } }}>
                   <div className="w-10 h-10 rounded-xl bg-sage/10 flex items-center justify-center text-sage">
-                    📝
+                    <Icon name="summary" size={20} />
                   </div>
                   <div>
                     <div className="font-medium text-sm">{s.title}</div>
-                    <div className="text-xs text-ink-mute font-mono mt-0.5">
+                    <div className="text-xs text-ink-mute tabular-nums mt-0.5">
                       {new Date(s.createdAt).toLocaleDateString()} · {s.sectionCount} sections
                     </div>
                   </div>
-                </div>
+                </button>
                 <div className="flex items-center gap-3">
-                  <span className="text-ink-mute text-sm">→</span>
                   <button
                     onClick={(e) => deleteSummary(e, s.id, s.title)}
                     title="Delete summary"
-                    className="w-8 h-8 rounded-full flex items-center justify-center text-ink-mute hover:bg-accent hover:text-paper transition text-sm"
+                    aria-label={t("Delete summary")}
+                    className="icon-button danger"
                   >
-                    🗑
+                    <Icon name="trash" size={16} />
                   </button>
                 </div>
               </div>
@@ -930,79 +871,18 @@ function SummaryPageContent() {
           </div>
         </div>
       )}
-    </div>
-  );
-
-  const renderGenerating = () => (
-    <div className="flex items-start justify-center pt-6 pb-16">
-      <div className="max-w-xl w-full text-center">
-        {/* Spinning ring */}
-        <div className="w-24 h-24 mx-auto mb-7 relative">
-          <div className="w-24 h-24 border-[3px] border-bg-alt border-t-accent rounded-full animate-spin-slow" />
-          <div className="absolute inset-0 flex items-center justify-center font-serif italic text-4xl text-accent">
-            m
-          </div>
-        </div>
-
-        <h2 className="font-serif text-2xl md:text-3xl font-medium mb-2 tracking-tight">
-          Writing your summary…
-        </h2>
-        <p className="text-ink-soft text-sm mb-8 max-w-md mx-auto leading-relaxed">
-          Distilling your materials, weighted toward what your exams emphasize.
-          This usually takes 15–45 seconds.
-        </p>
-
-        {/* Pipeline steps */}
-        <div className="bg-paper border border-line rounded-2xl p-5 md:p-6 text-left shadow-soft">
-          {GEN_STEPS.map((step, i) => {
-            const stepDone = genCompleted.has(i);
-            const isActive = i === genStep && !stepDone;
-            const isPending = i > genStep && !stepDone;
-
-            return (
-              <div
-                key={i}
-                className={`flex items-center gap-3.5 py-3 ${
-                  i < GEN_STEPS.length - 1 ? "border-b border-line" : ""
-                } ${isPending ? "opacity-40" : "opacity-100"}`}
-              >
-                <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center font-mono text-xs font-semibold flex-shrink-0 transition-all ${
-                    stepDone
-                      ? "bg-sage text-paper"
-                      : isActive
-                      ? "bg-accent text-paper animate-pulse-soft"
-                      : "bg-bg-alt text-ink-soft"
-                  }`}
-                >
-                  {stepDone ? "✓" : i + 1}
-                </div>
-                <div className="flex-1 text-sm font-medium">{step.label}</div>
-                <div className="font-mono text-[11px] text-ink-mute flex-shrink-0">
-                  {stepDone
-                    ? formatGenTime(genTimings[i] || 0)
-                    : isActive
-                    ? "in progress…"
-                    : "queued"}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        <p className="text-xs text-ink-mute mt-5 font-mono">
-          Hang tight — distilling your selected material.
-        </p>
       </div>
     </div>
   );
 
+  const renderGenerating = () => <StudyBusy opening={pageState === "opening"} title="Generating your summary…" />;
+
   const renderView = () => {
     if (!summary) return null;
     return (
-      <div className="max-w-4xl mx-auto">
-        <div className="flex items-center justify-between mb-4 gap-3">
-          <h2 className="font-serif text-3xl font-medium tracking-tight">{summary.title}</h2>
+      <div className="summary-workspace">
+        <div className="study-reader-toolbar">
+          <h2 className="font-sans text-3xl font-medium tracking-tight">{summary.title}</h2>
           <div className="flex items-center gap-3 flex-shrink-0">
             {activityItem && <BookmarkButton item={activityItem} size="sm" />}
             <button
@@ -1014,13 +894,24 @@ function SummaryPageContent() {
             </button>
             <button
               onClick={() => { setPageState("configure"); setPdfNote(""); loadData(); }}
-              className="font-mono text-xs text-ink-soft hover:text-accent transition"
+              className="tabular-nums text-xs text-ink-soft hover:text-accent transition"
             >
               ← Back
             </button>
           </div>
         </div>
 
+        <div className="summary-reading-layout">
+          <details className="summary-contents" open>
+            <summary>{t("Contents")}</summary>
+            <nav aria-label={t("Summary contents")}>
+              {summary.overview && <a href="#summary-overview">{t("Overview")}</a>}
+              {(summary.examFocus?.length ?? 0) > 0 && <a href="#summary-focus">{t("Focus for the exam")}</a>}
+              {summary.sections.map((section, index) => <a key={index} href={`#summary-section-${index}`}>{section.heading}</a>)}
+              {(summary.keyTerms?.length ?? 0) > 0 && <a href="#summary-terms">{t("Key Terms")}</a>}
+            </nav>
+          </details>
+          <article className="study-summary" dir="auto">
         {pdfNote && (
           <div className="bg-gold/10 border border-gold/40 text-ink-soft text-xs rounded-xl p-3 mb-6">
             {pdfNote}
@@ -1028,7 +919,7 @@ function SummaryPageContent() {
         )}
 
         {summary.overview && (
-          <div className="text-ink-soft text-lg leading-relaxed bg-paper border border-line rounded-2xl p-7 mb-7">
+          <div id="summary-overview" className="text-ink-soft text-base leading-relaxed mb-7">
             <Md>{summary.overview}</Md>
             <SourceCitation courseId={courseId} sourceRefs={citationsForPath(summary.provenance, "/overview", summary).sourceRefs} />
             <SupportingCitation courseId={courseId} sourceRefs={citationsForPath(summary.provenance, "/overview", summary).supportingSourceRefs} />
@@ -1036,9 +927,9 @@ function SummaryPageContent() {
         )}
 
         {(summary.examFocus?.length ?? 0) > 0 && (
-          <div className="bg-accent/5 border border-accent/30 rounded-2xl p-7 mb-9">
-            <div className="font-mono text-xs text-accent uppercase tracking-widest mb-4">
-              🎯 Focus for the exam
+          <div id="summary-focus" className="bg-bg-alt rounded-2xl p-6 mb-9">
+            <div className="tabular-nums text-xs text-accent  mb-4">
+              {t("Focus for the exam")}
             </div>
             <ul className="space-y-2.5">
               {summary.examFocus!.map((f, i) => (
@@ -1053,17 +944,17 @@ function SummaryPageContent() {
 
         <div className="space-y-7">
           {summary.sections.map((sec, i) => (
-            <section key={i} className="bg-paper border border-line rounded-2xl p-7 md:p-8">
+            <section key={i} id={`summary-section-${i}`} className="summary-section">
               <div className="flex items-start justify-between gap-3 mb-4">
-                <h3 className="font-serif text-2xl font-medium tracking-tight flex items-center gap-3">
-                  <span className="w-9 h-9 rounded-full bg-sage/10 text-sage text-sm flex items-center justify-center font-mono flex-shrink-0">
+                <h3 className="font-sans text-2xl font-medium tracking-tight flex items-center gap-3">
+                  <span className="w-9 h-9 rounded-full bg-sage/10 text-sage text-sm flex items-center justify-center tabular-nums flex-shrink-0">
                     {i + 1}
                   </span>
                   {sec.heading}
                 </h3>
                 {sec.examLikelihood && (
                   <span
-                    className={`text-[11px] font-mono uppercase px-3 py-1.5 rounded-full flex-shrink-0 ${
+                    className={`text-[11px] tabular-nums  px-3 py-1.5 rounded-full flex-shrink-0 ${
                       sec.examLikelihood === "high"
                         ? "bg-accent/10 text-accent"
                         : sec.examLikelihood === "medium"
@@ -1072,7 +963,7 @@ function SummaryPageContent() {
                     }`}
                     title="Likelihood of appearing on the exam"
                   >
-                    {sec.examLikelihood === "high" ? "🔥 " : ""}
+
                     {sec.examLikelihood} exam
                     {sec.examWeight ? ` · ~${sec.examWeight}%` : ""}
                   </span>
@@ -1100,8 +991,8 @@ function SummaryPageContent() {
         </div>
 
         {(summary.keyTerms?.length ?? 0) > 0 && (
-          <section className="mt-10">
-            <h3 className="font-serif text-2xl font-medium tracking-tight mb-5">Key Terms</h3>
+          <section id="summary-terms" className="mt-10">
+            <h3 className="font-sans text-2xl font-medium tracking-tight mb-5">{t("Key Terms")}</h3>
             <div className="bg-paper border border-line rounded-2xl overflow-hidden">
               {summary.keyTerms!.map((t, i) => (
                 <div key={i} className={`px-6 py-5 ${i !== 0 ? "border-t border-line" : ""}`}>
@@ -1116,66 +1007,37 @@ function SummaryPageContent() {
             </div>
           </section>
         )}
+          </article>
+        </div>
       </div>
     );
   };
 
   const renderError = () => (
     <div className="flex items-center justify-center py-20">
-      <div className="text-center max-w-md">
-        <h2 className="font-serif text-2xl font-medium mb-3 tracking-tight">
-          Generation failed
+      <div className="ui-panel study-busy max-w-md" role="alert">
+        <h2 className="font-sans text-2xl font-medium mb-3 tracking-tight">
+          {t("Could not open study material")}
         </h2>
         <p className="text-ink-soft text-sm mb-8">{errorMsg}</p>
         <button
           onClick={() => setPageState("configure")}
           className="bg-ink text-paper px-6 py-3 rounded-full text-sm font-medium hover:bg-accent transition"
         >
-          Try again
+          {t("Try again")}
         </button>
       </div>
     </div>
   );
 
   return (
-    <>
-      <Navbar />
-      <div className="pt-20 flex">
-        <Sidebar courses={allCourses} />
-        <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-7xl mx-auto w-full">
-          <div className="my-8 flex items-center gap-2 text-xs font-mono">
-            <Link href="/dashboard" className="text-ink-soft hover:text-accent transition">
-              Dashboard
-            </Link>
-            <span className="text-ink-mute">›</span>
-            <Link href={`/course/${courseId}`} className="text-ink-soft hover:text-accent transition">
-              {course.code}
-            </Link>
-            <span className="text-ink-mute">›</span>
-            <span className="text-ink">Summary</span>
-          </div>
-
-          <div
-            className="bg-paper border border-line rounded-3xl p-8 mb-10 relative overflow-hidden"
-            style={{ borderTop: `6px solid ${course.color}` }}
-          >
-            <div className="font-mono text-xs text-ink-mute uppercase tracking-widest mb-3">
-              {course.code} · Summary
-            </div>
-            <h1 className="font-serif text-3xl md:text-4xl font-medium tracking-tight leading-tight mb-2">
-              Study <em className="italic text-accent">summary</em>
-            </h1>
-            <p className="text-ink-soft text-sm">
-              A structured summary of your documents, weighted toward what your past exams emphasize.
-            </p>
-          </div>
+    <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="summary"><main className="workspace-main study-workspace">
+          <StudyHeader title="Summaries" description="Turn your course materials into a focused study reference." icon="summary" libraryCount={pageState === "configure" ? savedSummaries.length : 0} />
 
           {pageState === "configure" && renderConfigure()}
-          {pageState === "generating" && renderGenerating()}
+          {(pageState === "generating" || pageState === "opening") && renderGenerating()}
           {pageState === "view" && renderView()}
           {pageState === "error" && renderError()}
-        </main>
-      </div>
-    </>
+        </main></AppShell>
   );
 }

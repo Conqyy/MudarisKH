@@ -16,7 +16,7 @@ interface SidebarCtx {
 }
 
 const Ctx = createContext<SidebarCtx>({
-  collapsed: false,
+  collapsed: true,
   setCollapsed: () => {},
   toggle: () => {},
 });
@@ -24,15 +24,18 @@ const Ctx = createContext<SidebarCtx>({
 const STORAGE_KEY = "mudaris_sidebar";
 
 export function SidebarProvider({ children }: { children: ReactNode }) {
-  // Expanded is the default. A tiny inline script in the root layout puts the
+  // Compact is the unconfigured default. The root pre-paint script puts the
   // saved choice on <html data-sidebar> BEFORE first paint and globals.css
   // sizes the rail from that attribute, so a collapsed rail never renders wide
   // and then snaps narrow. This state only mirrors it for the toggle button.
-  const [collapsed, setCollapsedState] = useState(false);
+  const [collapsed, setCollapsedState] = useState(true);
 
   // Adopt whatever the pre-paint script decided.
   useEffect(() => {
-    setCollapsedState(document.documentElement.dataset.sidebar === "collapsed");
+    let expanded = document.documentElement.dataset.sidebar === "expanded";
+    try { const saved = localStorage.getItem(STORAGE_KEY); if (saved === "expanded" || saved === "collapsed") expanded = saved === "expanded"; } catch { /* storage can be unavailable */ }
+    document.documentElement.dataset.sidebar = expanded ? "expanded" : "collapsed";
+    setCollapsedState(!expanded);
   }, []);
 
   // Persisting happens here rather than in an effect on `collapsed`: an effect

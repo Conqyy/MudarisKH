@@ -1,5 +1,6 @@
 "use client";
 
+import Icon from "@/components/Icon";
 import { useDialog } from "@/lib/use-dialog";
 
 import { useState, useRef, useEffect, ChangeEvent, DragEvent } from "react";
@@ -17,7 +18,6 @@ interface Props {
 const API_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
-const ACCENT = "#b8923a"; // gold — matches the recording color elsewhere
 const MAX_SIZE_MB = 300;
 const ACCEPTED_EXTS = ["mp3", "wav", "m4a", "mp4", "mov"];
 const ACCEPT_ATTR =
@@ -318,367 +318,59 @@ export default function UploadAudioModal({ courseId, onClose, onSuccess }: Props
   const isBusy = phase === "processing";
   const isDone = phase === "done";
 
-  const statusBadge = (s: ItemStatus) => {
-    if (s === "done") return <span className="text-sage">● {t("Done")}</span>;
-    if (s === "accepted") return <span className="text-gold">● {t("Uploaded; analysis is queued.")}</span>;
-    if (s === "failed") return <span className="text-accent">● {t("Failed")}</span>;
-    if (s === "processing")
-      return (
-        <span style={{ color: ACCENT }} className="flex items-center gap-1.5">
-          <span
-            className="w-3 h-3 border-2 rounded-full animate-spin"
-            style={{ borderColor: `${ACCENT}40`, borderTopColor: ACCENT }}
-          />
-          {t("Uploading materials…")}
-        </span>
-      );
-    return <span className="text-ink-mute">● {t("Queued")}</span>;
-  };
 
-  return (
-    <div
-      ref={dialogRef} role="dialog" aria-modal="true" aria-label="Upload recordings" tabIndex={-1} className="fixed inset-0 bg-ink/50 backdrop-blur-md z-[100] flex items-center justify-center p-6 animate-fade-in"
-      style={{ ["--accent" as any]: ACCENT }}
-      onClick={() => {
-        if (phase === "select") onClose();
-      }}
-    >
-      <div
-        className="bg-paper rounded-3xl p-8 md:p-10 max-w-lg w-full shadow-lift relative max-h-[90vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <button
-          onClick={onClose}
-          aria-label="Close dialog"
-          disabled={isBusy}
-          className="absolute top-5 right-5 text-2xl text-ink-soft hover:text-ink leading-none w-8 h-8 flex items-center justify-center rounded-full hover:bg-bg-alt transition disabled:opacity-30 disabled:cursor-not-allowed"
-        >
-          &times;
-        </button>
+  const statusBadge = (status: ItemStatus) => <span className={"status-badge " + (status === "failed" ? "danger" : status === "done" ? "success" : "info")}>{status === "processing" && <Icon name="loader" size={14} className="animate-spin" />}{t(status === "done" ? "Done" : status === "accepted" ? "Uploaded; analysis is queued." : status === "failed" ? "Failed" : status === "processing" ? "Uploading materials…" : "Queued")}</span>;
 
-        {/* ============ SELECT PHASE ============ */}
-        {phase === "select" && (
-          <>
-            <h2 className="font-serif text-3xl font-medium mb-2 tracking-tight">
-              {t("Upload lecture recordings")}
-            </h2>
-            <p className="text-ink-soft text-sm mb-6">
-              {t(
-                "Audio or video. We'll transcribe each one, summarize what the professor covered, and extract exam hints."
-              )}
-            </p>
-
-            <div className="flex gap-2 mb-6 p-1 bg-bg-alt rounded-full">
-              <button
-                type="button"
-                onClick={() => switchMode("file")}
-                className={`flex-1 py-2 rounded-full text-sm font-medium transition ${
-                  mode === "file" ? "bg-ink text-paper" : "text-ink-soft hover:text-ink"
-                }`}
-              >
-                {t("Upload files")}
-              </button>
-              <button
-                type="button"
-                onClick={() => switchMode("url")}
-                className={`flex-1 py-2 rounded-full text-sm font-medium transition ${
-                  mode === "url" ? "bg-ink text-paper" : "text-ink-soft hover:text-ink"
-                }`}
-              >
-                {t("Paste video URLs")}
-              </button>
-              <button
-                type="button"
-                onClick={() => switchMode("notes")}
-                className={`flex-1 py-2 rounded-full text-sm font-medium transition ${
-                  mode === "notes" ? "bg-ink text-paper" : "text-ink-soft hover:text-ink"
-                }`}
-              >
-                {t("Type notes")}
-              </button>
-            </div>
-
-            {error && (
-              <div
-                className="text-sm rounded-xl p-3 mb-5"
-                style={{ backgroundColor: `${ACCENT}1a`, color: ACCENT }}
-              >
-                {error}
-              </div>
-            )}
-
-            {mode === "notes" ? (
-              <>
-                <label className="block text-sm font-medium text-ink-soft mb-2">
-                  {t("Title (optional)")}
-                </label>
-                <input
-                  type="text"
-                  value={notesTitle}
-                  onChange={(e) => setNotesTitle(e.target.value)}
-                  placeholder={t("e.g. Week 6 — what the prof emphasized")}
-                  maxLength={80}
-                  className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition mb-4"
-                />
-                <label className="block text-sm font-medium text-ink-soft mb-2">
-                  {t("What happened in the lecture?")}{" "}
-                  <span className="text-accent">*</span>
-                </label>
-                <textarea
-                  value={notesText}
-                  onChange={(e) => {
-                    setNotesText(e.target.value);
-                    setError("");
-                  }}
-                  rows={7}
-                  placeholder={t(
-                    "e.g. The professor said section 3 will come in the midterm. He spent most of the time on backpropagation examples and repeated the chain rule twice. Skip the history part — he said it's not on the exam."
-                  )}
-                  className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition mb-2 text-sm leading-relaxed resize-y"
-                />
-                <p className="text-xs text-ink-mute mb-6">
-                  {t(
-                    "The AI extracts exam hints and emphasis from your notes — exam generation and summaries will use them, just like a recording."
-                  )}
-                </p>
-                <button
-                  type="button"
-                  onClick={startNotes}
-                  disabled={notesText.trim().length < 20}
-                  className="w-full bg-[var(--accent)] text-paper py-3.5 rounded-full font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {t("Analyze notes")} →
-                </button>
-              </>
-            ) : mode === "url" ? (
-              <>
-                <label className="block text-sm font-medium text-ink-soft mb-2">
-                  {t("Video URLs")} <span className="text-accent">*</span>{" "}
-                  <span className="text-ink-mute font-normal">{t("(one per line)")}</span>
-                </label>
-                <textarea
-                  value={urlText}
-                  onChange={(e) => {
-                    setUrlText(e.target.value);
-                    setError("");
-                  }}
-                  rows={5}
-                  placeholder={"https://… (YouTube, Vimeo, or a direct video link)\nhttps://…\nhttps://…"}
-                  className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition mb-2 font-mono text-xs resize-y"
-                />
-                <p className="text-xs text-ink-mute mb-6">
-                  {parsedUrls.length > 0
-                    ? `${parsedUrls.length} ${t("URLs detected · processed one at a time.")}`
-                    : t("We fetch each video, extract the audio to MP3, and transcribe it.")}
-                </p>
-                <button
-                  type="button"
-                  onClick={startUrls}
-                  disabled={parsedUrls.length === 0}
-                  className="w-full bg-[var(--accent)] text-paper py-3.5 rounded-full font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {parsedUrls.length > 0
-                    ? `${t("Fetch & Analyze")} (${parsedUrls.length}) →`
-                    : `${t("Fetch & Analyze")} →`}
-                </button>
-              </>
-            ) : (
-              <>
-                <div
-                  onDragEnter={handleDrag}
-                  onDragOver={handleDrag}
-                  onDragLeave={handleDrag}
-                  onDrop={handleDrop}
-                  onClick={() => fileInputRef.current?.click()}
-                  className="border-2 border-dashed rounded-2xl p-7 text-center cursor-pointer transition mb-5"
-                  style={{
-                    borderColor: dragActive ? ACCENT : undefined,
-                    backgroundColor: dragActive ? `${ACCENT}0d` : undefined,
-                  }}
-                >
-                  <div className="text-4xl mb-3 opacity-50">
-                    {dragActive ? "📥" : "🎙️"}
-                  </div>
-                  <div className="font-serif text-lg mb-1">
-                    {dragActive
-                      ? t("Drop your recordings here")
-                      : t("Drop recordings or click to browse")}
-                  </div>
-                  <div className="text-xs text-ink-mute">
-                    {ACCEPTED_EXTS.join(", ").toUpperCase()} · {MAX_SIZE_MB}MB ·{" "}
-                    {t("select multiple")}
-                  </div>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    multiple
-                    accept={ACCEPT_ATTR}
-                    onChange={handleFileChange}
-                    className="hidden"
-                  />
-                </div>
-
-                {items.length > 0 && (
-                  <div className="border border-line rounded-2xl divide-y divide-line mb-5 max-h-56 overflow-y-auto">
-                    {items.map((it, idx) => (
-                      <div
-                        key={`${it.label}-${idx}`}
-                        className="flex items-center gap-3 px-4 py-3"
-                      >
-                        <div
-                          className="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0"
-                          style={{ backgroundColor: `${ACCENT}1a` }}
-                        >
-                          🎙️
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm font-medium truncate">
-                            {it.label}
-                          </div>
-                          {it.file && (
-                            <div className="text-xs text-ink-mute">
-                              {formatFileSize(it.file.size)}
-                            </div>
-                          )}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => removeFile(idx)}
-                          className="text-ink-mute hover:text-accent text-lg leading-none px-1"
-                          aria-label="Remove"
-                        >
-                          &times;
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                <button
-                  type="button"
-                  onClick={startFiles}
-                  disabled={items.length === 0}
-                  className="w-full bg-[var(--accent)] text-paper py-3.5 rounded-full font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {items.length > 0
-                    ? `${t("Upload & Analyze")} (${items.length}) →`
-                    : `${t("Upload & Analyze")} →`}
-                </button>
-
-                <p className="text-xs text-ink-mute text-center pt-3">
-                  {t("Recordings are analyzed one at a time — about 1–3 minutes each.")}
-                </p>
-              </>
-            )}
-          </>
-        )}
-
-        {/* ============ PROCESSING / DONE PHASE ============ */}
-        {(phase === "processing" || phase === "done") && (
-          <div className="text-center py-1">
-            <div className="w-24 h-24 mx-auto mb-6 relative">
-              <div
-                className={`w-24 h-24 border-[3px] rounded-full ${
-                  isDone ? "" : "animate-spin-slow"
-                }`}
-                style={
-                  isDone
-                    ? { borderColor: "#6b7d5b" }
-                    : { borderColor: "rgb(var(--c-bg-alt))", borderTopColor: ACCENT }
-                }
-              />
-              <div
-                className="absolute inset-0 flex items-center justify-center font-mono font-semibold text-2xl"
-                style={{ color: isDone ? "#6b7d5b" : ACCENT }}
-              >
-                {finishedCount}/{total}
-              </div>
-            </div>
-
-            <h2 className="font-serif text-2xl md:text-3xl font-medium mb-2 tracking-tight">
-              {isDone
-                ? failedCount > 0
-                  ? t("Finished with some issues")
-                  : t("Uploaded; analysis is queued.")
-                : t("Uploading materials…")}
-            </h2>
-            <p className="text-ink-soft text-sm mb-2 px-2">
-              <span className="font-medium text-ink">{doneCount}</span> of{" "}
-              <span className="font-medium text-ink">{total}</span> {t("uploaded")}
-              {failedCount > 0 && (
-                <span className="text-accent"> · {failedCount} failed</span>
-              )}
-            </p>
-            {!isDone && items[currentIndex] && (
-              <p className="text-ink-mute text-xs mb-6 px-2 truncate">
-                {t("Now")}: &ldquo;{items[currentIndex].label}&rdquo; ({currentIndex + 1}/
-                {total})
-              </p>
-            )}
-            {isDone && <div className="mb-4" />}
-
-            {!isDone && (
-              <div className="bg-bg border border-line rounded-2xl p-4 text-left mb-5">
-                {stepsFor(items[currentIndex]).map((step, i, activeSteps) => {
-                  const stepDone = completed.has(step.id);
-                  const isActive = i === currentStep && !stepDone;
-                  const isPending = i > currentStep;
-                  return (
-                    <div
-                      key={step.id}
-                      className={`flex items-center gap-3 py-2 ${
-                        i < activeSteps.length - 1 ? "border-b border-line" : ""
-                      } ${isPending ? "opacity-40" : "opacity-100"}`}
-                    >
-                      <div
-                        className="w-7 h-7 rounded-full flex items-center justify-center font-mono text-xs font-semibold flex-shrink-0 transition-all"
-                        style={
-                          stepDone
-                            ? { backgroundColor: "#6b7d5b", color: "#faf7f2" }
-                            : isActive
-                            ? { backgroundColor: ACCENT, color: "#faf7f2" }
-                            : { backgroundColor: "rgb(var(--c-bg-alt))", color: "rgb(var(--c-ink-mute))" }
-                        }
-                      >
-                        {stepDone ? "✓" : i + 1}
-                      </div>
-                      <div className="flex-1 text-sm font-medium">{step.label}</div>
-                      <div className="font-mono text-[11px] text-ink-mute flex-shrink-0">
-                        {stepDone ? "done" : isActive ? "in progress…" : "queued"}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            <div className="border border-line rounded-2xl divide-y divide-line text-left max-h-48 overflow-y-auto">
-              {items.map((it, idx) => (
-                <div
-                  key={`${it.label}-${idx}`}
-                  className="flex items-center gap-3 px-4 py-2.5"
-                >
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm font-medium truncate">{it.label}</div>
-                    {it.status === "failed" && it.error && (
-                      <div className="text-xs text-accent truncate">{it.error}</div>
-                    )}
-                  </div>
-                  <div className="text-xs font-medium flex-shrink-0">
-                    {statusBadge(it.status)}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <p className="text-xs text-ink-mute mt-5 font-mono">
-              {isDone
-                ? t("Done — closing…")
-                : t("One recording at a time — please keep this open.")}
-            </p>
+  return <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Upload recordings" tabIndex={-1} className="dialog-overlay" onClick={() => { if (phase === "select") onClose(); }}>
+    <div className="dialog-panel material-dialog max-w-xl" onClick={event => event.stopPropagation()}>
+      <button type="button" aria-label={t("Close dialog")} onClick={onClose} disabled={isBusy} className="icon-button material-dialog-close"><Icon name="close" /></button>
+      {phase === "select" ? <>
+        <h2>{t("Upload lecture recordings")}</h2>
+        <p className="text-ink-soft text-sm mt-2 mb-6">{t("Add recordings, video URLs, or your lecture notes. Follow supporting analysis from Materials.")}</p>
+        <div className="material-type-picker mb-5" role="group" aria-label={t("Recording input method")}>
+          <button type="button" aria-pressed={mode === "file"} onClick={() => switchMode("file")}>{t("Upload files")}</button>
+          <button type="button" aria-pressed={mode === "url"} onClick={() => switchMode("url")}>{t("Paste video URLs")}</button>
+          <button type="button" aria-pressed={mode === "notes"} onClick={() => switchMode("notes")}>{t("Type notes")}</button>
+        </div>
+        {error && <div role="alert" className="material-inline-notice danger mb-4">{error}</div>}
+        {mode === "notes" ? <>
+          <label htmlFor="upload-notes-title" className="block text-sm font-medium mb-2">{t("Title (optional)")}</label>
+          <input id="upload-notes-title" type="text" value={notesTitle} onChange={event => setNotesTitle(event.target.value)} placeholder={t("e.g. Week 6 — what the prof emphasized")} maxLength={80} className="ui-input w-full mb-4" />
+          <label htmlFor="upload-notes-content" className="block text-sm font-medium mb-2">{t("What happened in the lecture?")}</label>
+          <textarea id="upload-notes-content" value={notesText} onChange={event => { setNotesText(event.target.value); setError(""); }} rows={7} dir="auto" className="ui-input w-full mb-2 resize-y" placeholder={t("Write your lecture notes here…")} />
+          <p className="text-xs text-ink-soft mb-5">{t("Your typed notes remain labeled as student content. Write at least 20 characters.")}</p>
+          <button type="button" onClick={startNotes} disabled={notesText.trim().length < 20} className="ui-button primary w-full"><Icon name="file" size={18} />{t("Analyze notes")}</button>
+        </> : mode === "url" ? <>
+          <label htmlFor="upload-video-urls" className="block text-sm font-medium mb-2">{t("Video URLs")} <span className="text-ink-soft font-normal">{t("(one per line)")}</span></label>
+          <textarea id="upload-video-urls" value={urlText} onChange={event => { setUrlText(event.target.value); setError(""); }} rows={5} dir="ltr" placeholder={"https://…\nhttps://…"} className="ui-input w-full resize-y mb-2" />
+          <p className="text-xs text-ink-soft mb-5">{parsedUrls.length > 0 ? parsedUrls.length + " " + t("URLs detected · processed one at a time.") : t("We fetch each video, extract the audio to MP3, and transcribe it.")}</p>
+          <button type="button" onClick={startUrls} disabled={!parsedUrls.length} className="ui-button primary w-full"><Icon name="upload" size={18} />{t("Fetch & Analyze")}{parsedUrls.length ? " (" + parsedUrls.length + ")" : ""}</button>
+        </> : <>
+          <div className="material-upload-drop" data-active={dragActive} onDragEnter={handleDrag} onDragOver={handleDrag} onDragLeave={handleDrag} onDrop={handleDrop}>
+            <span className="material-upload-symbol"><Icon name="upload" size={26} /></span>
+            <p className="font-medium">{t(dragActive ? "Drop your recordings here" : "Drag and drop recordings")}</p>
+            <p className="text-xs text-ink-soft">{ACCEPTED_EXTS.join(", ").toUpperCase()} · {MAX_SIZE_MB}MB · {t("select multiple")}</p>
+            <button type="button" onClick={() => fileInputRef.current?.click()} className="ui-button secondary">{t("Browse recordings")}</button>
+            <input ref={fileInputRef} type="file" multiple accept={ACCEPT_ATTR} onChange={handleFileChange} className="hidden" aria-label={t("Choose recordings")} />
           </div>
-        )}
-      </div>
+          {items.length > 0 && <div className="material-upload-list">{items.map((item, index) => <div key={item.label + index} className="material-upload-file">
+            <Icon name="file" size={20} className="text-ink-soft shrink-0" /><div className="material-file-copy"><p dir="auto">{item.label}</p>{item.file && <span className="text-xs text-ink-soft tabular-nums">{formatFileSize(item.file.size)}</span>}</div>
+            <button type="button" aria-label={t("Remove") + " " + item.label} className="icon-button" onClick={() => removeFile(index)}><Icon name="close" size={18} /></button>
+          </div>)}</div>}
+          <button type="button" onClick={startFiles} disabled={!items.length} className="ui-button primary w-full"><Icon name="upload" size={18} />{t("Upload & Analyze")}{items.length ? " (" + items.length + ")" : ""}</button>
+          <p className="text-xs text-ink-soft leading-relaxed mt-4">{t("Uploads are queued one at a time. Follow analysis progress on the course page.")}</p>
+        </>}
+      </> : <div className="text-center pt-4" aria-live="polite" aria-atomic="false">
+        <div className="material-progress-count">{finishedCount}/{total}</div>
+        <h2>{t(isDone ? failedCount ? "Finished with some issues" : "Uploaded; analysis is queued." : "Uploading materials…")}</h2>
+        <p className="text-sm text-ink-soft mt-2 mb-5">{doneCount} {t("of")} {total} {t("uploaded")}{failedCount ? " · " + failedCount + " " + t("failed") : ""}</p>
+        {!isDone && items[currentIndex] && <p dir="auto" className="text-sm text-ink-soft mb-4 break-words">{t("Now")}: {items[currentIndex].label}</p>}
+        {!isDone && <div className="mb-4">{stepsFor(items[currentIndex]).map((step,index) => <div key={step.id} className="material-stage" data-active={index === currentStep && !completed.has(step.id)} data-done={completed.has(step.id)}>
+          <span className="material-stage-mark">{completed.has(step.id) ? <Icon name="check" size={16} /> : index + 1}</span><span className="flex-1 text-sm font-medium">{t(step.label)}</span><span className="text-xs text-ink-soft">{t(completed.has(step.id) ? "done" : index === currentStep ? "in progress…" : "queued")}</span>
+        </div>)}</div>}
+        <div className="material-upload-list">{items.map((item,index) => <div key={item.label + index} className="material-upload-file"><div className="material-file-copy"><p dir="auto">{item.label}</p>{item.error && <p className="text-xs text-danger mt-1" role="alert">{item.error}</p>}</div>{statusBadge(item.status)}</div>)}</div>
+        <p className="text-xs text-ink-soft mt-5">{t(isDone ? "Done — closing…" : "One recording at a time — please keep this open.")}</p>
+      </div>}
     </div>
-  );
+  </div>;
 }

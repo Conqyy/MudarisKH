@@ -10,9 +10,11 @@ import SupportingCitation from "@/components/SupportingCitation";
 import { SupportingRef, validatedSupportingRefs } from "@/lib/supporting-materials";
 import { citationsForPath, firstSupportingBlocker, retainSelectedRows, supportingPresentation } from "@/lib/supporting-materials";
 import SupportingSelectionNotice from "@/components/SupportingSelectionNotice";
-import Navbar from "@/components/Navbar";
-import Sidebar from "@/components/Sidebar";
+import AppShell from "@/components/AppShell";
+import Icon from "@/components/Icon";
+import { StudyBusy, StudySourceStatus } from "@/components/StudyWorkspace";
 import { CourseFoundationGate } from "@/components/CourseFoundationGate";
+import { useDialog } from "@/lib/use-dialog";
 import { useCourseFoundation } from "@/hooks/useCourseFoundation";
 import { useAuth } from "@/lib/auth-context";
 import { useLang } from "@/lib/i18n";
@@ -30,8 +32,8 @@ const md = {
   ul: (p: any) => <ul dir="auto" className="list-disc ps-5 mb-2.5 space-y-1" {...p} />,
   ol: (p: any) => <ol dir="auto" className="list-decimal ps-5 mb-2.5 space-y-1" {...p} />,
   li: (p: any) => <li className="leading-relaxed" {...p} />,
-  h1: (p: any) => <h1 dir="auto" className="font-serif text-lg font-medium mt-4 mb-1.5 first:mt-0" {...p} />,
-  h2: (p: any) => <h2 dir="auto" className="font-serif text-base font-medium mt-4 mb-1.5 first:mt-0" {...p} />,
+  h1: (p: any) => <h1 dir="auto" className="font-sans text-lg font-medium mt-4 mb-1.5 first:mt-0" {...p} />,
+  h2: (p: any) => <h2 dir="auto" className="font-sans text-base font-medium mt-4 mb-1.5 first:mt-0" {...p} />,
   h3: (p: any) => <h3 dir="auto" className="font-semibold text-sm mt-3 mb-1 first:mt-0" {...p} />,
   a: (p: any) => <a className="text-accent underline" target="_blank" rel="noopener noreferrer" {...p} />,
   code: (p: any) => <code className="bg-bg-alt px-1 py-0.5 rounded font-mono text-[0.85em]" {...p} />,
@@ -113,6 +115,7 @@ function TutorPageContent() {
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyCollapsed, setHistoryCollapsed] = useState(false);
   const conversationVersion = useRef(0);
   const conversationRequest = useRef<AbortController | null>(null);
   const historyRequest = useRef<AbortController | null>(null);
@@ -157,6 +160,8 @@ function TutorPageContent() {
     setSelTuts(previous => new Set([...previous].filter(value => value !== id)));
   };
   const [sourcesOpen, setSourcesOpen] = useState(false);
+  const sourceDialogRef = useDialog(() => setSourcesOpen(false), sourcesOpen);
+  const historyDialogRef = useDialog(() => setHistoryOpen(false), historyOpen);
 
   // Fullscreen / focus mode for the chat
   const [fullscreen, setFullscreen] = useState(false);
@@ -171,7 +176,7 @@ function TutorPageContent() {
   useEffect(() => {
     if (!fullscreen) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setFullscreen(false);
+      if (e.key === "Escape" && !e.defaultPrevented) setFullscreen(false);
     };
     window.addEventListener("keydown", onKey);
     // Lock body scroll while the chat is full-screen
@@ -209,7 +214,7 @@ function TutorPageContent() {
       setChatError("");
       setChats(data.chats || []);
     } catch {
-      if (!activeSignal.aborted && !controller.signal.aborted) setChatError("Could not load conversations.");
+      if (!activeSignal.aborted && !controller.signal.aborted) setChatError(t("Could not load conversations."));
     }
   };
 
@@ -329,7 +334,7 @@ function TutorPageContent() {
       activeChatId.current = id;
       setChatId(id);
     } catch {
-      if (version === conversationVersion.current) alert("Could not open this conversation.");
+      if (version === conversationVersion.current) alert(t("Could not open this conversation."));
     } finally {
       if (version === conversationVersion.current) { setOpeningChat(false); conversationRequest.current = null; }
     }
@@ -337,7 +342,7 @@ function TutorPageContent() {
 
   const deleteChat = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    if (!confirm("Delete this conversation?")) return;
+    if (!confirm(t("Delete this conversation?"))) return;
     if (id === activeChatId.current) invalidateConversation(true);
     try {
       const res = await apiFetch(`${API_URL}/api/tutor/chat/${id}`, { method: "DELETE" });
@@ -345,7 +350,7 @@ function TutorPageContent() {
       setChats((prev) => prev.filter((c) => c.id !== id));
       if (id === activeChatId.current) newChat();
     } catch {
-      alert("Failed to delete.");
+      alert(t("Failed to delete."));
     }
   };
 
@@ -386,7 +391,7 @@ function TutorPageContent() {
           if (currentFoundation?.ready) {
             setMessages(messages);
             setInput(content);
-            setSendError("This conversation changed. Reopen it from History, then send your draft again.");
+            setSendError(t("This conversation changed. Reopen it from History, then send your draft again."));
           }
           return;
         }
@@ -401,55 +406,41 @@ function TutorPageContent() {
       if (version !== conversationVersion.current) return;
       setMessages(messages);
       setInput(content);
-      setSendError(e.message || "Something went wrong. Please retry.");
+      setSendError(e.message || t("Something went wrong. Please retry."));
     } finally {
       if (version === conversationVersion.current) { conversationRequest.current = null; pendingTurn.current = null; setThinking(false); }
     }
   };
 
-  if (loadError && !pageLoading) return <><Navbar /><div className="pt-28 px-6 text-center" role="alert"><p>{loadError}</p><button onClick={() => loadData()} className="mt-4 underline">Retry loading</button></div></>;
+  if (loadError && !pageLoading) return <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="tutor"><main className="workspace-main study-workspace"><div className="ui-panel study-busy" role="alert"><Icon name="alert" size={28} /><p>{loadError}</p><button onClick={() => loadData()} className="ui-button secondary">{t("Retry loading")}</button></div></main></AppShell>;
 
   if (loading || pageLoading) {
     return (
-      <>
-        <Navbar />
-        <div className="pt-20 min-h-screen flex items-center justify-center">
-          <div className="font-mono text-sm text-ink-mute">Loading...</div>
-        </div>
-      </>
+      <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="tutor"><main className="workspace-main study-workspace"><StudyBusy loading title="Loading…" /></main></AppShell>
     );
   }
   if (!user) return null;
   if (!course) {
     return (
-      <>
-        <Navbar />
-        <div className="pt-20 min-h-screen flex items-center justify-center">
+      <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="tutor"><main className="workspace-main study-workspace"><div className="ui-panel study-busy">
           <div className="text-center">
-            <h1 className="font-serif text-3xl font-medium mb-3">Course not found</h1>
+            <h1 className="font-sans text-3xl font-medium mb-3">{t("Course not found")}</h1>
             <Link href="/dashboard" className="inline-block bg-ink text-paper px-6 py-3 rounded-full text-sm font-medium hover:bg-accent transition">
-              Back to Dashboard
+              {t("Back to Dashboard")}
             </Link>
           </div>
-        </div>
-      </>
+        </div></main></AppShell>
     );
   }
 
   if (!foundationReady) {
     return (
-      <>
-        <Navbar />
-        <div className="pt-20 flex">
-          <Sidebar courses={allCourses} />
-          <main className="flex-1 px-6 md:px-10 py-8 max-w-4xl mx-auto w-full">
+      <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="tutor"><main className="workspace-main study-workspace">
             <Link href={`/course/${courseId}`} className="inline-block mb-6 text-sm text-ink-soft hover:text-accent transition">
               ← {t("Back to course")}
             </Link>
             <CourseFoundationGate courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} onRetry={refreshFoundation} />
-          </main>
-        </div>
-      </>
+          </main></AppShell>
     );
   }
 
@@ -457,16 +448,16 @@ function TutorPageContent() {
     <>
       <button
         onClick={newChat}
-        className="w-full bg-ink text-paper px-4 py-2.5 rounded-full text-sm font-medium hover:bg-accent transition mb-4 flex-shrink-0"
+        className="ui-button primary w-full mb-4"
       >
-        + New chat
+        <Icon name="plus" size={16} /> {t("New chat")}
       </button>
       <div className="flex-1 overflow-y-auto space-y-1">
-        <div className="text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-2 px-1">
-          History
+        <div className="text-[11px] tabular-nums text-ink-mute  mb-2 px-1">
+          {t("History")}
         </div>
-        {chatError ? <div role="alert" className="text-xs text-accent">{chatError}<button onClick={() => loadChats()} className="block underline mt-2">Retry history</button></div> : chats.length === 0 ? (
-          <div className="text-xs text-ink-mute/60 italic px-1 py-2">No conversations yet</div>
+        {chatError ? <div role="alert" className="text-xs text-accent">{chatError}<button onClick={() => loadChats()} className="block underline mt-2">{t("Retry history")}</button></div> : chats.length === 0 ? (
+          <div className="text-xs text-ink-mute/60 italic px-1 py-2">{t("No conversations yet")}</div>
         ) : (
           chats.map((c) => (
             <div
@@ -481,10 +472,10 @@ function TutorPageContent() {
               <span className="text-sm truncate flex-1">{c.title}</span>
               <button
                 onClick={(e) => deleteChat(e, c.id)}
-                title="Delete" aria-label={"Delete " + c.title}
-                className="w-5 h-5 rounded-full text-ink-mute opacity-100 md:opacity-0 md:group-hover:opacity-100 focus:opacity-100 hover:bg-accent hover:text-paper transition flex items-center justify-center text-[11px] leading-none flex-shrink-0"
+                title={t("Delete")} aria-label={t("Delete") + " " + c.title}
+                className="icon-button danger flex-shrink-0"
               >
-                ×
+                <Icon name="trash" size={15} />
               </button>
             </div>
           ))
@@ -496,39 +487,40 @@ function TutorPageContent() {
   const SourcesPanel = () => (
     <>
       <div className="flex items-center justify-between mb-3 flex-shrink-0">
-        <span className="text-[11px] font-mono text-ink-mute uppercase tracking-widest">Sources</span>
+        <span className="text-[11px] tabular-nums text-ink-mute ">{t("Sources")}</span>
         <span className="text-[11px] text-ink-soft">{selLectures.size + selRecs.size + selExams.size + selTuts.size}/{lectures.length + recordings.length + pastExams.length + tutorials.length}</span>
       </div>
       <div className="flex-1 overflow-y-auto space-y-4">
         {/* Lecture documents */}
         <div>
           <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[11px] font-mono text-ink-mute uppercase tracking-widest">Lectures</span>
+            <span className="text-[11px] tabular-nums text-ink-mute ">{t("Lectures")}</span>
             {lectures.length > 0 && (
               <button
                 onClick={() => setSelLectures(selLectures.size === lectures.length ? new Set() : new Set(lectures.map((l) => l.id)))}
                 className="text-[11px] text-accent hover:underline"
               >
-                {selLectures.size === lectures.length ? "Clear" : "All"}
+                {selLectures.size === lectures.length ? t("Clear") : t("All")}
               </button>
             )}
           </div>
           {lectures.length === 0 ? (
-            <div className="text-xs text-ink-mute/60 italic">None uploaded</div>
+            <div className="text-xs text-ink-mute/60 italic">{t("None uploaded")}</div>
           ) : (
             <div className="space-y-1">
               {lectures.map((l) => (
                 <button
                   key={l.id}
+                  aria-pressed={selLectures.has(l.id)}
                   onClick={() => toggleSel(selLectures, setSelLectures, l.id)}
-                  className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left transition ${
+                  className={`tutor-source-button w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg transition-colors ${
                     selLectures.has(l.id) ? "bg-sage/10 text-sage" : "text-ink-mute hover:bg-bg-alt"
                   }`}
                 >
                   <span className={`w-3.5 h-3.5 rounded border flex-shrink-0 flex items-center justify-center text-[9px] ${
                     selLectures.has(l.id) ? "bg-sage border-sage text-paper" : "border-line"
                   }`}>{selLectures.has(l.id) ? "✓" : ""}</span>
-                  <span className="flex-shrink-0">📄</span>
+                  <span className="flex-shrink-0"><Icon name="file" size={20} /></span>
                   <span className="text-xs truncate">{l.title}</span>
                 </button>
               ))}
@@ -538,44 +530,36 @@ function TutorPageContent() {
         {/* Recordings */}
         <div>
           <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[11px] font-mono text-ink-mute uppercase tracking-widest">Recordings</span>
+            <span className="text-[11px] tabular-nums text-ink-mute ">{t("Recordings")}</span>
             {recordings.length > 0 && (
               <button
                 onClick={() => setSelRecs(selRecs.size === recordings.length ? new Set() : new Set(recordings.map((r) => r.id)))}
                 className="text-[11px] hover:underline"
-                style={{ color: "#b8923a" }}
+                style={{ color: "var(--accent)" }}
               >
-                {selRecs.size === recordings.length ? "Clear" : "All"}
+                {selRecs.size === recordings.length ? t("Clear") : t("All")}
               </button>
             )}
           </div>
           {recordings.length === 0 ? (
-            <div className="text-xs text-ink-mute/60 italic">None uploaded</div>
+            <div className="text-xs text-ink-mute/60 italic">{t("None uploaded")}</div>
           ) : (
             <div className="space-y-1">
               {recordings.map((r) => (
                 <button
                   key={r.id}
+                  aria-pressed={selRecs.has(r.id)}
                   onClick={() => toggleSel(selRecs, setSelRecs, r.id)}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left transition"
-                  style={
-                    selRecs.has(r.id)
-                      ? { backgroundColor: "#b8923a1a", color: "#b8923a" }
-                      : undefined
-                  }
+                  className="tutor-source-button w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg transition-colors"
                 >
                   <span
                     className="w-3.5 h-3.5 rounded border flex-shrink-0 flex items-center justify-center text-[9px]"
-                    style={
-                      selRecs.has(r.id)
-                        ? { backgroundColor: "#b8923a", borderColor: "#b8923a", color: "#faf7f2" }
-                        : { borderColor: "var(--line, #d9d2c5)" }
-                    }
+                    style={{ borderColor: "var(--control-border)", color: "var(--accent)" }}
                   >
                     {selRecs.has(r.id) ? "✓" : ""}
                   </span>
-                  <span className="flex-shrink-0">🎙️</span>
-                  <span className={`text-xs truncate ${selRecs.has(r.id) ? "" : "text-ink-mute"}`}>{r.title}</span>
+                  <span className="flex-shrink-0"><Icon name="layers" size={18} /></span>
+                  <span className="flex-1 min-w-0"><span className="text-xs">{r.title}</span><StudySourceStatus row={{ ...r, status: r.status || "legacy" }} /></span>
                 </button>
               ))}
             </div>
@@ -584,33 +568,34 @@ function TutorPageContent() {
         {/* Past exams */}
         <div>
           <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[11px] font-mono text-ink-mute uppercase tracking-widest">Past exams</span>
+            <span className="text-[11px] tabular-nums text-ink-mute ">{t("Past exams")}</span>
             {pastExams.length > 0 && (
               <button
                 onClick={() => setSelExams(selExams.size === pastExams.length ? new Set() : new Set(pastExams.map((x) => x.id)))}
                 className="text-[11px] text-accent hover:underline"
               >
-                {selExams.size === pastExams.length ? "Clear" : "All"}
+                {selExams.size === pastExams.length ? t("Clear") : t("All")}
               </button>
             )}
           </div>
           {pastExams.length === 0 ? (
-            <div className="text-xs text-ink-mute/60 italic">None uploaded</div>
+            <div className="text-xs text-ink-mute/60 italic">{t("None uploaded")}</div>
           ) : (
             <div className="space-y-1">
               {pastExams.map((x) => (
                 <button
                   key={x.id}
+                  aria-pressed={selExams.has(x.id)}
                   onClick={() => toggleSel(selExams, setSelExams, x.id)}
-                  className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left transition ${
+                  className={`tutor-source-button w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg transition-colors ${
                     selExams.has(x.id) ? "bg-accent/10 text-accent" : "text-ink-mute hover:bg-bg-alt"
                   }`}
                 >
                   <span className={`w-3.5 h-3.5 rounded border flex-shrink-0 flex items-center justify-center text-[9px] ${
                     selExams.has(x.id) ? "bg-accent border-accent text-paper" : "border-line"
                   }`}>{selExams.has(x.id) ? "✓" : ""}</span>
-                  <span className="flex-shrink-0">📋</span>
-                  <span className="text-xs truncate">{x.title}</span>
+                  <span className="flex-shrink-0"><Icon name="exam" size={18} /></span>
+                  <span className="flex-1 min-w-0"><span className="text-xs">{x.title}</span><StudySourceStatus row={{ ...x, status: x.status || "legacy" }} /></span>
                 </button>
               ))}
             </div>
@@ -619,43 +604,35 @@ function TutorPageContent() {
         {/* Tutorials */}
         <div>
           <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[11px] font-mono text-ink-mute uppercase tracking-widest">Tutorials</span>
+            <span className="text-[11px] tabular-nums text-ink-mute ">{t("Tutorials")}</span>
             {tutorials.length > 0 && (
               <button
                 onClick={() => setSelTuts(selTuts.size === tutorials.length ? new Set() : new Set(tutorials.map((x) => x.id)))}
                 className="text-[11px] text-accent hover:underline"
               >
-                {selTuts.size === tutorials.length ? "Clear" : "All"}
+                {selTuts.size === tutorials.length ? t("Clear") : t("All")}
               </button>
             )}
           </div>
           {tutorials.length === 0 ? (
-            <div className="text-xs text-ink-mute/60 italic">None uploaded</div>
+            <div className="text-xs text-ink-mute/60 italic">{t("None uploaded")}</div>
           ) : (
             <div className="space-y-1">
               {tutorials.map((x) => (
                 <button
                   key={x.id}
+                  aria-pressed={selTuts.has(x.id)}
                   onClick={() => toggleSel(selTuts, setSelTuts, x.id)}
-                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-left transition"
-                  style={
-                    selTuts.has(x.id)
-                      ? { backgroundColor: "#3f6f7d1a", color: "#3f6f7d" }
-                      : undefined
-                  }
+                  className="tutor-source-button w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg transition-colors"
                 >
                   <span
                     className="w-3.5 h-3.5 rounded border flex-shrink-0 flex items-center justify-center text-[9px]"
-                    style={
-                      selTuts.has(x.id)
-                        ? { backgroundColor: "#3f6f7d", borderColor: "#3f6f7d", color: "#faf7f2" }
-                        : { borderColor: "var(--line, #d9d2c5)" }
-                    }
+                    style={{ borderColor: "var(--control-border)", color: "var(--accent)" }}
                   >
                     {selTuts.has(x.id) ? "✓" : ""}
                   </span>
-                  <span className="flex-shrink-0">✏️</span>
-                  <span className={`text-xs truncate ${selTuts.has(x.id) ? "" : "text-ink-mute"}`}>{x.title}</span>
+                  <span className="flex-shrink-0"><Icon name="edit" size={18} /></span>
+                  <span className="flex-1 min-w-0"><span className="text-xs">{x.title}</span><StudySourceStatus row={{ ...x, status: x.status || "legacy" }} /></span>
                 </button>
               ))}
             </div>
@@ -665,113 +642,64 @@ function TutorPageContent() {
     </>
   );
 
-  return (
-    <>
-      {/* Hide the top nav entirely while in fullscreen so the chat truly fills
-          the viewport and the corner toggle isn't covered by it. */}
-      {!fullscreen && <Navbar />}
-      <div className={fullscreen ? "flex" : "pt-20 flex"}>
-        {!fullscreen && <Sidebar courses={allCourses} />}
-        <main
-          className={
-            fullscreen
-              ? "flex-1 w-full flex flex-col"
-              : "flex-1 w-full px-4 md:px-8 lg:px-10 pb-6 max-w-[1500px] mx-auto flex flex-col"
-          }
-          style={fullscreen ? { height: "100vh" } : { height: "calc(100vh - 5rem)" }}
-        >
-          {/* Breadcrumb — hidden in fullscreen so the chat is truly distraction-free */}
-          {!fullscreen && (
-            <div className="my-6 flex items-center gap-2 text-xs font-mono flex-shrink-0">
-              <Link href="/dashboard" className="text-ink-soft hover:text-accent transition">Dashboard</Link>
-              <span className="text-ink-mute">›</span>
-              <Link href={`/course/${courseId}`} className="text-ink-soft hover:text-accent transition">{course.code}</Link>
-              <span className="text-ink-mute">›</span>
-              <span className="text-ink">AI Coach</span>
-            </div>
-          )}
-
-          <div
-            className={
-              fullscreen
-                ? "fixed inset-0 z-[100] bg-paper flex overflow-hidden"
-                : "bg-paper border border-line rounded-3xl flex-1 flex overflow-hidden shadow-soft"
-            }
-          >
+  const workspace = (
+    <main className={`workspace-main study-workspace tutor-workspace ${fullscreen ? "tutor-fullscreen" : ""}`}>
+          <div className={fullscreen ? "fixed inset-0 z-[100] bg-paper flex overflow-hidden study-workspace" : "tutor-frame"}>
             {/* History sidebar (desktop) */}
-            <aside className="w-60 bg-bg/40 border-r border-line p-4 hidden md:flex flex-col flex-shrink-0">
-              <HistoryList />
+            <aside className={`tutor-history flex-col ${historyCollapsed ? "hidden" : "hidden md:flex"}`}>
+              {HistoryList()}
             </aside>
 
             {/* Chat column */}
             <div className="flex-1 flex flex-col min-w-0">
               {sendError && <div role="alert" className="p-3 text-sm text-accent border-b border-line">{sendError}</div>}
-              {openingChat && <p role="status" className="p-3 text-sm">Opening conversation...</p>}
+              {openingChat && <p role="status" className="p-3 text-sm">{t("Opening conversation...")}</p>}
               {/* Header */}
-              <div className="border-b border-line px-6 py-4 flex items-center gap-3 flex-shrink-0">
+              <div className="tutor-header border-b border-line px-5 py-4 flex items-center gap-3 flex-shrink-0">
                 <button
-                  onClick={() => setHistoryOpen((o) => !o)}
-                  className="md:hidden w-8 h-8 rounded-full border border-line flex items-center justify-center text-sm"
-                  title="History"
+                  onClick={() => { setSourcesOpen(false); setHistoryOpen((o) => !o); }}
+                  className="icon-button md:hidden"
+                  title={t("History")} aria-label={t("History")} aria-expanded={historyOpen}
                 >
-                  ☰
+                  <Icon name="menu" size={18} />
                 </button>
-                <div className="w-9 h-9 rounded-full bg-accent/10 flex items-center justify-center text-lg">🎓</div>
-                <div className="flex-1 min-w-0">
-                  <div className="font-serif text-lg font-medium tracking-tight">AI Coach</div>
-                  <div className="text-xs text-ink-mute font-mono truncate">{course.code} · grounded in your course materials</div>
+                <button type="button" className="icon-button hidden md:flex" aria-label={t("Toggle chat history")} aria-expanded={!historyCollapsed} onClick={() => setHistoryCollapsed(value => !value)}><Icon name="history" size={18} /></button>
+                <div className="w-9 h-9 rounded-full bg-accent/10 flex items-center justify-center text-lg"><Icon name="chat" size={24} /></div>
+                <div className="tutor-title flex-1 min-w-0">
+                  <h1 className="text-base font-semibold">{t("AI Tutor")}</h1>
+                  <div className="text-xs text-ink-mute tabular-nums truncate">{course.code} · {t("grounded in your course materials")}</div>
                 </div>
                 <button
-                  onClick={() => setSourcesOpen((o) => !o)}
-                  className="lg:hidden text-xs border border-line rounded-full px-3 py-1.5 hover:bg-bg-alt transition"
-                  title="Sources"
+                  onClick={() => { setHistoryOpen(false); setSourcesOpen((o) => !o); }}
+                  className="ui-button secondary tutor-source-trigger" aria-label={t("Sources")} aria-expanded={sourcesOpen}
+                  title={t("Sources")}
                 >
-                  Sources
+                  <Icon name="layers" size={16} /> {t("Sources")} <span className="study-count">{selLectures.size + selRecs.size + selExams.size + selTuts.size}</span>
                 </button>
                 <button
                   onClick={() => setFullscreen((f) => !f)}
-                  className="w-8 h-8 rounded-full border border-line flex items-center justify-center text-ink-soft hover:bg-bg-alt hover:text-ink transition flex-shrink-0"
-                  title={fullscreen ? "Exit fullscreen (Esc)" : "Expand to fullscreen"}
-                  aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}
+                  className="icon-button"
+                  title={t(fullscreen ? "Exit fullscreen (Esc)" : "Expand to fullscreen")}
+                  aria-label={t(fullscreen ? "Exit fullscreen" : "Enter fullscreen")}
                 >
-                  {fullscreen ? (
-                    // collapse icon (arrows pointing inward)
-                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M10 2v4h4" />
-                      <path d="M14 2l-4 4" />
-                      <path d="M6 14v-4H2" />
-                      <path d="M2 14l4-4" />
-                    </svg>
-                  ) : (
-                    // expand icon (arrows pointing outward)
-                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M3 7V3h4" />
-                      <path d="M3 3l4 4" />
-                      <path d="M13 9v4h-4" />
-                      <path d="M13 13l-4-4" />
-                    </svg>
-                  )}
+                  <Icon name={fullscreen ? "minimize" : "fullscreen"} size={18} />
                 </button>
                 <button
                   onClick={newChat}
                   className="md:hidden text-xs border border-line rounded-full px-3 py-1.5 hover:bg-bg-alt transition"
                 >
-                  New
+                  {t("New")}
                 </button>
               </div>
 
               {/* Mobile history dropdown */}
               {historyOpen && (
-                <div className="md:hidden border-b border-line p-4 max-h-60 overflow-y-auto flex flex-col">
-                  <HistoryList />
-                </div>
+                <div className="tutor-overlay" onClick={() => setHistoryOpen(false)}><div ref={historyDialogRef} role="dialog" aria-modal="true" aria-label={t("History")} tabIndex={-1} className="tutor-context-panel" onClick={event => event.stopPropagation()}><div className="flex justify-end mb-3"><button type="button" className="icon-button" aria-label={t("Close history")} onClick={() => setHistoryOpen(false)}><Icon name="close" size={18} /></button></div>{HistoryList()}</div></div>
               )}
 
               {/* Mobile sources dropdown */}
               {sourcesOpen && (
-                <div className="lg:hidden border-b border-line p-4 max-h-64 overflow-y-auto flex flex-col">
-                  <SourcesPanel />
-                </div>
+                <div className="tutor-overlay" onClick={() => setSourcesOpen(false)}><div ref={sourceDialogRef} role="dialog" aria-modal="true" aria-label={t("Sources")} tabIndex={-1} className="tutor-context-panel" onClick={event => event.stopPropagation()}><div className="flex justify-between items-center mb-3"><h2 className="section-heading">{t("Sources")}</h2><button type="button" className="icon-button" aria-label={t("Close sources")} onClick={() => setSourcesOpen(false)}><Icon name="close" size={18} /></button></div>{SourcesPanel()}</div></div>
               )}
 
               {/* Messages */}
@@ -779,23 +707,22 @@ function TutorPageContent() {
                 {messages.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-center px-4">
                     <div className="w-16 h-16 rounded-2xl bg-accent/10 flex items-center justify-center text-4xl mb-5">
-                      🎓
+                      <Icon name="chat" size={24} />
                     </div>
-                    <h2 className="font-serif text-3xl font-medium tracking-tight mb-3">
-                      Ask me anything about {course.code}
+                    <h2 className="font-sans text-3xl font-medium tracking-tight mb-3">
+                      {t("Ask me anything about")} {course.code}
                     </h2>
                     <p className="text-ink-soft text-sm mb-8 max-w-md leading-relaxed">
-                      I draw on your lecture documents, recordings, past exams, and tutorials
-                      to help you understand the material and prepare.
+                      {t("I draw on your lecture documents, recordings, past exams, and tutorials to help you understand the material and prepare.")}
                     </p>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 w-full max-w-lg">
                       {SUGGESTIONS.map((s) => (
                         <button
                           key={s}
                           onClick={() => send(s)}
-                          className="text-sm text-left border border-line rounded-2xl px-4 py-3 hover:bg-bg-alt hover:border-accent hover:-translate-y-0.5 transition-all"
+                          className="text-sm text-left border border-line rounded-2xl px-4 py-3 hover:bg-bg-alt hover:border-accent  transition-colors"
                         >
-                          {s}
+                          {t(s)}
                         </button>
                       ))}
                     </div>
@@ -809,9 +736,9 @@ function TutorPageContent() {
                     {messages.map((m, i) => (
                       <div key={i} className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}>
                         <div
-                          className={`rounded-2xl px-5 py-3.5 text-sm leading-relaxed ${
+                          className={`tutor-message rounded-2xl px-5 py-3.5 text-sm leading-relaxed ${
                             m.role === "user"
-                              ? "max-w-[85%] bg-ink text-paper whitespace-pre-wrap"
+                              ? "user-message max-w-[85%] whitespace-pre-wrap"
                               : "max-w-[90%] bg-bg border border-line text-ink"
                           }`}
                         >
@@ -830,9 +757,7 @@ function TutorPageContent() {
                     {thinking && (
                       <div className="flex justify-start">
                         <div className="bg-bg border border-line rounded-2xl px-5 py-4 flex items-center gap-1.5">
-                          <span className="w-2 h-2 bg-ink-mute rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                          <span className="w-2 h-2 bg-ink-mute rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                          <span className="w-2 h-2 bg-ink-mute rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                          <Icon name="loader" size={18} className="animate-spin" /><span role="status">{t("Thinking…")}</span>
                         </div>
                       </div>
                     )}
@@ -841,7 +766,7 @@ function TutorPageContent() {
               </div>
 
               {/* Input */}
-              <div className="border-t border-line p-4 flex-shrink-0 bg-bg/30">
+              <div className="tutor-composer border-t border-line p-4 flex-shrink-0 bg-bg/30">
       <SupportingSelectionNotice blocker={supportingBlocker} onDeselect={deselectBlocking} onRefresh={() => void loadDataRef.current?.()} />
                 <form
                   onSubmit={(e) => { e.preventDefault(); send(input); }}
@@ -850,40 +775,36 @@ function TutorPageContent() {
                   } mx-auto flex items-end gap-2.5 bg-paper border border-line rounded-3xl px-2 py-2 focus-within:border-accent transition shadow-soft`}
                 >
                   <textarea
+                    aria-label={t("Message your tutor")}
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(input); }
                     }}
-                    placeholder="Ask about a concept, request a quiz, get exam tips…"
+                    placeholder={t("Ask about a concept, request a quiz, get exam tips…")}
                     rows={1}
                     className="flex-1 px-3 py-2.5 bg-transparent text-sm focus:outline-none resize-none max-h-40 leading-relaxed"
                   />
                   <button
                     type="submit"
                     disabled={!input.trim() || thinking || openingChat || !foundationReady || !!supportingBlocker}
-                    className="bg-ink text-paper px-5 py-2.5 rounded-2xl text-sm font-medium hover:bg-accent transition disabled:opacity-40 disabled:cursor-not-allowed flex-shrink-0"
+                    className="ui-button primary"
                   >
-                    Send
+                    {t("Send")} <Icon name="arrow-right" size={16} />
                   </button>
                 </form>
                 <p
                   className={`${
                     fullscreen ? "max-w-[1150px]" : "max-w-3xl"
-                  } mx-auto text-[11px] text-ink-mute font-mono mt-2 px-2 text-center`}
+                  } mx-auto text-[11px] text-ink-mute tabular-nums mt-2 px-2 text-center`}
                 >
-                  Enter to send · Shift + Enter for a new line
+                  {t("Enter to send · Shift + Enter for a new line")}
                 </p>
               </div>
             </div>
 
-            {/* Sources sidebar (desktop) */}
-            <aside className="w-64 bg-bg/40 border-l border-line p-4 hidden lg:flex flex-col flex-shrink-0">
-              <SourcesPanel />
-            </aside>
           </div>
-        </main>
-      </div>
-    </>
+    </main>
   );
+  return <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="tutor" className={fullscreen ? "tutor-is-fullscreen" : ""} fullWidth>{workspace}</AppShell>;
 }

@@ -1,5 +1,8 @@
 "use client";
 
+import Icon from "@/components/Icon";
+import { COURSE_COLORS as COLORS } from "@/components/material-presentation";
+import { useLang } from "@/lib/i18n";
 import { useDialog } from "@/lib/use-dialog";
 
 import { useState, FormEvent } from "react";
@@ -11,16 +14,8 @@ interface Props {
   onSuccess: () => void;
 }
 
-const COLORS = [
-  { name: "Terracotta", value: "#c8472f" },
-  { name: "Gold", value: "#b8923a" },
-  { name: "Sage", value: "#6b7d5b" },
-  { name: "Ink", value: "#4a4640" },
-  { name: "Plum", value: "#8a6fa7" },
-  { name: "Teal", value: "#3d7a8c" },
-];
-
 export default function EditCourseModal({ course, onClose, onSuccess }: Props) {
+  const { t } = useLang();
   const dialogRef = useDialog(onClose);
   const [code, setCode] = useState(course.code);
   const [title, setTitle] = useState(course.title);
@@ -35,8 +30,8 @@ export default function EditCourseModal({ course, onClose, onSuccess }: Props) {
     e.preventDefault();
     setError("");
 
-    if (!code.trim()) return setError("Course code is required");
-    if (!title.trim()) return setError("Course title is required");
+    if (!code.trim()) return setError(t("Course code is required"));
+    if (!title.trim()) return setError(t("Course title is required"));
 
     setSubmitting(true);
     try {
@@ -58,30 +53,28 @@ export default function EditCourseModal({ course, onClose, onSuccess }: Props) {
 
   return (
     <div
-      ref={dialogRef} role="dialog" aria-modal="true" aria-label="Edit course" tabIndex={-1} className="fixed inset-0 bg-ink/50 backdrop-blur-md z-[100] flex items-center justify-center p-6 animate-fade-in"
+      ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("Edit course")} tabIndex={-1} className="dialog-overlay"
       onClick={onClose}
     >
       <div
-        className="bg-paper rounded-3xl p-8 md:p-10 max-w-md w-full shadow-lift relative max-h-[90vh] overflow-y-auto"
+        className="dialog-panel material-dialog max-w-md"
         onClick={(e) => e.stopPropagation()}
       >
         <button
           onClick={onClose}
-          aria-label="Close dialog"
-          className="absolute top-5 right-5 text-2xl text-ink-soft hover:text-ink leading-none w-8 h-8 flex items-center justify-center rounded-full hover:bg-bg-alt transition"
-        >
-          ×
-        </button>
+          aria-label={t("Close dialog")}
+          className="icon-button material-dialog-close"
+        ><Icon name="close" /></button>
 
-        <h2 className="font-serif text-3xl font-medium mb-2 tracking-tight">
-          Edit course
+        <h2 className="font-sans text-3xl font-medium mb-2 tracking-tight">
+              {t("Edit course")}
         </h2>
         <p className="text-ink-soft text-sm mb-8">
-          Update your course details.
+              {t("Update your course details.")}
         </p>
 
         {error && (
-          <div className="bg-accent/10 border border-accent text-accent text-sm rounded-xl p-3 mb-5">
+          <div role="alert" className="material-inline-notice danger mb-5">
             {error}
           </div>
         )}
@@ -89,13 +82,13 @@ export default function EditCourseModal({ course, onClose, onSuccess }: Props) {
         <form onSubmit={handleSubmit} className="space-y-5">
           <div>
             <label htmlFor="course-code" className="block text-sm font-medium text-ink-soft mb-2">
-              Course code <span className="text-accent">*</span>
+              {t("Course code")} <span className="text-accent">*</span>
             </label>
             <input id="course-code"
               type="text"
               value={code}
               onChange={(e) => setCode(e.target.value)}
-              className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition uppercase"
+              className="ui-input w-full uppercase"
               maxLength={20}
               required
             />
@@ -103,13 +96,13 @@ export default function EditCourseModal({ course, onClose, onSuccess }: Props) {
 
           <div>
             <label htmlFor="course-title" className="block text-sm font-medium text-ink-soft mb-2">
-              Course title <span className="text-accent">*</span>
+              {t("Course title")} <span className="text-accent">*</span>
             </label>
             <input id="course-title"
               type="text"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition"
+              className="ui-input w-full"
               maxLength={80}
               required
             />
@@ -117,21 +110,21 @@ export default function EditCourseModal({ course, onClose, onSuccess }: Props) {
 
           <div>
             <label htmlFor="course-instructor" className="block text-sm font-medium text-ink-soft mb-2">
-              Instructor
+              {t("Instructor")}
             </label>
             <input id="course-instructor"
               type="text"
               value={instructor}
               onChange={(e) => setInstructor(e.target.value)}
               placeholder="e.g. Dr. Qaisar Abbas"
-              className="w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition"
+              className="ui-input w-full"
               maxLength={60}
             />
           </div>
 
           <div>
             <label className="block text-sm font-medium text-ink-soft mb-2">
-              Color
+              {t("Color")}
             </label>
             <div className="flex gap-2 flex-wrap">
               {COLORS.map((c) => (
@@ -139,13 +132,10 @@ export default function EditCourseModal({ course, onClose, onSuccess }: Props) {
                   key={c.value}
                   type="button"
                   onClick={() => setSelectedColor(c.value)}
-                  className={`w-11 h-11 rounded-full transition ${
-                    selectedColor === c.value
-                      ? "ring-2 ring-ink ring-offset-2 ring-offset-paper"
-                      : "hover:scale-110"
-                  }`}
+                  className="material-course-color"
+                  aria-label={t(c.name)} aria-pressed={selectedColor === c.value}
                   style={{ background: c.value }}
-                  title={c.name}
+                  title={t(c.name)}
                 />
               ))}
             </div>
@@ -155,16 +145,16 @@ export default function EditCourseModal({ course, onClose, onSuccess }: Props) {
             <button
               type="button"
               onClick={onClose}
-              className="flex-1 border border-line py-3.5 rounded-full text-sm font-medium hover:bg-bg-alt transition"
+              className="ui-button secondary flex-1"
             >
-              Cancel
+              {t("Cancel")}
             </button>
             <button
               type="submit"
               disabled={submitting}
-              className="flex-1 bg-ink text-paper py-3.5 rounded-full text-sm font-medium hover:bg-accent transition disabled:opacity-50"
+              className="ui-button primary flex-1"
             >
-              {submitting ? "Saving…" : "Save changes"}
+              {submitting ? t("Saving…") : t("Save changes")}
             </button>
           </div>
         </form>

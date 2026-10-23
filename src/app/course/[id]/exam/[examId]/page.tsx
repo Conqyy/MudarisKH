@@ -6,8 +6,10 @@ import Link from "next/link";
 import SourceCitation, { SourceRef, validatedSourceRefs } from "@/components/SourceCitation";
 import SupportingCitation from "@/components/SupportingCitation";
 import { validatedSupportingRefs, SupportingRef } from "@/lib/supporting-materials";
-import Navbar from "@/components/Navbar";
-import Sidebar from "@/components/Sidebar";
+import AppShell from "@/components/AppShell";
+import Icon from "@/components/Icon";
+import { StudyBusy } from "@/components/StudyWorkspace";
+import ExamComparison from "@/components/ExamComparison";
 import BookmarkButton from "@/components/BookmarkButton";
 import { useAuth } from "@/lib/auth-context";
 import { useLang } from "@/lib/i18n";
@@ -60,7 +62,6 @@ export default function ExamAnswerPage() {
   // The model answers are hidden until the student chooses to reveal them
   // (so they solve the exam themselves first).
   const [showAnswers, setShowAnswers] = useState(false);
-
 
   // Optional: the student's OWN uploaded solution (shown left, for comparison).
   const [uploadingSolution, setUploadingSolution] = useState(false);
@@ -174,26 +175,19 @@ export default function ExamAnswerPage() {
     }
   };
 
-  if (loadError && !pageLoading) return <><Navbar /><div className="pt-28 px-6 text-center" role="alert"><p>{loadError}</p><button onClick={() => loadData()} className="mt-4 underline">Retry loading</button></div></>;
+  if (loadError && !pageLoading) return <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="exam"><main className="workspace-main study-workspace"><div className="ui-panel study-busy" role="alert"><Icon name="alert" size={28} /><p>{loadError}</p><button onClick={() => loadData()} className="ui-button secondary">{t("Retry loading")}</button></div></main></AppShell>;
 
   if (loading || pageLoading) {
     return (
-      <>
-        <Navbar />
-        <div className="pt-20 min-h-screen flex items-center justify-center">
-          <div className="font-mono text-sm text-ink-mute">Loading...</div>
-        </div>
-      </>
+      <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="exam"><main className="workspace-main study-workspace"><StudyBusy loading title="Loading…" /></main></AppShell>
     );
   }
 
   if (!user || !course || !exam) {
     return (
-      <>
-        <Navbar />
-        <div className="pt-20 min-h-screen flex items-center justify-center">
+      <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="exam"><main className="workspace-main study-workspace"><div className="ui-panel study-busy">
           <div className="text-center">
-            <h1 className="font-serif text-3xl font-medium mb-3">
+            <h1 className="font-sans text-3xl font-medium mb-3">
               Exam not found
             </h1>
             <Link
@@ -203,35 +197,29 @@ export default function ExamAnswerPage() {
               Back to Exams
             </Link>
           </div>
-        </div>
-      </>
+        </div></main></AppShell>
     );
   }
 
   return (
-    <>
-      <Navbar />
-      <div className="pt-20 flex">
-        <Sidebar courses={allCourses} />
-        <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-7xl mx-auto w-full">
-          {/* Breadcrumb */}
-          <div className="my-8 flex items-center gap-2 text-xs font-mono">
+    <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="exam"><main className="workspace-main study-workspace">
+          <div className="study-reader-toolbar">
+            <div><Link href={`/course/${courseId}/exam`} className="ui-button ghost"><Icon name="arrow-left" size={16} />{t("Back to Exams")}</Link><h1 className="page-heading" dir="auto">{exam.examId}</h1></div>
+            <div>
             <Link
               href={`/course/${courseId}`}
               className="text-ink-soft hover:text-accent transition"
             >
               {course.code}
             </Link>
-            <span className="text-ink-mute">›</span>
+            <Icon name="chevron-right" size={14} />
             <Link
               href={`/course/${courseId}/exam`}
               className="text-ink-soft hover:text-accent transition"
             >
               Exams
             </Link>
-            <span className="text-ink-mute">›</span>
-            <span className="text-ink">{exam.examId}</span>
-            <span className="ml-auto">
+            </div><span>
               <BookmarkButton
                 item={{
                   kind: "exam",
@@ -270,11 +258,16 @@ export default function ExamAnswerPage() {
             // Obvious drag-and-drop zone for the student's own solution.
             const solutionDropzone = (
               <div
+                role="button"
+                tabIndex={uploadingSolution ? -1 : 0}
+                aria-label={t(hasSolution ? "Replace your solution" : "Upload your solution")}
+                aria-disabled={uploadingSolution}
+                onKeyDown={(event) => { if (!uploadingSolution && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); solutionInputRef.current?.click(); } }}
                 onDragEnter={handleSolutionDrag}
                 onDragOver={handleSolutionDrag}
                 onDragLeave={handleSolutionDrag}
                 onDrop={handleSolutionDrop}
-                onClick={() => solutionInputRef.current?.click()}
+                onClick={() => { if (!uploadingSolution) solutionInputRef.current?.click(); }}
                 className={`border-2 border-dashed rounded-2xl p-6 text-center cursor-pointer transition ${
                   dragActive
                     ? "border-accent bg-accent/5 scale-[1.01]"
@@ -290,7 +283,7 @@ export default function ExamAnswerPage() {
                   </>
                 ) : hasSolution ? (
                   <>
-                    <div className="text-3xl mb-2">✓</div>
+                    <div className="flex justify-center mb-2"><Icon name="check-circle" size={28} /></div>
                     <div className="text-sm font-medium text-sage">
                       {exam.solutionName || "Your solution uploaded"}
                     </div>
@@ -301,7 +294,7 @@ export default function ExamAnswerPage() {
                 ) : (
                   <>
                     <div className="text-3xl mb-2 opacity-50">
-                      {dragActive ? "📥" : "📤"}
+                      <Icon name="upload" size={28} />
                     </div>
                     <div className="text-sm font-medium">
                       {dragActive
@@ -322,7 +315,7 @@ export default function ExamAnswerPage() {
                 <div className="bg-bg-alt border-b border-line px-5 py-3 flex items-center justify-between gap-3">
                   <div className="flex items-center gap-3">
                     <div className="w-2.5 h-2.5 bg-sage rounded-full" />
-                    <span className="font-mono text-xs text-ink-mute">{exam.examId}.pdf</span>
+                    <span className="tabular-nums text-xs text-ink-mute">{exam.examId}.pdf</span>
                   </div>
                   {examPdfUrl && (
                     <a
@@ -348,7 +341,7 @@ export default function ExamAnswerPage() {
                   >
                     {examPdfFailed ? (
                       <>
-                        <div className="text-4xl mb-3 opacity-60">📄</div>
+                        <div className="text-4xl mb-3 opacity-60"><Icon name="file" size={20} /></div>
                         <p className="text-sm text-ink-soft">
                           The exam PDF couldn&apos;t be loaded.
                         </p>
@@ -367,7 +360,7 @@ export default function ExamAnswerPage() {
                 <div className="bg-bg-alt border-b border-line px-5 py-3 flex items-center justify-between gap-3">
                   <div className="flex items-center gap-3 min-w-0">
                     <div className="w-2.5 h-2.5 bg-sage rounded-full" />
-                    <span className="font-mono text-xs text-ink-mute truncate">
+                    <span className="tabular-nums text-xs text-ink-mute truncate">
                       Your solution — {exam.solutionName || "uploaded"}
                     </span>
                   </div>
@@ -395,7 +388,7 @@ export default function ExamAnswerPage() {
                     className="flex flex-col items-center justify-center text-center p-8"
                     style={{ height: "85vh" }}
                   >
-                    <div className="text-4xl mb-3 opacity-60">📎</div>
+                    <div className="text-4xl mb-3 opacity-60"><Icon name="upload" size={24} /></div>
                     <p className="text-sm text-ink-soft mb-4">
                       {exam.solutionName || "Your solution"} can&apos;t be previewed here.
                     </p>
@@ -416,7 +409,7 @@ export default function ExamAnswerPage() {
                 <div className="bg-bg-alt border-b border-line px-5 py-3 flex items-center justify-between gap-3">
                   <div className="flex items-center gap-3">
                     <div className="w-2.5 h-2.5 bg-accent rounded-full" />
-                    <span className="font-mono text-xs text-ink-mute">
+                    <span className="tabular-nums text-xs text-ink-mute">
                       {exam.examId}-answers.pdf
                     </span>
                   </div>
@@ -452,7 +445,7 @@ export default function ExamAnswerPage() {
                   )}
                   {answersFailed && (
                     <div className="absolute inset-0 bg-paper flex flex-col items-center justify-center text-center px-8">
-                      <div className="text-4xl mb-3 opacity-60">📝</div>
+                      <div className="mb-3"><Icon name="summary" size={28} /></div>
                       <p className="text-sm text-ink-soft">
                         The answer key couldn&apos;t be built. Please retry.
                       </p>
@@ -465,16 +458,16 @@ export default function ExamAnswerPage() {
                       <div className="w-20 h-20 mb-6 relative">
                         <div className="w-20 h-20 border-[3px] border-bg-alt border-t-accent rounded-full animate-spin-slow" />
                         <div className="absolute inset-0 flex items-center justify-center text-2xl">
-                          📝
+                          <Icon name="summary" size={24} />
                         </div>
                       </div>
-                      <h3 className="font-serif text-xl md:text-2xl font-medium tracking-tight mb-2">
+                      <h3 className="font-sans text-xl md:text-2xl font-medium tracking-tight mb-2">
                         Preparing your model answers…
                       </h3>
                       <p className="text-ink-soft text-sm max-w-xs leading-relaxed mb-1">
                         Writing the exact answer (and why) for every question.
                       </p>
-                      <p className="text-xs text-ink-mute font-mono">
+                      <p className="text-xs text-ink-mute tabular-nums">
                         This usually takes 2–3 minutes — please keep this tab open.
                       </p>
                     </div>
@@ -487,9 +480,9 @@ export default function ExamAnswerPage() {
               <div className="bg-paper border border-line rounded-3xl overflow-hidden shadow-soft flex flex-col" style={{ minHeight: "85vh" }}>
                 <div className="flex-1 flex flex-col items-center justify-center text-center p-8">
                   <div className="w-16 h-16 rounded-2xl bg-sage/10 flex items-center justify-center text-4xl mb-5">
-                    📝
+                    <Icon name="summary" size={28} />
                   </div>
-                  <h2 className="font-serif text-2xl font-medium tracking-tight mb-2">
+                  <h2 className="font-sans text-2xl font-medium tracking-tight mb-2">
                     Solve it yourself first
                   </h2>
                   <p className="text-ink-soft text-sm mb-1 max-w-sm">
@@ -499,7 +492,7 @@ export default function ExamAnswerPage() {
                     </span>{" "}
                     questions on your own, then reveal the model answers to check your work.
                   </p>
-                  <p className="text-xs text-ink-mute font-mono mb-7">
+                  <p className="text-xs text-ink-mute tabular-nums mb-7">
                     The answer key shows each full question with its answer in red.
                   </p>
 
@@ -511,13 +504,13 @@ export default function ExamAnswerPage() {
 
                   <button
                     onClick={revealAnswers}
-                    className="bg-ink text-paper px-7 py-3.5 rounded-full text-sm font-medium hover:bg-accent transition-all hover:-translate-y-0.5 hover:shadow-lift mb-6"
+                    className="ui-button primary mb-6"
                   >
-                    Reveal model answers →
+                    {t("Reveal model answers")} <Icon name="arrow-right" size={18} />
                   </button>
 
                   <div className="w-full max-w-sm">
-                    <div className="text-[11px] font-mono uppercase tracking-widest text-ink-mute mb-2">
+                    <div className="text-[11px] tabular-nums  text-ink-mute mb-2">
                       Optional · compare your work
                     </div>
                     {solutionDropzone}
@@ -534,9 +527,9 @@ export default function ExamAnswerPage() {
               return (
                 <div className="grid grid-cols-1 gap-5 max-w-4xl mx-auto">
                   {hiddenInput}
-                  {answersPanel}
+                  <ExamComparison key="answers" left={examPanel} right={answersPanel} leftTitle="Exam" rightTitle="Model answers" singleRight initiallyRight focusInitially />
                   <div>
-                    <div className="text-[11px] font-mono uppercase tracking-widest text-ink-mute mb-2 text-center">
+                    <div className="text-[11px] tabular-nums  text-ink-mute mb-2 text-center">
                       Upload your solved exam to compare it beside the answers
                     </div>
                     {uploadError && (
@@ -551,17 +544,14 @@ export default function ExamAnswerPage() {
             }
 
             return (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <div>
                 {hiddenInput}
-                {hasSolution ? solutionPanel : examPanel}
-                {showAnswers ? answersPanel : gatePanel}
+                <ExamComparison key={`${showAnswers}-${hasSolution}`} left={hasSolution ? solutionPanel : examPanel} right={showAnswers ? answersPanel : gatePanel} leftTitle={hasSolution ? "Your solution" : "Exam"} rightTitle={showAnswers ? "Model answers" : "Self-check"} initiallyRight={showAnswers} focusInitially={showAnswers} />
               </div>
             );
           })()}
           {(validatedSourceRefs(exam.sharedSourceRefs).length > 0 || validatedSupportingRefs(exam.sharedSupportingSourceRefs).length > 0) && <div className="mt-4 border border-line rounded-xl p-4 text-sm"><span>{t("Shared context")}</span><SourceCitation courseId={courseId} sourceRefs={exam.sharedSourceRefs} /><SupportingCitation courseId={courseId} sourceRefs={exam.sharedSupportingSourceRefs} /></div>}
           {exam.questionStructure.map((question, index) => (validatedSourceRefs(question.sourceRefs).length > 0 || validatedSupportingRefs(question.supportingSourceRefs).length > 0) && <div key={question.id || index} className="mt-4 border border-line rounded-xl p-4 text-sm"><span>{question.id || index + 1}</span><SourceCitation courseId={courseId} sourceRefs={question.sourceRefs} /><SupportingCitation courseId={courseId} sourceRefs={question.supportingSourceRefs} /></div>)}
-        </main>
-      </div>
-    </>
+        </main></AppShell>
   );
 }

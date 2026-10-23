@@ -29,26 +29,26 @@ export default function SupportingAnalysisReport({ kind, materialId, courseId }:
   const alignment = coverageCount(report?.alignmentCoverage, "itemIds", "checkedItemIds");
   const topics = coverageCount(report?.alignmentCoverage, "topicIds", "checkedTopicIds");
   const canRetry = status && (status.legacy || status.stale || ["failed", "incomplete"].includes(status.status));
-  return <section className="space-y-4" aria-label={t("Supporting material report")}>
-    <h3 className="font-serif text-lg font-medium">{t("Supporting material report")}</h3>
+  return <section className="material-reader space-y-5" aria-label={t("Supporting material report")}>
+    <h3 className="section-heading pe-10">{t("Supporting material report")}</h3>
     {loading && <p>{t("Loading source…")}</p>}
     {status && <p className="text-sm text-ink-soft">{status.progress?.completedUnits ?? 0}{status.progress?.totalUnits != null ? ` / ${status.progress.totalUnits}` : ""} {t("source units")}{["queued", "processing", "preparing", "extracting", "aligning"].includes(status.status) && status.stage ? ` · ${t(status.stage === "extracting" ? "Extracting source content…" : status.stage === "aligning" ? "Comparing with lectures…" : status.stage === "queued" ? "Uploaded; analysis is queued." : "Processing")}` : ""}</p>}
-    {statusWarning && <p role="status" className="text-sm text-gold">{t(statusWarning)}</p>}
-    {status?.errorMessage && <p role="alert" className="text-sm text-accent" dir="auto">{status.errorMessage}</p>}
+    {statusWarning && <p role="status" className="material-inline-notice warning">{t(statusWarning)}</p>}
+    {status?.errorMessage && <p role="alert" className="material-inline-notice danger" dir="auto">{status.errorMessage}</p>}
     {error && <p role="alert" className="text-sm text-accent">{error}</p>}
-    {canRetry && <button type="button" className="underline text-sm" onClick={() => void retry()}>{t(status?.legacy ? "Prepare material" : "Retry analysis")}</button>}
+    {canRetry && <button type="button" className="ui-button secondary" onClick={() => void retry()}>{t(status?.legacy ? "Prepare material" : "Retry analysis")}</button>}
     {report && <>
-      <div className="text-sm text-ink-soft flex flex-wrap gap-4"><span>{t("Extraction coverage")}: {extraction ?? t("Unknown")}</span><span>{t("Alignment coverage")}: {alignment ?? t("Unknown")}</span><span>{t("Topic coverage")}: {topics ?? t("Unknown")}</span></div>
+      <div className="flex flex-wrap gap-x-6 gap-y-2 text-sm text-ink-soft border-y border-line py-4 tabular-nums"><span>{t("Extraction coverage")}: {extraction ?? t("Unknown")}</span><span>{t("Alignment coverage")}: {alignment ?? t("Unknown")}</span><span>{t("Topic coverage")}: {topics ?? t("Unknown")}</span></div>
       {(report.extractionCoverage?.complete === false || report.alignmentCoverage?.complete === false) && <p className="text-sm text-gold">{t("Some source content could not be checked.")}</p>}
       {[...groups].map(([paperId, items]) => {
         const paper = paperById.get(paperId);
         const title = typeof paper?.title === "string" ? paper.title : typeof paper?.printedLabel === "string" ? paper.printedLabel : paperId ? `${t("Paper")} ${paperId}` : t("Items");
-        return <section key={paperId || "unassigned"} className="border border-line rounded-xl p-4 space-y-4">
+        return <section key={paperId || "unassigned"} className="border-t border-line pt-5 space-y-4">
           <h4 className="font-medium" dir="auto">{title}</h4>
           {items.map(item => <ReportItem key={item.id} item={item} alignment={alignmentById.get(item.id)} report={report} courseId={courseId} t={t} />)}
         </section>;
       })}
-      {report.topics?.length > 0 && <section className="border border-line rounded-xl p-4 space-y-3"><h4 className="font-medium">{t("Topics")}</h4>{[...new Map(report.topics.map(topic => [topic.id, topic])).values()].map(topic => <ReportTopic key={topic.id} topic={topic} report={report} courseId={courseId} t={t} />)}</section>}
+      {report.topics?.length > 0 && <section className="border-t border-line pt-5 space-y-3"><h4 className="font-medium">{t("Topics")}</h4>{[...new Map(report.topics.map(topic => [topic.id, topic])).values()].map(topic => <ReportTopic key={topic.id} topic={topic} report={report} courseId={courseId} t={t} />)}</section>}
       {report.nextOffset !== null && <button type="button" className="underline text-sm" onClick={() => void loadMore()}>{t("Load more results")}</button>}
     </>}
   </section>;
@@ -56,8 +56,8 @@ export default function SupportingAnalysisReport({ kind, materialId, courseId }:
 
 function ReportItem({ item, alignment, report, courseId, t }: { item: SupportingItem; alignment?: SupportingAlignment; report: SupportingReportPage; courseId: string; t: (value: string) => string }) {
   const byRequirement = new Map(alignment?.requirements.map(row => [row.requirementId, row]));
-  return <article id={`supporting-item-${item.id}`} className="bg-bg border border-line rounded-xl p-3 space-y-2">
-    <div className="flex flex-wrap gap-2 items-center"><strong dir="auto">{item.printedLabel || item.itemType}</strong><span className="text-xs text-ink-soft">{t(statusLabels[alignment?.status || "needs_review"] || "Needs review")}</span>{item.printedMarks !== null && typeof item.printedMarks === "number" && <span>{item.printedMarks} {t("marks")}</span>}</div>
+  return <article id={`supporting-item-${item.id}`} className="bg-bg-alt rounded-xl p-4 space-y-3">
+    <div className="flex flex-wrap gap-2 items-center"><strong dir="auto">{item.printedLabel || item.itemType}</strong><span className="status-badge info">{t(statusLabels[alignment?.status || "needs_review"] || "Needs review")}</span>{item.printedMarks !== null && typeof item.printedMarks === "number" && <span>{item.printedMarks} {t("marks")}</span>}</div>
     <p dir="auto" className="text-sm whitespace-pre-wrap">{item.text}</p>
     {item.requirements?.length > 0 && <div><h5 className="text-sm font-medium">{t("Required concepts")}</h5>{item.requirements.map(requirement => {
       const finding = byRequirement.get(requirement.id);
@@ -81,7 +81,7 @@ function ReportTopic({ topic, report, courseId, t }: { topic: SupportingTopic; r
   const originItems = new Map(report.items.map(item => [item.id, item]));
   const requirements = new Map(report.items.flatMap(item => item.requirements).map(requirement => [requirement.id, requirement]));
   const finding = topic.alignment;
-  return <article className="bg-bg border border-line rounded-xl p-3 space-y-2 text-sm"><p dir="auto" className="font-medium">{topic.text}</p><p>{t(relationLabels[finding?.relation || "unverified"] || "Needs review")}</p>{finding?.reason && <p dir="auto" className="text-ink-soft">{finding.reason}</p>}
+  return <article className="border-t border-line pt-4 space-y-3 text-sm"><p dir="auto" className="font-medium">{topic.text}</p><p>{t(relationLabels[finding?.relation || "unverified"] || "Needs review")}</p>{finding?.reason && <p dir="auto" className="text-ink-soft">{finding.reason}</p>}
     <div><span>{t("Origin questions")}: </span>{topic.itemIds.map((id, index) => { const item = originItems.get(id); return <span key={id}>{index > 0 && ", "}{item ? <a className="underline" href={`#supporting-item-${id}`}>{item.printedLabel || item.text}</a> : <span>{t("Origin question on another page")} ({id})</span>}</span>; })}</div>
     <div><span>{t("Origin requirements")}: </span>{topic.requirementIds.map(id => <span key={id} dir="auto" className="me-2">{requirements.get(id)?.text || `${t("Origin requirement on another page")} (${id})`}</span>)}</div>
     {!!finding?.lectureSupportProofs?.length && <SourceCitation courseId={courseId} sourceRefs={finding.lectureSupportProofs.map(proof => proof.ref)} />}

@@ -3,262 +3,64 @@
 import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import type { Course } from "@/lib/firestore-helpers";
 import { useAuth } from "@/lib/auth-context";
 import { useLang } from "@/lib/i18n";
 import { useTheme } from "@/lib/theme";
+import Icon, { BrandMark } from "./Icon";
 
-// 👉 PASTE YOUR GOOGLE FORM LINK HERE (between the quotes) once it's ready.
-//    Example: const FEEDBACK_URL = "https://forms.gle/xxxxxxxx";
-//    While it's empty, the Feedback link still shows but does nothing.
-const FEEDBACK_URL = "";
-
-export default function Navbar() {
+export default function Navbar({ workspace = false, course, courses = [], onOpenNavigation }: {
+  workspace?: boolean; course?: Course | null; courses?: Course[]; onOpenNavigation?: () => void;
+}) {
   const router = useRouter();
   const { user, profile, signOut, loading } = useAuth();
   const { t, lang, toggle: toggleLanguage } = useLang();
   const { theme, toggle: toggleTheme } = useTheme();
-
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-
-  // Close the account menu on outside-click / Escape.
+  const accountButton = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!menuOpen) return;
-    const onClick = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMenuOpen(false);
-    };
-    document.addEventListener("mousedown", onClick);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onClick);
-      document.removeEventListener("keydown", onKey);
-    };
+    const outside = (e: MouseEvent) => { if (!menuRef.current?.contains(e.target as Node)) setMenuOpen(false); };
+    const escape = (e: KeyboardEvent) => { if (e.key === "Escape") { setMenuOpen(false); accountButton.current?.focus(); } };
+    document.addEventListener("mousedown", outside); document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("mousedown", outside); document.removeEventListener("keydown", escape); };
   }, [menuOpen]);
-
-  const handleSignOut = async () => {
-    setMenuOpen(false);
-    await signOut();
-    router.push("/");
-  };
-
-  const initial = (profile?.fullName || user?.email || "S")
-    .trim()
-    .charAt(0)
-    .toUpperCase();
-
-  // Mask the email for privacy (shoulder-surfing) — keep first + last char of
-  // the local part and the full domain, e.g. "student.name@example.com" → "s••••e@example.com".
-  const maskEmail = (email?: string | null): string => {
-    if (!email) return "";
-    const at = email.lastIndexOf("@");
-    if (at < 1) return email;
-    const local = email.slice(0, at);
-    const domain = email.slice(at);
-    if (local.length <= 2) return `${local[0]}•${domain}`;
-    const dots = "•".repeat(Math.min(local.length - 2, 4));
-    return `${local[0]}${dots}${local[local.length - 1]}${domain}`;
-  };
-
-  return (
-    <nav className="fixed top-0 left-0 right-0 z-50 bg-bg/85 backdrop-blur-xl border-b border-line px-6 md:px-12 h-20 flex items-center justify-between">
-      {/* Logo */}
-      <Link href="/" className="flex items-center gap-3">
-        <div className="w-8 h-8 bg-ink text-paper rounded-full flex items-center justify-center font-serif italic font-bold">
-          m
-        </div>
-        <span className="font-serif text-2xl font-semibold tracking-tight">
-          {t("Mudaris")}
-        </span>
-      </Link>
-
-      {/* Nav Links - Desktop only */}
-      <ul className="hidden md:flex gap-9 items-center list-none">
-        <li>
-          <Link
-            href="/"
-            className="text-ink-soft hover:text-accent text-sm font-medium transition"
-          >
-            {t("Home")}
-          </Link>
-        </li>
-        {user ? (
-          <li>
-            <Link
-              href="/dashboard"
-              className="text-ink-soft hover:text-accent text-sm font-medium transition"
-            >
-              {t("Dashboard")}
-            </Link>
-          </li>
-        ) : (
-          <li>
-            <a
-              href="#features"
-              className="text-ink-soft hover:text-accent text-sm font-medium transition"
-            >
-              {t("Features")}
-            </a>
-          </li>
-        )}
-        <li>
-          <a
-            href={FEEDBACK_URL || undefined}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(e) => {
-              if (!FEEDBACK_URL) e.preventDefault();
-            }}
-            className={`text-sm font-medium transition inline-flex items-center gap-1.5 ${
-              FEEDBACK_URL
-                ? "text-ink-soft hover:text-accent cursor-pointer"
-                : "text-ink-mute cursor-default"
-            }`}
-            title={FEEDBACK_URL ? "Share your feedback" : "Feedback form coming soon"}
-          >
-            {t("Feedback")}
-            <span className="text-[10px] opacity-60">↗</span>
-          </a>
-        </li>
-      </ul>
-
-      {/* CTA Section */}
-      <div className="flex items-center gap-3">
-        <button onClick={toggleLanguage} aria-label={lang === "en" ? "Switch to Arabic" : "Switch to English"} className="px-2 h-8 rounded-full border border-line text-xs hover:bg-bg-alt">{lang === "en" ? "العربية" : "English"}</button>
-        {/* Theme toggle (light ⇄ dark) */}
-        <button
-          onClick={toggleTheme}
-          aria-label={theme === "dark" ? t("Switch to light mode") : t("Switch to dark mode")}
-          className="w-8 h-8 rounded-full border border-line hover:bg-bg-alt text-sm text-ink-soft transition flex items-center justify-center"
-          title={theme === "dark" ? t("Switch to light mode") : t("Switch to dark mode")}
-        >
-          {theme === "dark" ? "☀" : "☾"}
+  const logout = async () => { setMenuOpen(false); await signOut(); router.push("/"); };
+  const initial = (profile?.fullName || user?.email || "S").trim().charAt(0).toUpperCase();
+  const maskEmail = (email?: string | null) => { if (!email) return ""; const [local, domain] = email.split("@"); return domain ? local.charAt(0) + "••••" + (local.length > 1 ? local.slice(-1) : "") + "@" + domain : email; };
+  const availableCourses = course && !courses.some(c => c.id === course.id) ? [course, ...courses] : courses;
+  return <nav className={"app-navbar " + (workspace ? "workspace-nav" : "public-nav")} aria-label={t("Main navigation")}>
+    <div className="flex items-center gap-3 min-w-0">
+      {workspace && <button className="icon-button mobile-nav-toggle" onClick={onOpenNavigation} aria-label={t("Open navigation")}><Icon name="menu" /></button>}
+      <Link href={workspace ? "/dashboard" : "/"} className="brand-wordmark" aria-label="Mudaris"><BrandMark /><span>{t("Mudaris")}</span></Link>
+    </div>
+    {workspace ? <div className="navbar-context"><span>{t("Workspace")}</span><Icon name="chevron-right" size={14} />
+      {course ? <select className="navbar-course-select" aria-label={t("Switch course")} value={course.id} onChange={e => router.push("/course/" + e.target.value)}>
+        {availableCourses.map(c => <option value={c.id} key={c.id}>{c.code} · {c.title}</option>)}
+      </select> : <span className="font-semibold text-ink">{t("My learning space")}</span>}
+    </div> : <div className="navbar-links"><Link href="/">{t("Home")}</Link>{user ? <Link href="/dashboard">{t("Dashboard")}</Link> : <Link href="/#features">{t("Features")}</Link>}</div>}
+    <div className="navbar-actions">
+      <button onClick={toggleLanguage} className="icon-button language-control" aria-label={lang === "en" ? "Switch to Arabic" : "Switch to English"}>{lang === "en" ? "العربية" : "English"}</button>
+      <button onClick={toggleTheme} className="icon-button" aria-label={theme === "dark" ? t("Switch to light mode") : t("Switch to dark mode")} title={theme === "dark" ? t("Switch to light mode") : t("Switch to dark mode")}><Icon name={theme === "dark" ? "sun" : "moon"} size={18} /></button>
+      {loading ? <div className="w-12 h-10 bg-bg-alt rounded-full animate-pulse" /> : user ? <div className="relative" ref={menuRef}>
+        <button ref={accountButton} onClick={() => setMenuOpen(v => !v)} className="icon-button account-control" aria-label={t("Account")} title={t("Account")} aria-expanded={menuOpen} aria-controls="account-links">
+          {profile?.photoURL ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={profile.photoURL} alt="" className="account-avatar" />
+          ) : <span className="account-avatar">{initial}</span>}
+          <span className="account-name text-xs font-semibold max-w-28 truncate">{profile?.fullName?.split(" ")[0] || t("Student")}</span><Icon name="chevron-down" size={13} />
         </button>
-        {loading ? (
-          <div className="w-28 h-10 bg-bg-alt rounded-full animate-pulse"></div>
-        ) : user ? (
-          <div className="relative" ref={menuRef}>
-            {/* Account chip */}
-            <button
-              onClick={() => setMenuOpen((o) => !o)}
-              className={`flex items-center gap-2.5 ps-1.5 pe-3 py-1.5 rounded-full border transition ${
-                menuOpen
-                  ? "border-accent bg-bg-alt"
-                  : "border-line hover:bg-bg-alt"
-              }`}
-              title={t("Account")} aria-label={t("Account")} aria-expanded={menuOpen} aria-controls="account-links"
-            >
-              {profile?.photoURL ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={profile.photoURL}
-                  alt=""
-                  className="w-7 h-7 rounded-full object-cover"
-                />
-              ) : (
-                <div className="w-7 h-7 rounded-full bg-ink text-paper flex items-center justify-center font-serif italic text-sm">
-                  {initial}
-                </div>
-              )}
-              <span className="hidden md:block text-sm text-ink font-medium max-w-[120px] truncate">
-                {profile?.fullName?.split(" ")[0] || t("Student")}
-              </span>
-              <svg
-                width="12"
-                height="12"
-                viewBox="0 0 12 12"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                className={`text-ink-mute transition-transform ${
-                  menuOpen ? "rotate-180" : ""
-                }`}
-              >
-                <path d="M3 4.5L6 7.5L9 4.5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-
-            {/* Dropdown */}
-            {menuOpen && (
-              <div id="account-links" className="absolute end-0 mt-2 w-64 bg-paper border border-line rounded-2xl shadow-lift overflow-hidden animate-fade-in z-50">
-                {/* Header */}
-                <div className="px-4 py-4 border-b border-line flex items-center gap-3">
-                  {profile?.photoURL ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={profile.photoURL}
-                      alt=""
-                      className="w-10 h-10 rounded-full object-cover flex-shrink-0"
-                    />
-                  ) : (
-                    <div className="w-10 h-10 rounded-full bg-ink text-paper flex items-center justify-center font-serif italic flex-shrink-0">
-                      {initial}
-                    </div>
-                  )}
-                  <div className="min-w-0">
-                    <div className="font-medium text-sm truncate">
-                      {profile?.fullName || t("Student")}
-                    </div>
-                    <div className="text-xs text-ink-mute truncate" title="Email hidden for privacy">
-                      {maskEmail(user.email)}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="p-1.5 border-b border-line">
-                  <Link href="/dashboard/recent" onClick={() => setMenuOpen(false)} className="block px-3 py-2.5 rounded-xl text-sm hover:bg-bg-alt">{t("Recent")}</Link>
-                  <Link href="/dashboard/bookmarked" onClick={() => setMenuOpen(false)} className="block px-3 py-2.5 rounded-xl text-sm hover:bg-bg-alt">{t("Bookmarked")}</Link>
-                </div>
-                {/* Links */}
-                <div className="p-1.5">
-                  <Link
-                    href="/dashboard"
-                    onClick={() => setMenuOpen(false)}
-                    className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-ink-soft hover:bg-bg-alt hover:text-ink transition"
-                  >
-                    <span className="opacity-70">⌂</span> {t("Dashboard")}
-                  </Link>
-                  <Link
-                    href="/settings"
-                    onClick={() => setMenuOpen(false)}
-                    className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-ink-soft hover:bg-bg-alt hover:text-ink transition"
-                  >
-                    <span className="opacity-70">◉</span> {t("Settings")}
-                  </Link>
-                </div>
-
-                <div className="p-1.5 border-t border-line">
-                  <button
-                    onClick={handleSignOut}
-                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm text-ink-soft hover:bg-accent hover:text-paper transition text-start"
-                  >
-                    <span className="opacity-70">↩</span> {t("Sign Out")}
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
-        ) : (
-          <>
-            <Link
-              href="/signin"
-              className="text-ink-soft hover:text-ink text-sm font-medium transition hidden md:block"
-            >
-              {t("Sign In")}
-            </Link>
-            <Link
-              href="/signup"
-              className="bg-ink text-paper px-5 py-2.5 rounded-full text-xs font-medium hover:bg-accent transition-all hover:-translate-y-0.5"
-            >
-              {t("Get Started")} →
-            </Link>
-          </>
-        )}
-      </div>
-    </nav>
-  );
+        {menuOpen && <div id="account-links" className="account-dropdown">
+          <div className="px-3 py-3 mb-1 border-b border-line"><p className="font-semibold text-sm truncate">{profile?.fullName || t("Student")}</p><p className="text-xs text-ink-soft mt-1 truncate">{maskEmail(user.email)}</p></div>
+          <Link href="/dashboard" onClick={() => setMenuOpen(false)}><Icon name="grid" size={17} />{t("Dashboard")}</Link>
+          <Link href="/dashboard/recent" onClick={() => setMenuOpen(false)}><Icon name="history" size={17} />{t("Recent")}</Link>
+          <Link href="/dashboard/bookmarked" onClick={() => setMenuOpen(false)}><Icon name="bookmark" size={17} />{t("Bookmarked")}</Link>
+          <Link href="/settings" onClick={() => setMenuOpen(false)}><Icon name="settings" size={17} />{t("Settings")}</Link>
+          <Link href="/" onClick={() => setMenuOpen(false)}><Icon name="home" size={17} />{t("Home")}</Link>
+          <button onClick={logout}><Icon name="logout" size={17} />{t("Sign Out")}</button>
+        </div>}
+      </div> : <><Link href="/signin" className="hidden sm:inline-flex ui-button ghost">{t("Sign In")}</Link><Link href="/signup" className="ui-button primary">{t("Get Started")}</Link></>}
+    </div>
+  </nav>;
 }

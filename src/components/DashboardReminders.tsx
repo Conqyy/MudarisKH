@@ -1,5 +1,8 @@
 "use client";
 
+import Icon from "@/components/Icon";
+import { REMINDER_ICONS } from "@/components/material-presentation";
+
 import { useState } from "react";
 import Link from "next/link";
 import { Course, CourseReminder, ReminderType } from "@/lib/firestore-helpers";
@@ -11,14 +14,14 @@ interface Props {
   onToggle: (courseId: string, reminderId: string) => void | Promise<void>;
 }
 
-const TYPE_META: Record<ReminderType, { label: string; icon: string }> = {
-  quiz: { label: "Quiz", icon: "✏️" },
-  midterm: { label: "Midterm", icon: "📝" },
-  final: { label: "Final", icon: "🎓" },
-  assignment: { label: "Assignment", icon: "📌" },
-  project: { label: "Project", icon: "🧩" },
-  presentation: { label: "Presentation", icon: "🎤" },
-  other: { label: "Other", icon: "🔔" },
+const TYPE_META: Record<ReminderType, { label: string }> = {
+  quiz: { label: "Quiz" },
+  midterm: { label: "Midterm" },
+  final: { label: "Final" },
+  assignment: { label: "Assignment" },
+  project: { label: "Project" },
+  presentation: { label: "Presentation" },
+  other: { label: "Other" },
 };
 
 interface AggItem extends CourseReminder {
@@ -43,8 +46,8 @@ function dueLabel(
   const d = daysUntil(dateStr);
   if (d === null) return { text: t("No date"), tone: "text-ink-mute bg-bg-alt" };
   if (d < 0)
-    return { text: `${t("Overdue")} ${Math.abs(d)}${t("d")}`, tone: "text-accent bg-accent/10" };
-  if (d === 0) return { text: t("Today"), tone: "text-accent bg-accent/10" };
+    return { text: `${t("Overdue")} ${Math.abs(d)}${t("d")}`, tone: "text-danger bg-danger/10" };
+  if (d === 0) return { text: t("Today"), tone: "text-danger bg-danger/10" };
   if (d === 1) return { text: t("Tomorrow"), tone: "text-gold bg-gold/10" };
   if (d <= 7) return { text: `${t("In")} ${d}${t("d")}`, tone: "text-gold bg-gold/10" };
   return { text: `${t("In")} ${d}${t("d")}`, tone: "text-ink-mute bg-bg-alt" };
@@ -88,15 +91,15 @@ export default function DashboardReminders({ courses, onToggle }: Props) {
 
   return (
     <section className="mt-12">
-      <div className="flex items-center justify-between mb-6">
-        <h2 className="font-serif text-2xl font-medium tracking-tight flex items-center gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
+        <h2 className="section-heading flex flex-wrap items-center gap-3">
           {t("Reminders")}
           {overdueCount > 0 ? (
-            <span className="text-xs font-mono text-accent bg-accent/10 px-2.5 py-1 rounded-full">
+            <span className="text-xs tabular-nums text-accent bg-accent/10 px-2.5 py-1 rounded-full">
               {overdueCount} {t("overdue")}
             </span>
           ) : open.length > 0 ? (
-            <span className="text-xs font-mono text-gold bg-gold/10 px-2.5 py-1 rounded-full">
+            <span className="text-xs tabular-nums text-gold bg-gold/10 px-2.5 py-1 rounded-full">
               {open.length} {t("upcoming")}
             </span>
           ) : null}
@@ -104,7 +107,7 @@ export default function DashboardReminders({ courses, onToggle }: Props) {
         {done.length > 0 && (
           <button
             onClick={() => setShowDone((s) => !s)}
-            className="text-xs text-ink-mute hover:text-accent transition font-mono"
+            className="ui-button ghost"
           >
             {showDone ? t("Hide done") : `${t("Show done")} (${done.length})`}
           </button>
@@ -112,46 +115,40 @@ export default function DashboardReminders({ courses, onToggle }: Props) {
       </div>
 
       {open.length === 0 && !showDone ? (
-        <div className="bg-paper border border-line rounded-3xl p-8 text-center">
-          <div className="text-3xl mb-2">🎉</div>
+        <div className="ui-panel p-8 text-center">
+          <Icon name="check-circle" size={28} className="text-sage mx-auto mb-3" />
           <p className="text-ink-soft text-sm">
             {t("You're all caught up — no upcoming reminders.")}
           </p>
         </div>
       ) : (
-        <div className="bg-paper border border-line rounded-3xl overflow-hidden">
+        <div className="ui-panel overflow-hidden">
           {visible.map((r, idx) => {
             const meta = TYPE_META[r.type];
             const due = dueLabel(r.date, t);
             return (
               <div
                 key={`${r.courseId}-${r.id}`}
-                className={`group flex items-center gap-4 p-5 transition ${
+                className={`material-reminder-row ${
                   idx !== 0 ? "border-t border-line" : ""
                 } ${r.done ? "opacity-55" : "hover:bg-bg-alt"}`}
               >
                 {/* Done toggle */}
                 <button
                   onClick={() => onToggle(r.courseId, r.id)}
-                  title={r.done ? "Mark as not done" : "Mark as done"}
-                  className={`w-6 h-6 rounded-full border flex items-center justify-center text-xs flex-shrink-0 transition ${
-                    r.done
-                      ? "bg-sage border-sage text-paper"
-                      : "border-line hover:border-accent text-transparent hover:text-accent"
-                  }`}
-                >
-                  ✓
-                </button>
+                  title={t(r.done ? "Mark as not done" : "Mark as done")}
+                  className="material-toggle" aria-pressed={r.done} aria-label={t(r.done ? "Mark as not done" : "Mark as done")}
+                ><Icon name="check" size={18} className={r.done ? "" : "opacity-0"} /></button>
 
                 {/* Type icon */}
                 <div className="w-9 h-9 rounded-xl bg-bg-alt flex items-center justify-center text-base flex-shrink-0">
-                  {meta.icon}
+                  <Icon name={REMINDER_ICONS[r.type]} size={18} />
                 </div>
 
                 {/* Title + course */}
-                <div className="flex-1 min-w-0">
+                <div className="material-row-copy">
                   <div
-                    className={`font-medium truncate ${
+                    dir="auto" className={`font-semibold break-words ${
                       r.done ? "line-through text-ink-mute" : ""
                     }`}
                   >
@@ -159,7 +156,7 @@ export default function DashboardReminders({ courses, onToggle }: Props) {
                   </div>
                   <Link
                     href={`/course/${r.courseId}`}
-                    className="text-xs text-ink-mute font-mono mt-0.5 inline-flex items-center gap-1.5 hover:text-accent transition"
+                    className="text-xs text-ink-mute tabular-nums mt-0.5 inline-flex items-center gap-1.5 hover:text-accent transition"
                   >
                     <span
                       className="w-1.5 h-1.5 rounded-full"
@@ -173,15 +170,15 @@ export default function DashboardReminders({ courses, onToggle }: Props) {
                 {/* Due pill */}
                 {due && !r.done && (
                   <span
-                    className={`text-[11px] font-mono px-2.5 py-1 rounded-full flex-shrink-0 ${due.tone}`}
+                    className={`material-due text-xs tabular-nums px-2.5 py-1 rounded-full flex-shrink-0 ${due.tone}`}
                   >
                     {due.text}
                     {r.time ? ` · ${r.time}` : ""}
                   </span>
                 )}
                 {r.done && (
-                  <span className="text-[11px] font-mono text-sage flex-shrink-0">
-                    ✓ {t("Done")}
+                  <span className="text-xs tabular-nums text-sage flex-shrink-0">
+                    <Icon name="check" size={14} /> {t("Done")}
                   </span>
                 )}
               </div>

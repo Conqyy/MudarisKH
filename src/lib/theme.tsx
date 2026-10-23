@@ -31,30 +31,31 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   // just keeps React in sync for the toggle button.
   const [theme, setThemeState] = useState<Theme>("light");
 
-  // Hydrate the saved choice (if any) on mount.
+  // Adopt the pre-paint choice. Mounting never writes a default to storage.
   useEffect(() => {
+    let choice: Theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
     try {
       const saved = localStorage.getItem(STORAGE_KEY) as Theme | null;
-      if (saved === "dark" || saved === "light") setThemeState(saved);
+      if (!document.documentElement.dataset.theme && (saved === "dark" || saved === "light")) choice = saved;
+    } catch {
+      /* ignore */
+    }
+    document.documentElement.dataset.theme = choice;
+    setThemeState(choice);
+  }, []);
+
+  const setTheme = useCallback((value: Theme) => {
+    setThemeState(value);
+    document.documentElement.dataset.theme = value;
+    try {
+      localStorage.setItem(STORAGE_KEY, value);
     } catch {
       /* ignore */
     }
   }, []);
-
-  // Reflect the theme on <html data-theme> and persist it.
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    try {
-      localStorage.setItem(STORAGE_KEY, theme);
-    } catch {
-      /* ignore */
-    }
-  }, [theme]);
-
-  const setTheme = useCallback((t: Theme) => setThemeState(t), []);
   const toggle = useCallback(
-    () => setThemeState((p) => (p === "dark" ? "light" : "dark")),
-    []
+    () => setTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark"),
+    [setTheme]
   );
 
   return (

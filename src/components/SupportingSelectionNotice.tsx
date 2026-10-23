@@ -1,6 +1,7 @@
 "use client";
 
 import { useLang } from "@/lib/i18n";
+import Icon from "@/components/Icon";
 import { SupportingPresentation } from "@/lib/supporting-materials";
 
 export function selectionReasonText(reason: SupportingPresentation): string {
@@ -11,5 +12,5 @@ export function selectionReasonText(reason: SupportingPresentation): string {
 export default function SupportingSelectionNotice({ blocker, onDeselect, onRefresh }: { blocker: { id: string; row?: { title?: string }; reason: SupportingPresentation } | null; onDeselect: (id: string) => void; onRefresh: () => void }) {
   const { t } = useLang();
   if (!blocker) return null;
-  return <div className="border border-gold/40 rounded-xl bg-gold/10 p-3 text-sm" role="alert"><p>{blocker.row?.title && <strong dir="auto">{blocker.row.title}: </strong>}{t(selectionReasonText(blocker.reason))}</p><div className="flex gap-4 mt-2"><button type="button" className="underline" onClick={onRefresh}>{t("Refresh material status")}</button><button type="button" className="underline" onClick={() => onDeselect(blocker.id)}>{t("Deselect material")}</button></div></div>;
+  return <div className="material-inline-notice warning" role="alert"><div className="flex items-start gap-2"><Icon name="alert" size={18} className="shrink-0 mt-0.5" /><p>{blocker.row?.title && <strong dir="auto">{blocker.row.title}: </strong>}{t(selectionReasonText(blocker.reason))}</p></div><div className="flex flex-wrap gap-2 mt-3"><button type="button" className="ui-button secondary" onClick={onRefresh}><Icon name="refresh" size={16} />{t("Refresh material status")}</button><button type="button" className="ui-button ghost" onClick={() => onDeselect(blocker.id)}>{t("Deselect material")}</button></div></div>;
 }

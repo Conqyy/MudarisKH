@@ -43,7 +43,7 @@ export default function UploadDocumentModal({ courseId, onClose, onSuccess }: Pr
     throw new Error(t("Document is still processing. Check its stages on the course page."));
   }, [courseId, t]);
   return <MultiUploadModal courseId={courseId} onClose={onClose} onSuccess={onSuccess}
-    endpoint="/api/documents/upload" accent="#c8472f" icon="📄" acceptExts={["pdf", "pptx", "docx"]}
+    endpoint="/api/documents/upload" acceptExts={["pdf", "pptx", "docx"]}
     acceptAttr="application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.pdf,.pptx,.docx"
     heading="Upload documents" subtitle="Every document is prepared from the original and receives a lightweight analysis. Both stages must finish before confirmation."
     fileNoun="document" steps={STEPS} maxSizeMB={100} actualStep={stage} pollAccepted={pollAccepted}

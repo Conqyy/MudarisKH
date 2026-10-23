@@ -2,7 +2,10 @@
 
 import { useEffect, useState, FormEvent } from "react";
 import { useRouter } from "next/navigation";
-import Navbar from "@/components/Navbar";
+import AppShell from "@/components/AppShell";
+import Icon from "@/components/Icon";
+import { useLang } from "@/lib/i18n";
+import "@/app/entry.css";
 import { useAuth } from "@/lib/auth-context";
 import { UNIVERSITIES, ACADEMIC_YEARS } from "@/lib/constants";
 
@@ -21,6 +24,7 @@ export default function SettingsPage() {
     signOut,
   } = useAuth();
   const router = useRouter();
+  const { t } = useLang();
 
   const usesPassword = hasPasswordProvider();
 
@@ -137,7 +141,7 @@ export default function SettingsPage() {
       if (result === "verification_sent") {
         setEmailBanner({
           type: "success",
-          text: `Verification link sent to ${newEmail.trim()}. Your email will update once you confirm it.`,
+          text: `${t("Verification link sent to")} ${newEmail.trim()}. ${t("Your email will update once you confirm it.")}`,
         });
       } else {
         setEmailBanner({ type: "success", text: "Email updated successfully." });
@@ -199,378 +203,110 @@ export default function SettingsPage() {
     router.push("/");
   };
 
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="font-mono text-sm text-ink-mute">Loading…</div>
-      </div>
-    );
-  }
+  if (loading) return <div className="entry-loading" role="status"><Icon name="loader" size={18} className="animate-spin" />{t("Loading…")}</div>;
   if (!user) return null;
 
-  const initials =
-    (profile?.fullName || user.displayName || user.email || "S")
-      .trim()
-      .charAt(0)
-      .toUpperCase();
+  const initials = (profile?.fullName || user.displayName || user.email || "S").trim().charAt(0).toUpperCase();
 
   return (
-    <>
-      <Navbar />
-
-      <main className="pt-20 px-6 md:px-12 pb-24">
-        <div className="max-w-2xl mx-auto">
-          {/* Header */}
-          <div className="my-10">
-            <button
-              onClick={() => router.push("/dashboard")}
-              className="text-xs font-mono text-ink-soft hover:text-accent transition mb-6"
-            >
-              ← Dashboard
-            </button>
-            <h1 className="font-serif text-4xl md:text-5xl font-normal tracking-tight leading-tight mb-2">
-              Settings
-            </h1>
-            <p className="text-ink-soft">
-              Manage your account, profile, and security.
-            </p>
+    <AppShell>
+      <main className="workspace-main">
+        <div className="account-layout">
+          <header className="page-header">
+            <div><h1 className="page-heading">{t("Settings")}</h1><p className="page-subtitle">{t("Manage your account, profile, and security.")}</p></div>
+          </header>
+          <div className="account-profile-summary">
+            {photoURL ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={photoURL} alt={t("Avatar")} className="account-profile-avatar" />
+            ) : <div className="account-profile-avatar">{initials}</div>}
+            <div><strong className="text-sm font-semibold">{profile?.fullName || user.displayName || t("Student")}</strong><p className="text-xs text-ink-soft mt-1 break-all" dir="ltr">{user.email}</p></div>
           </div>
 
-          {/* ============ PROFILE ============ */}
-          <section className="bg-paper border border-line rounded-3xl p-7 md:p-8 mb-8">
-            <div className="flex items-center gap-4 mb-6">
-              {photoURL ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={photoURL}
-                  alt="Avatar"
-                  className="w-14 h-14 rounded-full object-cover border border-line"
-                />
-              ) : (
-                <div className="w-14 h-14 rounded-full bg-ink text-paper flex items-center justify-center font-serif italic text-2xl">
-                  {initials}
+          <section className="account-section" aria-labelledby="profile-heading">
+            <div className="account-section-intro"><h2 id="profile-heading">{t("Profile")}</h2><p>{t("This is how you appear across Mudaris.")}</p></div>
+            <div className="account-section-content">
+              {profileBanner && <Banner banner={profileBanner} />}
+              <form onSubmit={handleSaveProfile} className="entry-form">
+                <div className="account-form-grid">
+                  <Field label="Full name" required><input type="text" autoComplete="name" value={fullName} onChange={(e) => setFullName(e.target.value)} placeholder={t("Your name")} className="ui-input" maxLength={80} /></Field>
+                  <Field label="University"><select value={university} onChange={(e) => setUniversity(e.target.value)} className="ui-input"><option value="">{t("Select your university")}</option>{UNIVERSITIES.map((u) => <option key={u} value={u}>{t(u)}</option>)}</select></Field>
+                  <Field label="Major / Field of study"><input type="text" value={major} onChange={(e) => setMajor(e.target.value)} placeholder={t("e.g. Computer Science")} className="ui-input" maxLength={80} /></Field>
+                  <Field label="Academic year"><select value={academicYear} onChange={(e) => setAcademicYear(e.target.value)} className="ui-input"><option value="">{t("Select your year")}</option>{ACADEMIC_YEARS.map((y) => <option key={y} value={y}>{t(y)}</option>)}</select></Field>
+                  <div className="account-field-wide"><Field label="Photo URL" hint="(optional)"><input type="url" dir="ltr" value={photoURL} onChange={(e) => setPhotoURL(e.target.value)} placeholder="https://…" className="ui-input" /></Field></div>
                 </div>
-              )}
-              <div>
-                <h2 className="font-serif text-2xl font-medium tracking-tight">
-                  Profile
-                </h2>
-                <p className="text-sm text-ink-soft">
-                  This is how you appear across Mudaris.
-                </p>
-              </div>
+                <button type="submit" disabled={savingProfile} className="ui-button primary">{savingProfile && <Icon name="loader" size={16} className="animate-spin" />}{savingProfile ? t("Saving…") : t("Save changes")}</button>
+              </form>
             </div>
-
-            {profileBanner && (
-              <Banner banner={profileBanner} />
-            )}
-
-            <form onSubmit={handleSaveProfile} className="space-y-5">
-              <Field label="Full name" required>
-                <input
-                  type="text"
-                  value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
-                  placeholder="Your name"
-                  className={inputClass}
-                  maxLength={80}
-                />
-              </Field>
-
-              <Field label="University">
-                <select
-                  value={university}
-                  onChange={(e) => setUniversity(e.target.value)}
-                  className={inputClass}
-                >
-                  <option value="">Select your university</option>
-                  {UNIVERSITIES.map((u) => (
-                    <option key={u} value={u}>
-                      {u}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-
-              <Field label="Major / Field of study">
-                <input
-                  type="text"
-                  value={major}
-                  onChange={(e) => setMajor(e.target.value)}
-                  placeholder="e.g. Computer Science"
-                  className={inputClass}
-                  maxLength={80}
-                />
-              </Field>
-
-              <Field label="Academic year">
-                <select
-                  value={academicYear}
-                  onChange={(e) => setAcademicYear(e.target.value)}
-                  className={inputClass}
-                >
-                  <option value="">Select your year</option>
-                  {ACADEMIC_YEARS.map((y) => (
-                    <option key={y} value={y}>
-                      {y}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-
-              <Field label="Photo URL" hint="(optional)">
-                <input
-                  type="url"
-                  value={photoURL}
-                  onChange={(e) => setPhotoURL(e.target.value)}
-                  placeholder="https://…"
-                  className={inputClass}
-                />
-              </Field>
-
-              <button
-                type="submit"
-                disabled={savingProfile}
-                className="bg-ink text-paper px-6 py-3 rounded-full text-sm font-medium hover:bg-accent transition disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {savingProfile ? "Saving…" : "Save changes"}
-              </button>
-            </form>
           </section>
 
-          {/* ============ EMAIL ============ */}
-          <section className="bg-paper border border-line rounded-3xl p-7 md:p-8 mb-8">
-            <h2 className="font-serif text-2xl font-medium tracking-tight mb-1">
-              Email address
-            </h2>
-            <p className="text-sm text-ink-soft mb-5">
-              Current:{" "}
-              <span className="font-mono text-ink">{user.email}</span>
-              {user.emailVerified ? (
-                <span className="ml-2 text-xs font-mono text-sage">
-                  ● verified
-                </span>
-              ) : (
-                <span className="ml-2 text-xs font-mono text-gold">
-                  ● unverified
-                </span>
-              )}
-            </p>
-
-            {!usesPassword ? (
-              <div className="bg-bg-alt border border-line rounded-2xl p-4 text-sm text-ink-soft">
-                Your email is managed by your Google account and can&apos;t be
-                changed here.
-              </div>
-            ) : (
-              <>
-                {emailBanner && <Banner banner={emailBanner} />}
-                <form onSubmit={handleChangeEmail} className="space-y-5">
-                  <Field label="New email">
-                    <input
-                      type="email"
-                      value={newEmail}
-                      onChange={(e) => setNewEmail(e.target.value)}
-                      placeholder="new@example.com"
-                      className={inputClass}
-                    />
-                  </Field>
-                  <Field label="Current password" hint="(to confirm it's you)">
-                    <input
-                      type="password"
-                      value={emailPassword}
-                      onChange={(e) => setEmailPassword(e.target.value)}
-                      placeholder="••••••••"
-                      className={inputClass}
-                    />
-                  </Field>
-                  <button
-                    type="submit"
-                    disabled={savingEmail}
-                    className="bg-ink text-paper px-6 py-3 rounded-full text-sm font-medium hover:bg-accent transition disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {savingEmail ? "Updating…" : "Update email"}
-                  </button>
-                </form>
-              </>
-            )}
-          </section>
-
-          {/* ============ PASSWORD ============ */}
-          <section className="bg-paper border border-line rounded-3xl p-7 md:p-8 mb-8">
-            <h2 className="font-serif text-2xl font-medium tracking-tight mb-1">
-              Password
-            </h2>
-            {!usesPassword ? (
-              <>
-                <p className="text-sm text-ink-soft mb-4">
-                  You signed in with Google, so there&apos;s no password to
-                  manage here.
-                </p>
-                <div className="bg-bg-alt border border-line rounded-2xl p-4 text-sm text-ink-soft">
-                  Sign in with Google to access your account securely.
-                </div>
-              </>
-            ) : (
-              <>
-                <p className="text-sm text-ink-soft mb-5">
-                  Choose a strong password you don&apos;t use elsewhere.
-                </p>
-                {passwordBanner && <Banner banner={passwordBanner} />}
-                <form onSubmit={handleChangePassword} className="space-y-5">
-                  <Field label="Current password">
-                    <input
-                      type="password"
-                      value={currentPassword}
-                      onChange={(e) => setCurrentPassword(e.target.value)}
-                      placeholder="••••••••"
-                      className={inputClass}
-                    />
-                  </Field>
-                  <Field label="New password">
-                    <input
-                      type="password"
-                      value={newPassword}
-                      onChange={(e) => setNewPassword(e.target.value)}
-                      placeholder="At least 6 characters"
-                      className={inputClass}
-                    />
-                  </Field>
-                  <Field label="Confirm new password">
-                    <input
-                      type="password"
-                      value={confirmPassword}
-                      onChange={(e) => setConfirmPassword(e.target.value)}
-                      placeholder="Re-enter new password"
-                      className={inputClass}
-                    />
-                  </Field>
-                  <button
-                    type="submit"
-                    disabled={savingPassword}
-                    className="bg-ink text-paper px-6 py-3 rounded-full text-sm font-medium hover:bg-accent transition disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {savingPassword ? "Updating…" : "Change password"}
-                  </button>
-                </form>
-              </>
-            )}
-          </section>
-
-          {/* ============ DANGER ZONE ============ */}
-          <section className="bg-paper border border-accent/40 rounded-3xl p-7 md:p-8">
-            <h2 className="font-serif text-2xl font-medium tracking-tight mb-1 text-accent">
-              Danger zone
-            </h2>
-            <p className="text-sm text-ink-soft mb-6">
-              Sign out of this device or permanently delete your account.
-            </p>
-
-            <div className="flex flex-col sm:flex-row gap-3 mb-2">
-              <button
-                onClick={handleSignOut}
-                className="border border-ink text-ink px-6 py-3 rounded-full text-sm font-medium hover:bg-ink hover:text-paper transition"
-              >
-                Sign out
-              </button>
-              {!showDelete && (
-                <button
-                  onClick={() => setShowDelete(true)}
-                  className="border border-accent text-accent px-6 py-3 rounded-full text-sm font-medium hover:bg-accent hover:text-paper transition"
-                >
-                  Delete account
-                </button>
+          <section className="account-section" aria-labelledby="email-heading">
+            <div className="account-section-intro"><h2 id="email-heading">{t("Email address")}</h2><p>{t("Keep your sign-in address up to date.")}</p></div>
+            <div className="account-section-content">
+              <p className="account-current-email">{t("Current:")} <strong dir="ltr">{user.email}</strong><span className="account-verified">{user.emailVerified && <Icon name="check-circle" size={12} />}{user.emailVerified ? t("Verified") : t("Unverified")}</span></p>
+              {!usesPassword ? <div className="account-provider-note">{t("Your email is managed by your Google account and can't be changed here.")}</div> : (
+                <>
+                  {emailBanner && <Banner banner={emailBanner} />}
+                  <form onSubmit={handleChangeEmail} className="entry-form">
+                    <Field label="New email"><input type="email" autoComplete="email" dir="ltr" value={newEmail} onChange={(e) => setNewEmail(e.target.value)} placeholder="new@example.com" className="ui-input" /></Field>
+                    <Field label="Current password" hint="(to confirm it's you)"><input type="password" autoComplete="current-password" value={emailPassword} onChange={(e) => setEmailPassword(e.target.value)} placeholder="••••••••" className="ui-input" /></Field>
+                    <button type="submit" disabled={savingEmail} className="ui-button primary">{savingEmail && <Icon name="loader" size={16} className="animate-spin" />}{savingEmail ? t("Updating…") : t("Update email")}</button>
+                  </form>
+                </>
               )}
             </div>
+          </section>
 
-            {showDelete && (
-              <div className="mt-5 border-t border-line pt-5">
-                <p className="text-sm text-ink mb-4">
-                  This will permanently delete your account, profile, courses,
-                  uploaded files, generated study materials, chats, and schedule. This
-                  action <strong>cannot be undone</strong>.
-                </p>
-                {deleteBanner && <Banner banner={deleteBanner} />}
-                {usesPassword && (
-                  <div className="mb-4">
-                    <Field label="Enter your password to confirm">
-                      <input
-                        type="password"
-                        value={deletePassword}
-                        onChange={(e) => setDeletePassword(e.target.value)}
-                        placeholder="••••••••"
-                        className={inputClass}
-                      />
-                    </Field>
+          <section className="account-section" aria-labelledby="password-heading">
+            <div className="account-section-intro"><h2 id="password-heading">{t("Password")}</h2><p>{usesPassword ? t("Choose a strong password you don't use elsewhere.") : t("You signed in with Google, so there's no password to manage here.")}</p></div>
+            <div className="account-section-content">
+              {!usesPassword ? <div className="account-provider-note">{t("Sign in with Google to access your account securely.")}</div> : (
+                <>
+                  {passwordBanner && <Banner banner={passwordBanner} />}
+                  <form onSubmit={handleChangePassword} className="entry-form">
+                    <Field label="Current password"><input type="password" autoComplete="current-password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} placeholder="••••••••" className="ui-input" /></Field>
+                    <div className="account-form-grid">
+                      <Field label="New password"><input type="password" autoComplete="new-password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} placeholder={t("At least 6 characters")} className="ui-input" /></Field>
+                      <Field label="Confirm new password"><input type="password" autoComplete="new-password" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} placeholder={t("Re-enter new password")} className="ui-input" /></Field>
+                    </div>
+                    <button type="submit" disabled={savingPassword} className="ui-button primary">{savingPassword && <Icon name="loader" size={16} className="animate-spin" />}{savingPassword ? t("Updating…") : t("Change password")}</button>
+                  </form>
+                </>
+              )}
+            </div>
+          </section>
+
+          <section className="account-section account-danger" aria-labelledby="account-heading">
+            <div className="account-section-intro"><h2 id="account-heading">{t("Account actions")}</h2><p>{t("Sign out of this device or permanently delete your account.")}</p></div>
+            <div className="account-section-content">
+              <div className="account-actions"><button onClick={handleSignOut} className="ui-button secondary"><Icon name="logout" size={16} />{t("Sign out")}</button>{!showDelete && <button onClick={() => setShowDelete(true)} className="ui-button danger"><Icon name="trash" size={16} />{t("Delete account")}</button>}</div>
+              {showDelete && (
+                <div className="account-delete-confirm">
+                  <p>{t("This will permanently delete your account, profile, courses, uploaded files, generated study materials, chats, and schedule.")} <strong>{t("This action cannot be undone.")}</strong></p>
+                  {deleteBanner && <Banner banner={deleteBanner} />}
+                  {usesPassword && <div className="mb-5"><Field label="Enter your password to confirm"><input type="password" autoComplete="current-password" value={deletePassword} onChange={(e) => setDeletePassword(e.target.value)} placeholder="••••••••" className="ui-input" /></Field></div>}
+                  {!usesPassword && <p>{t("Google will ask you to verify your identity before deletion.")}</p>}
+                  <div className="account-actions">
+                    <button onClick={handleDeleteAccount} disabled={deleting || (usesPassword && !deletePassword)} className="ui-button danger">{deleting && <Icon name="loader" size={16} className="animate-spin" />}{deleting ? t("Deleting…") : t("Permanently delete")}</button>
+                    <button disabled={deleting} onClick={() => { setShowDelete(false); setDeletePassword(""); setDeleteBanner(null); }} className="ui-button secondary">{t("Cancel")}</button>
                   </div>
-                )}
-                <div className="flex gap-3">
-                  <button
-                    onClick={handleDeleteAccount}
-                    disabled={deleting || (usesPassword && !deletePassword)}
-                    className="bg-accent text-paper px-6 py-3 rounded-full text-sm font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {deleting ? "Deleting…" : "Permanently delete"}
-                  </button>
-                  <button
-                    onClick={() => {
-                      setShowDelete(false);
-                      setDeletePassword("");
-                      setDeleteBanner(null);
-                    }}
-                    className="border border-line text-ink-soft px-6 py-3 rounded-full text-sm font-medium hover:bg-bg-alt transition"
-                  >
-                    Cancel
-                  </button>
                 </div>
-              </div>
-            )}
+              )}
+            </div>
           </section>
         </div>
       </main>
-    </>
+    </AppShell>
   );
 }
 
-// ============ SMALL HELPERS ============
-
-const inputClass =
-  "w-full px-4 py-3 border border-line rounded-xl bg-bg focus:outline-none focus:border-accent transition";
-
-function Field({
-  label,
-  hint,
-  required,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  required?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <div>
-      <label className="block text-sm font-medium text-ink-soft mb-2">
-        {label}
-        {required && <span className="text-accent"> *</span>}
-        {hint && <span className="text-ink-mute font-normal"> {hint}</span>}
-      </label>
-      {children}
-    </div>
-  );
+function Field({ label, hint, required, children }: { label: string; hint?: string; required?: boolean; children: React.ReactNode }) {
+  const { t } = useLang();
+  return <div className="entry-field"><label><span className="entry-field-label">{t(label)}{required && <span aria-hidden="true"> *</span>}{hint && <span className="entry-field-hint"> {t(hint)}</span>}</span>{children}</label></div>;
 }
 
 function Banner({ banner }: { banner: NonNullable<Banner> }) {
+  const { t } = useLang();
   const isError = banner.type === "error";
-  return (
-    <div
-      className={`text-sm rounded-xl p-3 mb-5 border ${
-        isError
-          ? "bg-accent/10 border-accent text-accent"
-          : "bg-sage/10 border-sage text-sage"
-      }`}
-    >
-      {banner.text}
-    </div>
-  );
+  return <div className={`entry-notice ${isError ? "error" : "success"}`} role={isError ? "alert" : "status"}><Icon name={isError ? "alert" : "check-circle"} size={18} /><span>{t(banner.text)}</span></div>;
 }

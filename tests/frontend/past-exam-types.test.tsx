@@ -6,7 +6,7 @@ import SummaryPage from "../../src/app/course/[id]/summary/page";
 import CoursePage from "../../src/app/course/[id]/page";
 import UploadHistoricalExamModal from "../../src/components/UploadHistoricalExamModal";
 
-const mocks = vi.hoisted(() => ({ api: vi.fn(), update: vi.fn(), user: { uid: "u1" }, course: { id: "c1", userId: "u1", title: "Algorithms", code: "CS", color: "sage", examOrder: ["q1", "m1", "q2", "f1", "old"] } }));
+const mocks = vi.hoisted(() => ({ api: vi.fn(), update: vi.fn(), search: "", user: { uid: "u1" }, course: { id: "c1", userId: "u1", title: "Algorithms", code: "CS", color: "sage", examOrder: ["q1", "m1", "q2", "f1", "old"] } }));
 vi.mock("@/lib/api", () => ({ apiFetch: mocks.api, apiJson: async (url: string, init?: RequestInit) => { const result = await mocks.api(url, init); const data = await result.json(); if (!result.ok) throw new Error(data.detail); return data; } }));
 vi.mock("@/lib/auth-context", () => ({ useAuth: () => ({ user: mocks.user, loading: false }) }));
 vi.mock("@/lib/firestore-helpers", () => ({ getCourse: async () => mocks.course, getUserCourses: async () => [mocks.course], updateCourse: mocks.update }));
@@ -15,7 +15,7 @@ vi.mock("@/components/Navbar", () => ({ default: () => null }));
 vi.mock("@/components/Sidebar", () => ({ default: () => null }));
 vi.mock("@/components/BookmarkButton", () => ({ default: () => null }));
 vi.mock("@/components/SupportingMaterialAction", () => ({ default: () => null }));
-vi.mock("next/navigation", () => ({ useParams: () => ({ id: "c1" }), useSearchParams: () => new URLSearchParams(), useRouter: () => ({ push: vi.fn() }) }));
+vi.mock("next/navigation", () => ({ useParams: () => ({ id: "c1" }), useSearchParams: () => new URLSearchParams(mocks.search), useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("next/link", () => ({ default: ({ children, ...props }: any) => <a {...props}>{children}</a> }));
 
 const response = (data: unknown) => ({ ok: true, status: 200, json: async () => data });
@@ -24,6 +24,7 @@ function deferred<T>() { let resolve!: (value: T) => void; const promise = new P
 const docs = [{ id: "d1", title: "Lecture one", status: "completed", fileType: "pdf", preparationStatus: "completed", guideStatus: "completed" }, { id: "d2", title: "Lecture two", status: "completed", fileType: "pdf", preparationStatus: "completed", guideStatus: "completed" }];
 beforeEach(() => {
   vi.resetAllMocks();
+  mocks.search = "";
   mocks.api.mockImplementation(async (url: string) => {
     if (url.endsWith("/foundation")) return response({ ready: true, state: "ready", revision: "r1", documentCount: 2, completedCount: 2 });
     if (url.includes("/documents/")) return response({ documents: docs });
@@ -49,6 +50,7 @@ it("requires an authoritative batch type and sends it on every real upload", asy
 });
 
 it("groups course papers, classifies legacy papers through the API and preserves other groups on reorder", async () => {
+  mocks.search = "view=materials";
   let classified = false;
   const base = mocks.api.getMockImplementation()!;
   mocks.api.mockImplementation(async (url: string, init?: RequestInit) => {

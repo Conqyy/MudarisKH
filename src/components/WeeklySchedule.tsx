@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useRef, useCallback } from "react";
+import Icon from "@/components/Icon";
 import { Course } from "@/lib/firestore-helpers";
 import { useLang } from "@/lib/i18n";
 
@@ -93,7 +94,7 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
   useEffect(() => { if (userId) load(); return () => loadRequest.current?.abort(); }, [userId, load]);
   const courseOf = (e: ScheduleEntry) => courses.find((c) => c.id === e.courseId);
   const labelOf = (e: ScheduleEntry) => courseOf(e)?.code || e.title || "Lecture";
-  const colorOf = (e: ScheduleEntry) => courseOf(e)?.color || "#8a847a";
+  const colorOf = (e: ScheduleEntry) => courseOf(e)?.color || "#526BCB";
 
   // Grid bounds: default 8:00–18:00, expand to fit entries
   let gridStart = 8 * 60;
@@ -240,34 +241,34 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
   };
 
   return (
-    <section className="mb-12">
-      {loadError && <div role="alert" className="text-sm text-accent mb-4">{loadError}<button onClick={load} className="block mt-2 underline">Retry schedule</button></div>}
-      <div className="flex items-center justify-between mb-6">
+    <section className="mb-8" id="weekly-schedule">
+      {loadError && <div role="alert" className="text-sm text-accent mb-4">{loadError}<button onClick={load} className="ui-button secondary mt-2">Retry schedule</button></div>}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
         <div>
-          <h2 className="font-serif text-2xl font-medium tracking-tight">{t("This week")}</h2>
+          <h2 className="section-heading">{t("This week")}</h2>
           <p className="text-sm text-ink-soft mt-0.5">{t("Sunday to Thursday lecture calendar.")}</p>
         </div>
         <button
           onClick={openForm}
-          className="bg-ink text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-accent transition flex items-center gap-2"
+          className="ui-button primary"
         >
-          <span>+</span> {t("Add lecture")}
+          <Icon name="plus" size={17} /> {t("Add lecture")}
         </button>
       </div>
 
       {/* Add form */}
       {showForm && (
-        <div className="bg-paper border border-line rounded-2xl p-5 mb-6">
+        <div className="ui-panel p-5 mb-6">
           {error && (
-            <div className="bg-accent/10 border border-accent text-accent text-sm rounded-xl p-3 mb-4">
+            <div role="alert" className="material-inline-notice danger mb-4">
               {error}
             </div>
           )}
           {/* Day picker — multi-select: one lecture, repeated on several days */}
           <div className="mb-4">
-            <label className="block text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-1.5">
-              Days <span className="text-accent">*</span>{" "}
-              <span className="text-ink-mute normal-case font-sans">(pick one or more)</span>
+            <label className="block text-xs tabular-nums text-ink-mute font-medium mb-1.5">
+              {t("Days")} <span className="text-accent">*</span>{" "}
+              <span className="text-ink-soft font-normal">{t("(pick one or more)")}</span>
             </label>
             <div className="flex flex-wrap gap-2">
               {DAYS.map((d) => {
@@ -278,7 +279,7 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
                     type="button"
                     aria-pressed={on}
                     onClick={() => { toggleDay(d.key); setError(""); }}
-                    className={`px-4 py-2 rounded-full text-xs font-medium border transition ${
+                    className={`ui-button text-xs ${
                       on
                         ? "bg-ink text-paper border-ink"
                         : "border-line text-ink-soft hover:bg-bg-alt"
@@ -293,64 +294,64 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
 
           <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
             <div>
-              <label className="block text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-1.5">Start</label>
-              <input type="time" value={start} onChange={(e) => setStart(e.target.value)}
-                className="w-full px-3 py-2.5 border border-line rounded-xl bg-bg text-sm focus:outline-none focus:border-accent transition" />
+              <label htmlFor="schedule-start" className="block text-xs tabular-nums text-ink-mute font-medium mb-1.5">{t("Start")}</label>
+              <input id="schedule-start" type="time" value={start} onChange={(e) => setStart(e.target.value)}
+                className="ui-input w-full" />
             </div>
             <div>
-              <label className="block text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-1.5">Finish</label>
-              <input type="time" value={end} onChange={(e) => setEnd(e.target.value)}
-                className="w-full px-3 py-2.5 border border-line rounded-xl bg-bg text-sm focus:outline-none focus:border-accent transition" />
+              <label htmlFor="schedule-end" className="block text-xs tabular-nums text-ink-mute font-medium mb-1.5">{t("Finish")}</label>
+              <input id="schedule-end" type="time" value={end} onChange={(e) => setEnd(e.target.value)}
+                className="ui-input w-full" />
             </div>
             <div>
-              <label className="block text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-1.5">Course <span className="text-accent">*</span></label>
-              <select value={courseId} onChange={(e) => setCourseId(e.target.value)}
+              <label htmlFor="schedule-course" className="block text-xs tabular-nums text-ink-mute font-medium mb-1.5">{t("Course")} <span className="text-accent">*</span></label>
+              <select id="schedule-course" value={courseId} onChange={(e) => setCourseId(e.target.value)}
                 disabled={courses.length === 0}
-                className="w-full px-3 py-2.5 border border-line rounded-xl bg-bg text-sm focus:outline-none focus:border-accent transition disabled:opacity-50">
+                className="ui-input w-full disabled:opacity-50">
                 {courses.length === 0 ? (
-                  <option value="">No courses yet</option>
+                  <option value="">{t("No courses yet")}</option>
                 ) : (
                   <>
-                    <option value="">Select a course</option>
+                    <option value="">{t("Select a course")}</option>
                     {courses.map((c) => <option key={c.id} value={c.id}>{c.code} · {c.title}</option>)}
                   </>
                 )}
               </select>
             </div>
             <div>
-              <label className="block text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-1.5">Label <span className="text-ink-mute normal-case font-sans">(optional)</span></label>
-              <input type="text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Lab"
-                className="w-full px-3 py-2.5 border border-line rounded-xl bg-bg text-sm focus:outline-none focus:border-accent transition" />
+              <label htmlFor="schedule-title" className="block text-xs tabular-nums text-ink-mute font-medium mb-1.5">{t("Label")} <span className="text-ink-mute normal-case font-sans">{t("(optional)")}</span></label>
+              <input id="schedule-title" type="text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Lab"
+                className="ui-input w-full" />
             </div>
             <div>
-              <label className="block text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-1.5">Hall</label>
-              <input type="text" value={hall} onChange={(e) => setHall(e.target.value)} placeholder="Room 201"
-                className="w-full px-3 py-2.5 border border-line rounded-xl bg-bg text-sm focus:outline-none focus:border-accent transition" />
+              <label htmlFor="schedule-hall" className="block text-xs tabular-nums text-ink-mute font-medium mb-1.5">{t("Hall")}</label>
+              <input id="schedule-hall" type="text" value={hall} onChange={(e) => setHall(e.target.value)} placeholder="Room 201"
+                className="ui-input w-full" />
             </div>
           </div>
           <div className="flex justify-end gap-2 mt-4">
             <button onClick={() => { setShowForm(false); resetForm(); }}
-              className="px-4 py-2 border border-line rounded-full text-xs font-medium hover:bg-bg-alt transition">Cancel</button>
+              className="ui-button secondary">{t("Cancel")}</button>
             <button onClick={handleAdd} disabled={saving || days.length === 0}
-              className="px-5 py-2 bg-ink text-paper rounded-full text-xs font-medium hover:bg-accent transition disabled:opacity-50">
+              className="ui-button primary">
               {saving
-                ? "Adding…"
+                ? t("Adding…")
                 : days.length > 1
-                ? `Add to calendar (${days.length} days)`
-                : "Add to calendar"}
+                ? `${t("Add to calendar")} (${days.length} ${t("days")})`
+                : t("Add to calendar")}
             </button>
           </div>
         </div>
       )}
 
       {/* Calendar grid */}
-      <div className="bg-paper border border-line rounded-2xl overflow-x-auto">
+      <div className="ui-panel overflow-x-auto" role="region" aria-label={t("Weekly lecture calendar")} tabIndex={0}>
         <div className="min-w-[640px]">
           {/* Day header row */}
           <div className="flex border-b border-line">
             <div className="w-14 flex-shrink-0" />
             {DAYS.map((d) => (
-              <div key={d.key} className="flex-1 text-center py-3 font-mono text-xs text-ink-mute uppercase tracking-widest border-s border-line">
+              <div key={d.key} className="flex-1 text-center py-3 tabular-nums text-xs text-ink-mute font-medium border-s border-line">
                 {t(d.label)}
               </div>
             ))}
@@ -361,7 +362,7 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
             {/* Time axis */}
             <div className="w-14 flex-shrink-0 relative" style={{ height: totalHours * HOUR_PX }}>
               {hours.slice(0, -1).map((h) => (
-                <div key={h} className="absolute right-2 -translate-y-1/2 text-[10px] font-mono text-ink-mute"
+                <div key={h} className="absolute end-2 -translate-y-1/2 text-xs tabular-nums text-ink-soft"
                   style={{ top: ((h - gridStart) / 60) * HOUR_PX }}>
                   {fmt(h)}
                 </div>
@@ -372,7 +373,7 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
             {DAYS.map((d) => {
               const dayEntries = entries.filter((e) => e.day === d.key);
               return (
-                <div key={d.key} className="flex-1 relative border-l border-line"
+                <div key={d.key} className="flex-1 relative border-s border-line"
                   style={{ height: totalHours * HOUR_PX }}>
                   {/* hour gridlines */}
                   {hours.slice(0, -1).map((h) => (
@@ -392,18 +393,18 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
                         role="button" tabIndex={0} aria-label={"Edit " + labelOf(e)}
                         onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openEdit(e); } }}
                         onClick={() => openEdit(e)}
-                        title="Click to edit"
-                        className="absolute left-1 right-1 rounded-lg p-1.5 overflow-hidden text-paper shadow-sm cursor-pointer hover:brightness-95 transition"
-                        style={{ top: top + 1, height, background: colorOf(e) }}
+                        title={t("Click to edit")}
+                        className="material-calendar-entry absolute start-1 end-1 rounded-lg p-1.5 overflow-hidden cursor-pointer"
+                        style={{ top: top + 1, height, borderInlineStartColor: colorOf(e) }}
                       >
-                        <div className="text-[10px] font-mono opacity-90 leading-tight">
+                        <div className="text-xs tabular-nums opacity-90 leading-tight">
                           {fmt(s)}–{fmt(en)}
                         </div>
-                        <div className="text-[11px] font-semibold leading-tight truncate">
+                        <div className="text-xs font-semibold leading-tight truncate">
                           {labelOf(e)}
                         </div>
                         {e.hall && height > 44 && (
-                          <div className="text-[10px] opacity-90 leading-tight truncate">📍 {e.hall}</div>
+                          <div className="text-xs text-ink-soft leading-tight truncate" dir="auto">{e.hall}</div>
                         )}
                       </div>
                     );
@@ -418,80 +419,81 @@ export default function WeeklySchedule({ userId, courses }: WeeklyScheduleProps)
       {/* Edit dialog */}
       {editing && (
         <div
-          ref={editDialogRef} role="dialog" aria-modal="true" aria-label="Edit lecture" tabIndex={-1} className="fixed inset-0 z-[100] flex items-center justify-center p-6 bg-ink/40 backdrop-blur-sm"
+          ref={editDialogRef} role="dialog" aria-modal="true" aria-label="Edit lecture" tabIndex={-1} className="dialog-overlay"
           onClick={() => setEditing(null)}
         >
           <div
-            className="bg-paper rounded-3xl p-7 max-w-lg w-full shadow-2xl"
+            className="dialog-panel material-dialog max-w-lg"
             onClick={(ev) => ev.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-5">
-              <h3 className="font-serif text-2xl font-medium tracking-tight">Edit lecture</h3>
+              <h3 className="section-heading">{t("Edit lecture")}</h3>
               <button
                 onClick={() => setEditing(null)}
-                className="w-8 h-8 rounded-full border border-line flex items-center justify-center text-ink-mute hover:bg-bg-alt transition text-sm"
+                aria-label={t("Close dialog")}
+                className="icon-button"
               >
-                &times;
+                <Icon name="close" />
               </button>
             </div>
 
             {editError && (
-              <div className="bg-accent/10 border border-accent text-accent text-sm rounded-xl p-3 mb-4">
+              <div role="alert" className="material-inline-notice danger mb-4">
                 {editError}
               </div>
             )}
 
             <div className="grid grid-cols-2 gap-3">
               <div className="col-span-2">
-                <label className="block text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-1.5">Day</label>
-                <select value={ef.day} onChange={(e) => setEf({ ...ef, day: e.target.value })}
-                  className="w-full px-3 py-2.5 border border-line rounded-xl bg-bg text-sm focus:outline-none focus:border-accent transition">
+                <label htmlFor="schedule-edit-day" className="block text-xs tabular-nums text-ink-mute font-medium mb-1.5">{t("Day")}</label>
+                <select id="schedule-edit-day" value={ef.day} onChange={(e) => setEf({ ...ef, day: e.target.value })}
+                  className="ui-input w-full">
                   {DAYS.map((d) => <option key={d.key} value={d.key}>{d.label}</option>)}
                 </select>
               </div>
               <div>
-                <label className="block text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-1.5">Start</label>
-                <input type="time" value={ef.start} onChange={(e) => setEf({ ...ef, start: e.target.value })}
-                  className="w-full px-3 py-2.5 border border-line rounded-xl bg-bg text-sm focus:outline-none focus:border-accent transition" />
+                <label htmlFor="schedule-edit-start" className="block text-xs tabular-nums text-ink-mute font-medium mb-1.5">{t("Start")}</label>
+                <input id="schedule-edit-start" type="time" value={ef.start} onChange={(e) => setEf({ ...ef, start: e.target.value })}
+                  className="ui-input w-full" />
               </div>
               <div>
-                <label className="block text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-1.5">Finish</label>
-                <input type="time" value={ef.end} onChange={(e) => setEf({ ...ef, end: e.target.value })}
-                  className="w-full px-3 py-2.5 border border-line rounded-xl bg-bg text-sm focus:outline-none focus:border-accent transition" />
+                <label htmlFor="schedule-edit-end" className="block text-xs tabular-nums text-ink-mute font-medium mb-1.5">{t("Finish")}</label>
+                <input id="schedule-edit-end" type="time" value={ef.end} onChange={(e) => setEf({ ...ef, end: e.target.value })}
+                  className="ui-input w-full" />
               </div>
               <div className="col-span-2">
-                <label className="block text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-1.5">Course <span className="text-accent">*</span></label>
-                <select value={ef.courseId} onChange={(e) => setEf({ ...ef, courseId: e.target.value })}
-                  className="w-full px-3 py-2.5 border border-line rounded-xl bg-bg text-sm focus:outline-none focus:border-accent transition">
-                  <option value="">Select a course</option>
+                <label htmlFor="schedule-edit-course" className="block text-xs tabular-nums text-ink-mute font-medium mb-1.5">{t("Course")} <span className="text-accent">*</span></label>
+                <select id="schedule-edit-course" value={ef.courseId} onChange={(e) => setEf({ ...ef, courseId: e.target.value })}
+                  className="ui-input w-full">
+                  <option value="">{t("Select a course")}</option>
                   {courses.map((c) => <option key={c.id} value={c.id}>{c.code} · {c.title}</option>)}
                 </select>
               </div>
               <div>
-                <label className="block text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-1.5">Label <span className="text-ink-mute normal-case font-sans">(optional)</span></label>
-                <input type="text" value={ef.title} onChange={(e) => setEf({ ...ef, title: e.target.value })} placeholder="e.g. Lab"
-                  className="w-full px-3 py-2.5 border border-line rounded-xl bg-bg text-sm focus:outline-none focus:border-accent transition" />
+                <label htmlFor="schedule-edit-title" className="block text-xs tabular-nums text-ink-mute font-medium mb-1.5">{t("Label")} <span className="text-ink-mute normal-case font-sans">{t("(optional)")}</span></label>
+                <input id="schedule-edit-title" type="text" value={ef.title} onChange={(e) => setEf({ ...ef, title: e.target.value })} placeholder="e.g. Lab"
+                  className="ui-input w-full" />
               </div>
               <div>
-                <label className="block text-[11px] font-mono text-ink-mute uppercase tracking-widest mb-1.5">Hall</label>
-                <input type="text" value={ef.hall} onChange={(e) => setEf({ ...ef, hall: e.target.value })} placeholder="Room 201"
-                  className="w-full px-3 py-2.5 border border-line rounded-xl bg-bg text-sm focus:outline-none focus:border-accent transition" />
+                <label htmlFor="schedule-edit-hall" className="block text-xs tabular-nums text-ink-mute font-medium mb-1.5">{t("Hall")}</label>
+                <input id="schedule-edit-hall" type="text" value={ef.hall} onChange={(e) => setEf({ ...ef, hall: e.target.value })} placeholder="Room 201"
+                  className="ui-input w-full" />
               </div>
             </div>
 
             <div className="flex items-center justify-between mt-6">
               <button
                 onClick={handleDeleteEditing}
-                className="text-xs font-medium text-ink-mute hover:text-accent transition"
+                className="ui-button danger"
               >
                 Delete lecture
               </button>
               <div className="flex gap-2">
                 <button onClick={() => setEditing(null)}
-                  className="px-4 py-2 border border-line rounded-full text-xs font-medium hover:bg-bg-alt transition">Cancel</button>
+                  className="ui-button secondary">{t("Cancel")}</button>
                 <button onClick={handleUpdate} disabled={editSaving}
-                  className="px-5 py-2 bg-ink text-paper rounded-full text-xs font-medium hover:bg-accent transition disabled:opacity-50">
-                  {editSaving ? "Saving…" : "Save changes"}
+                  className="ui-button primary">
+                  {editSaving ? t("Saving…") : t("Save changes")}
                 </button>
               </div>
             </div>

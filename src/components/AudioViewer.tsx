@@ -1,5 +1,7 @@
 "use client";
 
+import Icon from "@/components/Icon";
+
 import { useDialog } from "@/lib/use-dialog";
 
 import { useEffect, useState } from "react";
@@ -89,30 +91,28 @@ export default function AudioViewer({
       : "text-ink-mute bg-bg-alt";
 
   return (
-    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Audio recording" tabIndex={-1} className="fixed inset-0 z-[100] flex">
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={t("Audio recording")} tabIndex={-1} className="material-viewer">
       <div
-        className="absolute inset-0 bg-ink/30 backdrop-blur-sm"
+        className="material-viewer-backdrop"
         onClick={onClose}
       />
 
-      <div className="relative ml-auto w-full max-w-4xl bg-paper shadow-2xl flex flex-col animate-slide-in-right">
+      <div className="material-viewer-panel">
         {/* Header */}
-        <div className="border-b border-line px-6 py-4 flex items-center gap-4 flex-shrink-0">
+        <div className="material-viewer-header">
           <button
             onClick={onClose}
-          aria-label="Close dialog"
-            className="w-8 h-8 rounded-full border border-line flex items-center justify-center text-ink-mute hover:bg-bg-alt transition text-sm"
-          >
-            &times;
-          </button>
-          <div className="flex-1 min-w-0">
-            <h2 className="font-serif text-xl font-medium truncate flex items-center gap-2">
-              <span>🎙️</span> {recording.title}
+          aria-label={t("Close dialog")}
+            className="icon-button"
+          ><Icon name="close" /></button>
+          <div className="material-viewer-title">
+            <h2 dir="auto" className="font-sans text-xl font-semibold break-words flex items-center gap-2">
+              <Icon name="audio" size={22} className="shrink-0" /> {recording.title}
             </h2>
-            <div className="text-xs text-ink-mute font-mono mt-0.5 flex items-center gap-3">
+            <div className="text-xs text-ink-soft tabular-nums mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
               <span>{new Date(recording.uploadedAt).toLocaleDateString()}</span>
               {examHints.length > 0 && (
-                <span className="text-gold">{examHints.length} exam hints</span>
+                <span className="text-gold">{examHints.length} {t("exam hints")}</span>
               )}
             </div>
           </div>
@@ -120,10 +120,10 @@ export default function AudioViewer({
             <button
               onClick={downloadPdf}
               disabled={pdfBusy}
-              className="flex-shrink-0 bg-accent text-paper px-4 py-2 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2 disabled:opacity-60"
-              title="Download analysis & transcript as PDF"
+              className="ui-button secondary"
+              title={t("Download analysis & transcript as PDF")}
             >
-              <span>↓</span> {pdfBusy ? "Preparing…" : "PDF"}
+              <Icon name="download" size={17} /> {pdfBusy ? t("Preparing…") : "PDF"}
             </button>
           )}
           <BookmarkButton item={bookmarkItem} size="sm" />
@@ -135,15 +135,13 @@ export default function AudioViewer({
           {isLegacy && <p className="px-6 pt-4 text-sm text-gold">{t("Legacy analysis is unverified.")}</p>}
           {recording.sourceType === "notes" && <p className="px-6 pt-4 text-sm text-ink-soft">{t("Student-typed notes")}</p>}
           {legacyError && <p className="px-6 pt-4 text-sm text-accent" role="alert">{legacyError}</p>}
-          {legacy?.transcript && <section className="px-6 pt-4"><h3 className="font-serif text-lg font-medium">{t(recording.sourceType === "notes" ? "Student-typed notes" : "Transcript")}</h3><pre dir="auto" className="mt-3 whitespace-pre-wrap font-sans text-sm text-ink-soft">{legacy.transcript}</pre></section>}
+          {legacy?.transcript && <section className="px-6 pt-4"><h3 className="section-heading mb-4">{t(recording.sourceType === "notes" ? "Student-typed notes" : "Transcript")}</h3><pre dir="auto" className="mt-3 whitespace-pre-wrap font-sans text-sm text-ink-soft">{legacy.transcript}</pre></section>}
           {insights ? (
-            <div className="p-6 space-y-8">
+            <div className="material-reader p-5 md:p-7 space-y-8">
                   {/* Legacy reading stays clearly labeled as unverified. */}
               {insights.summary && (
                 <section>
-                  <h3 className="font-serif text-lg font-medium mb-3">
-                    Lecture Summary
-                  </h3>
+                  <h3 className="section-heading mb-4">{t("Lecture Summary")}</h3>
                   <div className="text-sm text-ink-soft leading-relaxed bg-bg rounded-2xl border border-line p-5 space-y-3">
                     {insights.summary
                       .split(/\n\n+/)
@@ -160,8 +158,8 @@ export default function AudioViewer({
               {/* Exam hints */}
               {examHints.length > 0 && (
                 <section>
-                  <h3 className="font-serif text-lg font-medium mb-4">
-                    Exam Hints ({examHints.length})
+                  <h3 className="section-heading mb-4">
+                    {t("Exam Hints")} ({examHints.length})
                   </h3>
                   <div className="space-y-2">
                     {examHints.map((h, i) => (
@@ -169,7 +167,7 @@ export default function AudioViewer({
                         key={i}
                         className="bg-bg border border-line rounded-xl p-4 flex items-start gap-3"
                       >
-                        <span className="text-gold flex-shrink-0 mt-0.5">●</span>
+                        <span className="text-gold flex-shrink-0 mt-0.5"><Icon name="info" size={16} /></span>
                         <div className="flex-1">
                           <div dir="auto" className="text-sm text-ink text-start">
                             {h.hint}
@@ -183,7 +181,7 @@ export default function AudioViewer({
                             </div>
                           )}
                         </div>
-                        <span className="text-[11px] font-mono text-ink-mute flex-shrink-0">
+                        <span className="text-xs tabular-nums text-ink-mute flex-shrink-0">
                           {Math.round((h.confidence || 0) * 100)}%
                         </span>
                       </div>
@@ -195,9 +193,7 @@ export default function AudioViewer({
               {/* Key emphasis */}
               {keyEmphasis.length > 0 && (
                 <section>
-                  <h3 className="font-serif text-lg font-medium mb-4">
-                    Key Emphasis
-                  </h3>
+                  <h3 className="section-heading mb-4">{t("Key Emphasis")}</h3>
                   <div className="space-y-2">
                     {keyEmphasis.map((e, i) => (
                       <div
@@ -206,7 +202,7 @@ export default function AudioViewer({
                       >
                         <div className="flex items-center gap-2 mb-1">
                           <span
-                            className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded-full ${emphasisColor(
+                            className={`text-xs tabular-nums uppercase px-2 py-0.5 rounded-full ${emphasisColor(
                               e.emphasisLevel
                             )}`}
                           >
@@ -233,14 +229,12 @@ export default function AudioViewer({
               {/* Chapter mapping */}
               {chapters.length > 0 && (
                 <section>
-                  <h3 className="font-serif text-lg font-medium mb-4">
-                    Chapter Breakdown
-                  </h3>
+                  <h3 className="section-heading mb-4">{t("Chapter Breakdown")}</h3>
                   <div className="space-y-3">
                     {chapters.map((ch, i) => (
                       <div
                         key={i}
-                        className="bg-bg border border-line rounded-2xl p-5"
+                        className="bg-bg-alt rounded-2xl p-5"
                       >
                         <h4
                           dir="auto"

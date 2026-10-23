@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => ({ api: vi.fn(), updateLecture: vi.fn(), push: vi
 vi.mock("@/lib/auth-context", () => ({ useAuth: () => ({ user: mocks.user, profile: { fullName: "Student" }, loading: false, signOut: vi.fn() }) }));
 vi.mock("@/lib/firestore-helpers", () => ({ getLecture: async () => ({ id: "l1", courseId: "c1", userId: "u1", status: "uploaded" }), updateLecture: mocks.updateLecture }));
 vi.mock("@/lib/api", () => ({ apiFetch: mocks.api, fetchObjectUrl: vi.fn() }));
-vi.mock("next/navigation", () => { const router = { push: mocks.push }; return { useParams: () => ({ id: "l1" }), useRouter: () => router }; });
+vi.mock("next/navigation", () => { const router = { push: mocks.push }; return { usePathname: () => "/lecture/l1/processing", useParams: () => ({ id: "l1" }), useRouter: () => router }; });
 vi.mock("next/link", () => ({ default: ({ children, ...props }: any) => <a {...props}>{children}</a> }));
 beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); });
 afterEach(cleanup);

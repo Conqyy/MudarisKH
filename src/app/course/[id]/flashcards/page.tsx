@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useId } from "react";
 import { useRouter, useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import SourceCitation, { SourceRef } from "@/components/SourceCitation";
 import SupportingCitation from "@/components/SupportingCitation";
 import type { SupportingRef } from "@/lib/supporting-materials";
-import Navbar from "@/components/Navbar";
-import Sidebar from "@/components/Sidebar";
+import AppShell from "@/components/AppShell";
+import Icon from "@/components/Icon";
+import { StudyHeader, StudyBusy, StudySourceStatus } from "@/components/StudyWorkspace";
 import { CourseFoundationGate } from "@/components/CourseFoundationGate";
 import { useCourseFoundation } from "@/hooks/useCourseFoundation";
 import BookmarkButton from "@/components/BookmarkButton";
@@ -72,17 +73,7 @@ interface SavedSet {
   createdAt: number;
 }
 
-type PageState = "configure" | "generating" | "study" | "error";
-
-// Pipeline steps shown while flashcards are generated. The last step is held
-// "in progress" until the real backend request resolves.
-const GEN_STEPS = [
-  { label: "Reading lecture documents", duration: 2500 },
-  { label: "Weighting topics by past exams", duration: 2500 },
-  { label: "Pulling professor exam hints", duration: 2500 },
-  { label: "Including tutorial problem types", duration: 2500 },
-  { label: "Writing flashcards", duration: 4000 },
-];
+type PageState = "configure" | "generating" | "opening" | "study" | "error";
 
 export default function FlashcardsPage() {
   const { user } = useAuth();
@@ -91,6 +82,7 @@ export default function FlashcardsPage() {
 }
 
 function FlashcardsPageContent() {
+  const cardAccessibilityId = useId();
   const { user, loading } = useAuth();
   const router = useRouter();
   const params = useParams();
@@ -143,27 +135,15 @@ function FlashcardsPageContent() {
   const [viewingTitle, setViewingTitle] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
 
-  // Generation pipeline animation state
-  const [genStep, setGenStep] = useState(0);
-  const [genCompleted, setGenCompleted] = useState<Set<number>>(new Set());
-  const [genTimings, setGenTimings] = useState<Record<number, number>>({});
-  const genCancelled = useRef(false);
-  const genFinished = useRef(false);
   const studyRequest = useRef<AbortController | null>(null);
   const generationRequest = useRef<AbortController | null>(null);
-  const genTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    genCancelled.current = false;
-    return () => { genCancelled.current = true; studyRequest.current?.abort(); if (genTimer.current) clearTimeout(genTimer.current); };
-  }, [courseId, user?.uid]);
+  useEffect(() => () => { studyRequest.current?.abort(); }, [courseId, user?.uid]);
 
   useEffect(() => {
     if (foundationLoading || foundationError || foundationReady || !generationRequest.current) return;
     generationRequest.current.abort();
     generationRequest.current = null;
-    genCancelled.current = true;
-    genFinished.current = true;
-    if (genTimer.current) clearTimeout(genTimer.current);
+
     setPageState("configure");
   }, [foundationReady, foundationLoading, foundationError]);
 
@@ -175,13 +155,6 @@ function FlashcardsPageContent() {
       openSavedRef.current?.(requestedId);
     }
   }, [user?.uid, pageLoading, loadError, requestedId]);
-
-  const formatGenTime = (ms: number) => {
-    const sec = Math.floor(ms / 1000);
-    const mins = Math.floor(sec / 60);
-    const secs = sec % 60;
-    return `${mins}:${String(secs).padStart(2, "0")}`;
-  };
 
   useEffect(() => {
     if (!loading && !user) router.push("/signin");
@@ -300,6 +273,11 @@ function FlashcardsPageContent() {
   };
 
   const startStudy = (deck: Flashcard[]) => {
+    if (deck.length === 0) {
+      setErrorMsg(t("This set has no cards. Choose another set or generate a new one."));
+      setPageState("error");
+      return;
+    }
     setCards(deck);
     setCurrent(0);
     setFlipped(false);
@@ -315,26 +293,6 @@ function FlashcardsPageContent() {
     generationRequest.current = controller;
     setPageState("generating");
     setErrorMsg("");
-
-    // Reset + start the pipeline animation
-    setGenStep(0);
-    setGenCompleted(new Set());
-    setGenTimings({});
-    genCancelled.current = false;
-    genFinished.current = false;
-    const startTime = Date.now();
-
-    (async () => {
-      for (let i = 0; i < GEN_STEPS.length; i++) {
-        if (genCancelled.current || genFinished.current) return;
-        setGenStep(i);
-        if (i === GEN_STEPS.length - 1) return; // hold last step until result
-        await new Promise((r) => { genTimer.current = setTimeout(r, GEN_STEPS[i].duration); });
-        if (genCancelled.current || genFinished.current) return;
-        setGenCompleted((prev) => new Set(prev).add(i));
-        setGenTimings((prev) => ({ ...prev, [i]: Date.now() - startTime }));
-      }
-    })();
 
     try {
       const res = await apiFetch(`${API_URL}/api/flashcards/generate`, {
@@ -357,7 +315,7 @@ function FlashcardsPageContent() {
           if (controller.signal.aborted) return;
           const currentFoundation = await refreshFoundation();
           if (currentFoundation?.ready) {
-            genFinished.current = true;
+
             setErrorMsg(err?.detail || `Backend returned ${res.status}`);
             setPageState("error");
           }
@@ -367,15 +325,14 @@ function FlashcardsPageContent() {
       }
       const data = await res.json();
       if (controller.signal.aborted || (!foundationReadyRef.current && !foundationUnknownRef.current)) return;
-      genFinished.current = true;
-      setGenCompleted(new Set(GEN_STEPS.map((_, i) => i)));
+
       setViewingId(data.doc_id || "");
       setViewingTitle(data.title || "Flashcards");
       startStudy(data.cards || []);
       loadData();
     } catch (e: any) {
       if (controller.signal.aborted) return;
-      genFinished.current = true;
+
       setErrorMsg(e.message || "Could not generate flashcards.");
       setPageState("error");
     } finally {
@@ -385,11 +342,10 @@ function FlashcardsPageContent() {
 
   const openSet = async (id: string) => {
     studyRequest.current?.abort();
-    genCancelled.current = true;
-    if (genTimer.current) clearTimeout(genTimer.current);
+
     const controller = new AbortController();
     studyRequest.current = controller;
-    setPageState("generating");
+    setPageState("opening");
     try {
       const res = await apiFetch(`${API_URL}/api/flashcards/detail/${id}`, { signal: controller.signal });
       if (!res.ok) throw new Error("Set not found");
@@ -427,57 +383,45 @@ function FlashcardsPageContent() {
     setCurrent((c) => Math.max(c - 1, 0));
   };
 
-  if (loadError && !pageLoading) return <><Navbar /><div className="pt-28 px-6 text-center" role="alert"><p>{loadError}</p><button onClick={() => loadData()} className="mt-4 underline">Retry loading</button></div></>;
+  if (loadError && !pageLoading) return <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="flashcards"><main className="workspace-main study-workspace"><div className="ui-panel study-busy" role="alert"><Icon name="alert" size={28} /><p>{loadError}</p><button onClick={() => loadData()} className="ui-button secondary">{t("Retry loading")}</button></div></main></AppShell>;
 
   if (loading || pageLoading) {
     return (
-      <>
-        <Navbar />
-        <div className="pt-20 min-h-screen flex items-center justify-center">
-          <div className="font-mono text-sm text-ink-mute">Loading...</div>
-        </div>
-      </>
+      <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="flashcards"><main className="workspace-main study-workspace"><StudyBusy loading title="Loading…" /></main></AppShell>
     );
   }
   if (!user) return null;
   if (!course) {
     return (
-      <>
-        <Navbar />
-        <div className="pt-20 min-h-screen flex items-center justify-center">
+      <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="flashcards"><main className="workspace-main study-workspace"><div className="ui-panel study-busy">
           <div className="text-center">
-            <h1 className="font-serif text-3xl font-medium mb-3">Course not found</h1>
+            <h1 className="font-sans text-3xl font-medium mb-3">{t("Course not found")}</h1>
             <Link href="/dashboard" className="inline-block bg-ink text-paper px-6 py-3 rounded-full text-sm font-medium hover:bg-accent transition">
-              Back to Dashboard
+              {t("Back to Dashboard")}
             </Link>
           </div>
-        </div>
-      </>
+        </div></main></AppShell>
     );
   }
 
   if (!foundationReady && pageState !== "study") {
     return (
-      <>
-        <Navbar />
-        <div className="pt-20 flex">
-          <Sidebar courses={allCourses} />
-          <main className="flex-1 px-6 md:px-10 py-8 max-w-4xl mx-auto w-full">
+      <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="flashcards"><main className="workspace-main study-workspace">
             <Link href={`/course/${courseId}`} className="inline-block mb-6 text-sm text-ink-soft hover:text-accent transition">
               ← {t("Back to course")}
             </Link>
             <CourseFoundationGate courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} onRetry={refreshFoundation} />
-          </main>
-        </div>
-      </>
+          </main></AppShell>
     );
   }
 
   const renderConfigure = () => (
-    <div className="space-y-8">
+    <div className="study-layout">
+      <aside className="ui-panel source-panel study-sources space-y-6">
+        <div className="study-source-title"><h2 className="section-heading">{t("Sources")}</h2><p className="page-subtitle">{t("Choose the material for this study session.")}</p></div>
       <div>
-        <h3 className="font-serif text-xl font-medium mb-1 tracking-tight">
-          Select lecture documents
+        <h3 className="font-sans text-xl font-medium mb-1 tracking-tight">
+          {t("Select lecture documents")}
         </h3>
         <p className="text-sm text-ink-soft mb-4">
           Cards cover <span className="text-ink font-medium">only</span> the topics in
@@ -491,7 +435,7 @@ function FlashcardsPageContent() {
               No analyzed documents yet. Upload lecture PDFs on the course page first.
             </p>
             <Link href={`/course/${courseId}`} className="text-accent text-sm hover:underline">
-              Go to course page to upload
+              {t("Go to course page to upload")}
             </Link>
           </div>
         ) : (
@@ -509,12 +453,12 @@ function FlashcardsPageContent() {
                   onChange={() => toggleDoc(doc.id)}
                   className="w-4 h-4 accent-accent rounded"
                 />
-                <div className="w-10 h-10 rounded-xl bg-sage/10 flex items-center justify-center text-sage text-xs font-mono uppercase flex-shrink-0">
+                <div className="w-10 h-10 rounded-xl bg-sage/10 flex items-center justify-center text-sage text-xs tabular-nums  flex-shrink-0">
                   {doc.fileType}
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="font-medium truncate">{doc.title}</div>
-                  <div className="text-xs text-ink-mute font-mono">
+                  <div className="text-xs text-ink-mute tabular-nums">
                     {doc.sourceRevision ? `${doc.unitCount ?? "—"} ${t("source units")} · ${doc.guide?.sections.length ?? "—"} ${t("guide sections")}` : `${doc.analysis?.topics?.length || 0} ${t("topics")}`}
                   </div>
                 </div>
@@ -526,8 +470,8 @@ function FlashcardsPageContent() {
 
       {histExams.length > 0 && (
         <div>
-          <h3 className="font-serif text-xl font-medium mb-1 tracking-tight">
-            Weight by past exams
+          <h3 className="font-sans text-xl font-medium mb-1 tracking-tight">
+            {t("Weight by past exams")}
           </h3>
           <p className="text-sm text-ink-soft mb-4">
             Cards are driven by these past exams and your lecture recordings — the
@@ -548,10 +492,10 @@ function FlashcardsPageContent() {
                   className="w-4 h-4 accent-accent rounded"
                 />
                 <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center text-accent flex-shrink-0">
-                  📋
+                  <Icon name="exam" size={18} />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium truncate">{h.title}</div>
+                  <div className="font-medium truncate">{h.title}</div><StudySourceStatus row={h} />
                 </div>
               </label>
             ))}
@@ -561,8 +505,8 @@ function FlashcardsPageContent() {
 
       {tutorials.length > 0 && (
         <div>
-          <h3 className="font-serif text-xl font-medium mb-1 tracking-tight">
-            Include tutorials
+          <h3 className="font-sans text-xl font-medium mb-1 tracking-tight">
+            {t("Include tutorials")}
           </h3>
           <p className="text-sm text-ink-soft mb-4">
             Adds cards on how to solve the practice-problem types from the
@@ -581,20 +525,20 @@ function FlashcardsPageContent() {
                   checked={selectedTut.has(t.id)}
                   onChange={() => toggleTut(t.id)}
                   className="w-4 h-4 rounded"
-                  style={{ accentColor: "#3f6f7d" }}
+                  style={{ accentColor: "var(--accent)" }}
                 />
                 <div
                   className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
-                  style={{ backgroundColor: "#3f6f7d1a", color: "#3f6f7d" }}
+                  style={{ backgroundColor: "var(--bg-alt)", color: "var(--ink-soft)" }}
                 >
-                  ✏️
+                  <Icon name="edit" size={18} />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium truncate">{t.title}</div>
-                  <div className="text-xs text-ink-mute font-mono">
+                  <div className="font-medium truncate">{t.title}</div><StudySourceStatus row={t} />
+                  <div className="text-xs text-ink-mute tabular-nums">
                     {t.analysis?.problems?.length
                       ? `${t.analysis.problems.length} problems`
-                      : "analyzed"}
+                      : ""}
                   </div>
                 </div>
               </label>
@@ -605,8 +549,8 @@ function FlashcardsPageContent() {
 
       {audioRecs.length > 0 && (
         <div>
-          <h3 className="font-serif text-xl font-medium mb-1 tracking-tight">
-            Include lecture recordings
+          <h3 className="font-sans text-xl font-medium mb-1 tracking-tight">
+            {t("Include lecture recordings")}
           </h3>
           <p className="text-sm text-ink-soft mb-4">
             Adds cards from what the professor said and flagged in the recordings
@@ -625,20 +569,20 @@ function FlashcardsPageContent() {
                   checked={selectedAudio.has(a.id)}
                   onChange={() => toggleAudio(a.id)}
                   className="w-4 h-4 rounded"
-                  style={{ accentColor: "#b8923a" }}
+                  style={{ accentColor: "var(--accent)" }}
                 />
                 <div
                   className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
-                  style={{ backgroundColor: "#b8923a1a", color: "#b8923a" }}
+                  style={{ backgroundColor: "var(--bg-alt)", color: "var(--ink-soft)" }}
                 >
-                  🎙️
+                  <Icon name="layers" size={18} />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium truncate">{a.title}</div>
-                  <div className="text-xs text-ink-mute font-mono">
+                  <div className="font-medium truncate">{a.title}</div><StudySourceStatus row={a} />
+                  <div className="text-xs text-ink-mute tabular-nums">
                     {a.insights?.examHints?.length
                       ? `${a.insights.examHints.length} exam hints`
-                      : "analyzed"}
+                      : ""}
                   </div>
                 </div>
               </label>
@@ -647,12 +591,17 @@ function FlashcardsPageContent() {
         </div>
       )}
 
+      </aside>
+      <div className="study-content space-y-6">
+      <section className="ui-panel study-options space-y-6">
+        <div><h2 className="section-heading">{t("Card options")}</h2><p className="page-subtitle">{t("Make it fit the way you study.")}</p></div>
       <div>
-        <label className="block text-sm font-medium text-ink-soft mb-2">
-          Number of cards <span className="text-ink-mute font-normal">(max 20)</span>
+        <label htmlFor="flashcard-count" className="block text-sm font-medium text-ink-soft mb-2">
+          {t("Number of cards")} <span className="text-ink-mute font-normal">{t("(max 20)")}</span>
         </label>
         <div className="flex items-center gap-4">
           <input
+            id="flashcard-count"
             type="range"
             min={5}
             max={20}
@@ -661,7 +610,7 @@ function FlashcardsPageContent() {
             onChange={(e) => setCount(Number(e.target.value))}
             className="flex-1 accent-accent"
           />
-          <span className="font-mono text-sm bg-bg-alt px-3 py-1.5 rounded-lg min-w-[3rem] text-center">
+          <span className="tabular-nums text-sm bg-bg-alt px-3 py-1.5 rounded-lg min-w-[3rem] text-center">
             {count}
           </span>
         </div>
@@ -671,46 +620,45 @@ function FlashcardsPageContent() {
       <button
         onClick={handleGenerate}
         disabled={!foundationReady || !!supportingBlocker || !documents.some((doc) => selectedDocs.has(doc.id))}
-        className="w-full bg-ink text-paper py-4 rounded-full text-sm font-medium hover:bg-accent transition-all hover:-translate-y-0.5 hover:shadow-lift disabled:opacity-50 disabled:cursor-not-allowed"
+        className="ui-button primary"
       >
-        Generate Flashcards →
+        {t("Generate Flashcards")} <Icon name="arrow-right" size={18} />
       </button>
 
+      </section>
+
       {savedSets.length > 0 && (
-        <div>
-          <h3 className="font-serif text-xl font-medium mb-4 tracking-tight">
-            Saved Sets
+        <div className="study-library" id="study-library">
+          <h3 className="font-sans text-xl font-medium mb-4 tracking-tight">
+            {t("Saved library")}
           </h3>
           <div className="bg-paper border border-line rounded-2xl overflow-hidden">
             {savedSets.map((set, idx) => (
               <div
                 key={set.id}
-                role="button" tabIndex={0}
-                onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openSet(set.id); } }}
-                onClick={() => openSet(set.id)}
-                className={`flex items-center justify-between p-5 hover:bg-bg-alt transition cursor-pointer ${
+                className={`study-library-row ${
                   idx !== 0 ? "border-t border-line" : ""
                 }`}
               >
-                <div className="flex items-center gap-4">
+                <button type="button" className="study-library-open" onClick={() => openSet(set.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openSet(set.id); } }}>
                   <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center text-accent">
-                    🗂️
+                    <Icon name="cards" size={18} />
                   </div>
                   <div>
                     <div className="font-medium text-sm">{set.title}</div>
-                    <div className="text-xs text-ink-mute font-mono mt-0.5">
+                    <div className="text-xs text-ink-mute tabular-nums mt-0.5">
                       {new Date(set.createdAt).toLocaleDateString()} · {set.cardCount} cards
                     </div>
                   </div>
-                </div>
+                </button>
                 <div className="flex items-center gap-3">
-                  <span className="text-ink-mute text-sm">→</span>
                   <button
                     onClick={(e) => deleteSet(e, set.id, set.title)}
                     title="Delete set"
-                    className="w-8 h-8 rounded-full flex items-center justify-center text-ink-mute hover:bg-accent hover:text-paper transition text-sm"
+                    aria-label={t("Delete set")}
+                    className="icon-button danger"
                   >
-                    🗑
+                    <Icon name="trash" size={16} />
                   </button>
                 </div>
               </div>
@@ -718,88 +666,27 @@ function FlashcardsPageContent() {
           </div>
         </div>
       )}
-    </div>
-  );
-
-  const renderGenerating = () => (
-    <div className="flex items-start justify-center pt-6 pb-16">
-      <div className="max-w-xl w-full text-center">
-        {/* Spinning ring */}
-        <div className="w-24 h-24 mx-auto mb-7 relative">
-          <div className="w-24 h-24 border-[3px] border-bg-alt border-t-accent rounded-full animate-spin-slow" />
-          <div className="absolute inset-0 flex items-center justify-center font-serif italic text-4xl text-accent">
-            m
-          </div>
-        </div>
-
-        <h2 className="font-serif text-2xl md:text-3xl font-medium mb-2 tracking-tight">
-          Building your flashcards…
-        </h2>
-        <p className="text-ink-soft text-sm mb-8 max-w-md mx-auto leading-relaxed">
-          Pulling the most exam-relevant concepts from your materials. This usually
-          takes 15–45 seconds.
-        </p>
-
-        {/* Pipeline steps */}
-        <div className="bg-paper border border-line rounded-2xl p-5 md:p-6 text-left shadow-soft">
-          {GEN_STEPS.map((step, i) => {
-            const stepDone = genCompleted.has(i);
-            const isActive = i === genStep && !stepDone;
-            const isPending = i > genStep && !stepDone;
-
-            return (
-              <div
-                key={i}
-                className={`flex items-center gap-3.5 py-3 ${
-                  i < GEN_STEPS.length - 1 ? "border-b border-line" : ""
-                } ${isPending ? "opacity-40" : "opacity-100"}`}
-              >
-                <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center font-mono text-xs font-semibold flex-shrink-0 transition-all ${
-                    stepDone
-                      ? "bg-sage text-paper"
-                      : isActive
-                      ? "bg-accent text-paper animate-pulse-soft"
-                      : "bg-bg-alt text-ink-soft"
-                  }`}
-                >
-                  {stepDone ? "✓" : i + 1}
-                </div>
-                <div className="flex-1 text-sm font-medium">{step.label}</div>
-                <div className="font-mono text-[11px] text-ink-mute flex-shrink-0">
-                  {stepDone
-                    ? formatGenTime(genTimings[i] || 0)
-                    : isActive
-                    ? "in progress…"
-                    : "queued"}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        <p className="text-xs text-ink-mute mt-5 font-mono">
-          Hang tight — building your cards from the selected material.
-        </p>
       </div>
     </div>
   );
+
+  const renderGenerating = () => <StudyBusy opening={pageState === "opening"} title="Generating your flashcards…" />;
 
   const renderStudy = () => {
     const card = cards[current];
     if (!card) return null;
     return (
-      <div className="max-w-2xl mx-auto">
+      <div className="study-flashcards">
         {activityItem && <div className="flex justify-end mb-3"><BookmarkButton item={activityItem} size="sm" /></div>}
         {/* Progress */}
         <div className="flex items-center justify-between mb-4">
-          <span className="font-mono text-xs text-ink-mute">
-            Card {current + 1} of {cards.length}
+          <span className="tabular-nums text-xs text-ink-mute" role="status" aria-live="polite" aria-atomic="true">
+            {t("Card")} {current + 1} {t("of")} {cards.length} · {t(flipped ? "Answer" : "Question")}
           </span>
           <div className="flex items-center gap-2">
             {card.examLikelihood && (
               <span
-                className={`text-[10px] font-mono uppercase px-2.5 py-1 rounded-full ${
+                className={`text-[10px] tabular-nums  px-2.5 py-1 rounded-full ${
                   card.examLikelihood === "high"
                     ? "bg-accent/10 text-accent"
                     : card.examLikelihood === "medium"
@@ -808,11 +695,11 @@ function FlashcardsPageContent() {
                 }`}
                 title="Likelihood of appearing on the exam"
               >
-                {card.examLikelihood === "high" ? "🔥 likely exam" : `${card.examLikelihood} exam`}
+                {card.examLikelihood === "high" ? t("Likely exam topic") : `${card.examLikelihood} ${t("exam")}`}
               </span>
             )}
             {card.topic && (
-              <div><span className="text-xs font-mono bg-sage/10 text-sage px-3 py-1 rounded-full">{card.topic}</span><SourceCitation courseId={courseId} sourceRefs={citationsForPath(card.provenance, "/topic").sourceRefs} /><SupportingCitation courseId={courseId} sourceRefs={citationsForPath(card.provenance, "/topic").supportingSourceRefs} /></div>
+              <div><span className="text-xs tabular-nums bg-sage/10 text-sage px-3 py-1 rounded-full">{card.topic}</span><SourceCitation courseId={courseId} sourceRefs={citationsForPath(card.provenance, "/topic").sourceRefs} /><SupportingCitation courseId={courseId} sourceRefs={citationsForPath(card.provenance, "/topic").supportingSourceRefs} /></div>
             )}
           </div>
           <button
@@ -820,15 +707,15 @@ function FlashcardsPageContent() {
               setPageState("configure");
               loadData();
             }}
-            className="font-mono text-xs text-ink-soft hover:text-accent transition"
+            className="ui-button ghost"
           >
-            ✕ Exit
+            <Icon name="close" size={16} /> {t("Exit")}
           </button>
         </div>
 
         <div className="w-full bg-bg-alt rounded-full h-1.5 mb-6 overflow-hidden">
           <div
-            className="bg-accent h-full transition-all"
+            className="bg-accent h-full transition-colors"
             style={{ width: `${((current + 1) / cards.length) * 100}%` }}
           />
         </div>
@@ -836,47 +723,36 @@ function FlashcardsPageContent() {
         <SourceCitation key={`${current}-${flipped}`} courseId={courseId} sourceRefs={citationsForPath(card.provenance, flipped ? "/back" : "/front", card).sourceRefs} />
         <SupportingCitation key={`supporting-${current}-${flipped}`} courseId={courseId} sourceRefs={citationsForPath(card.provenance, flipped ? "/back" : "/front", card).supportingSourceRefs} />
         {/* Card */}
-        <div
-          className="flashcard-scene h-80 mb-6 cursor-pointer"
+        <button
+          type="button"
+          className="study-flashcard flashcard-scene"
+          data-side={flipped ? "answer" : "question"}
+          aria-labelledby={`${cardAccessibilityId}-side ${cardAccessibilityId}-content`}
+          aria-describedby={`${cardAccessibilityId}-instruction`}
           onClick={() => setFlipped((f) => !f)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setFlipped((value) => !value); }
+          }}
         >
-          <div className={`flashcard relative w-full h-full ${flipped ? "flipped" : ""}`}>
-            {/* Front */}
-            <div className="flashcard-face absolute inset-0 bg-paper border border-line rounded-3xl p-8 flex flex-col items-center justify-center text-center shadow-soft">
-              <span className="font-mono text-[10px] text-ink-mute uppercase tracking-widest mb-4">
-                Question
-              </span>
-              <p className="font-serif text-2xl font-medium leading-snug">
-                {card.front}
-              </p>
-              <span className="font-mono text-xs text-ink-mute mt-6">
-                click to flip
-              </span>
-            </div>
-            {/* Back */}
-            <div className="flashcard-face flashcard-back absolute inset-0 bg-ink text-paper rounded-3xl p-8 flex flex-col items-center justify-center text-center shadow-soft">
-              <span className="font-mono text-[10px] text-paper/50 uppercase tracking-widest mb-4">
-                Answer
-              </span>
-              <p className="text-lg leading-relaxed">{card.back}</p>
-            </div>
-          </div>
-        </div>
+          <span id={`${cardAccessibilityId}-side`}>{t(flipped ? "Answer" : "Question")}</span>
+          <p id={`${cardAccessibilityId}-content`} dir="auto">{flipped ? card.back : card.front}</p>
+          <span id={`${cardAccessibilityId}-instruction`}>{t(flipped ? "Select to see the question" : "Select to reveal the answer")}</span>
+        </button>
 
         {/* Controls */}
-        <div className="flex items-center justify-between gap-4">
+        <div className="study-flashcard-controls">
           <button
             onClick={prev}
             disabled={current === 0}
-            className="px-6 py-3 border border-line rounded-full text-sm font-medium hover:bg-bg-alt transition disabled:opacity-40 disabled:cursor-not-allowed"
+            className="ui-button secondary"
           >
-            ← Previous
+            <Icon name="arrow-left" size={16} /> {t("Previous")}
           </button>
           <button
             onClick={() => setFlipped((f) => !f)}
-            className="px-6 py-3 border border-line rounded-full text-sm font-medium hover:bg-bg-alt transition"
+            className="ui-button secondary"
           >
-            Flip
+            {t("Flip")}
           </button>
           {current === cards.length - 1 ? (
             <button
@@ -884,16 +760,16 @@ function FlashcardsPageContent() {
                 setPageState("configure");
                 loadData();
               }}
-              className="px-6 py-3 bg-sage text-paper rounded-full text-sm font-medium hover:bg-ink transition"
+              className="ui-button primary"
             >
-              Done ✓
+              {t("Done")} <Icon name="check" size={16} />
             </button>
           ) : (
             <button
               onClick={next}
-              className="px-6 py-3 bg-ink text-paper rounded-full text-sm font-medium hover:bg-accent transition"
+              className="ui-button primary"
             >
-              Next →
+              {t("Next")} <Icon name="arrow-right" size={16} />
             </button>
           )}
         </div>
@@ -903,60 +779,29 @@ function FlashcardsPageContent() {
 
   const renderError = () => (
     <div className="flex items-center justify-center py-20">
-      <div className="text-center max-w-md">
-        <h2 className="font-serif text-2xl font-medium mb-3 tracking-tight">
-          Generation failed
+      <div className="ui-panel study-busy max-w-md" role="alert">
+        <h2 className="font-sans text-2xl font-medium mb-3 tracking-tight">
+          {t("Could not open study material")}
         </h2>
         <p className="text-ink-soft text-sm mb-8">{errorMsg}</p>
         <button
           onClick={() => setPageState("configure")}
           className="bg-ink text-paper px-6 py-3 rounded-full text-sm font-medium hover:bg-accent transition"
         >
-          Try again
+          {t("Try again")}
         </button>
       </div>
     </div>
   );
 
   return (
-    <>
-      <Navbar />
-      <div className="pt-20 flex">
-        <Sidebar courses={allCourses} />
-        <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-7xl mx-auto w-full">
-          <div className="my-8 flex items-center gap-2 text-xs font-mono">
-            <Link href="/dashboard" className="text-ink-soft hover:text-accent transition">
-              Dashboard
-            </Link>
-            <span className="text-ink-mute">›</span>
-            <Link href={`/course/${courseId}`} className="text-ink-soft hover:text-accent transition">
-              {course.code}
-            </Link>
-            <span className="text-ink-mute">›</span>
-            <span className="text-ink">Flashcards</span>
-          </div>
-
-          <div
-            className="bg-paper border border-line rounded-3xl p-8 mb-10 relative overflow-hidden"
-            style={{ borderTop: `6px solid ${course.color}` }}
-          >
-            <div className="font-mono text-xs text-ink-mute uppercase tracking-widest mb-3">
-              {course.code} · Flashcards
-            </div>
-            <h1 className="font-serif text-3xl md:text-4xl font-medium tracking-tight leading-tight mb-2">
-              Study <em className="italic text-accent">flashcards</em>
-            </h1>
-            <p className="text-ink-soft text-sm">
-              AI-generated cards from your documents, weighted by past exams and lecture emphasis.
-            </p>
-          </div>
+    <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="flashcards"><main className="workspace-main study-workspace">
+          <StudyHeader title="Flashcards" description="Review the concepts in your course, one card at a time." icon="cards" libraryCount={pageState === "configure" ? savedSets.length : 0} />
 
           {pageState === "configure" && renderConfigure()}
-          {pageState === "generating" && renderGenerating()}
+          {(pageState === "generating" || pageState === "opening") && renderGenerating()}
           {pageState === "study" && renderStudy()}
           {pageState === "error" && renderError()}
-        </main>
-      </div>
-    </>
+        </main></AppShell>
   );
 }

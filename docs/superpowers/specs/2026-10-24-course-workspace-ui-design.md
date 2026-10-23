@@ -3,7 +3,7 @@
 - Date: 24 October 2026
 - Branch: `codex/ui-redesign`
 - Source baseline: `bcf3612497ecf3d9e8de213c4796a7beac04c23e`
-- Status: design direction selected; written specification awaiting owner review. Product implementation has not begun.
+- Status: approved by the owner and implemented on the redesign branch. Local visual review remains pending before merge or production delivery.
 
 ## 1. Agreed intent and scope
 
@@ -310,4 +310,4 @@ Run frontend lint, TypeScript checks, tests, and an isolated production build. K
 
 ### Delivery boundary
 
-This specification defines the entire redesign; implementation can be sequenced by shared foundations, course/dashboard, study tools/readers, then remaining screens. Sequencing does not remove any page from scope. Local visual review is required before merge or production delivery. The owner has selected the direction, but has not yet reviewed this written spec or an implementation plan. After written-spec approval, write the implementation plan and obtain the requested execution choice before product changes begin.
+This specification defines the entire redesign across shared foundations, course/dashboard, study tools/readers, and remaining screens. Sequencing does not remove any page from scope. The owner approved implementation with “do it”; the implementation plan records the execution workflow. Local visual review is required before merge or production delivery.

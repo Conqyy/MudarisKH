@@ -1,5 +1,7 @@
 "use client";
 
+import Icon from "@/components/Icon";
+
 import { useState, useRef, useEffect } from "react";
 import { CourseDocument } from "@/lib/firestore-helpers";
 import SourceCitation from "@/components/SourceCitation";
@@ -71,7 +73,7 @@ export default function DocumentViewer({
   const scrollToChapter = (idx: number) => {
     setActiveChapter(idx);
     chapterRefs.current[idx]?.scrollIntoView({
-      behavior: "smooth",
+      behavior: "auto",
       block: "start",
     });
   };
@@ -90,29 +92,27 @@ export default function DocumentViewer({
   const pdfUrl = pdf.url;
 
   return (
-    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={doc.title} tabIndex={-1} className="fixed inset-0 z-[100] flex">
+    <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={doc.title} tabIndex={-1} className="material-viewer">
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-ink/30 backdrop-blur-sm"
+        className="material-viewer-backdrop"
         onClick={onClose}
       />
 
       {/* Panel */}
-      <div className="relative ml-auto w-full max-w-5xl bg-paper shadow-2xl flex flex-col animate-slide-in-right">
+      <div className="material-viewer-panel">
         {/* Header */}
-        <div className="border-b border-line px-6 py-4 flex items-center gap-4 flex-shrink-0">
+        <div className="material-viewer-header">
           <button
             onClick={onClose}
-            aria-label="Close document"
-            className="w-8 h-8 rounded-full border border-line flex items-center justify-center text-ink-mute hover:bg-bg-alt transition text-sm"
-          >
-            &times;
-          </button>
-          <div className="flex-1 min-w-0">
-            <h2 className="font-serif text-xl font-medium truncate">
+            aria-label={t("Close document")}
+            className="icon-button"
+          ><Icon name="close" /></button>
+          <div className="material-viewer-title">
+            <h2 dir="auto" className="font-sans text-xl font-semibold break-words">
               {doc.title}
             </h2>
-            <div className="text-xs text-ink-mute font-mono mt-0.5 flex items-center gap-3">
+            <div className="text-xs text-ink-soft tabular-nums mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
               <span className="uppercase">{doc.fileType}</span>
               <span>
                 {(doc.fileSize / 1024).toFixed(0)} KB
@@ -134,22 +134,20 @@ export default function DocumentViewer({
               href={pdfUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="border border-line px-4 py-2 rounded-full text-xs font-medium hover:bg-bg-alt transition flex-shrink-0"
-            >
-              Open PDF
-            </a>
+              className="ui-button secondary"
+            >{t("Open PDF")}</a>
           )}
         </div>
 
         {/* Tabs */}
-        <div className="border-b border-line px-6 flex gap-1 flex-shrink-0">
+        <div className="material-viewer-tabs">
           {(doc.guide || doc.analysis) && (
             <button
               onClick={() => setActiveTab("analysis")}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition ${
+              className={`ui-button ${
                 activeTab === "analysis"
-                  ? "border-accent text-accent"
-                  : "border-transparent text-ink-mute hover:text-ink"
+                  ? "primary"
+                  : "ghost"
               }`}
             >
               {t(doc.guide ? "Lightweight analysis" : "Analysis")}
@@ -157,32 +155,32 @@ export default function DocumentViewer({
           )}
           {isPdf && <button
             onClick={() => setActiveTab("content")}
-            className={`px-4 py-3 text-sm font-medium border-b-2 transition ${
+            className={`ui-button ${
               activeTab === "content"
-                ? "border-accent text-accent"
-                : "border-transparent text-ink-mute hover:text-ink"
+                ? "primary"
+                : "ghost"
             }`}
           >
             {t("Content")}
           </button>}
-          {doc.sourceRevision && <button onClick={() => setActiveTab("sources")} className={`px-4 py-3 text-sm font-medium border-b-2 ${activeTab === "sources" ? "border-accent text-accent" : "border-transparent text-ink-mute"}`}>{t("Source units")}</button>}
+          {doc.sourceRevision && <button onClick={() => setActiveTab("sources")} className={`ui-button ${activeTab === "sources" ? "primary" : "ghost"}`}>{t("Source units")}</button>}
         </div>
 
         {/* Body */}
         <div className="flex-1 overflow-hidden flex">
           {activeTab === "sources" ? (
             <div className="flex-1 overflow-y-auto p-6 space-y-4">
-              {!sources ? <p>{t("Loading source…")}</p> : sources.error ? <div role="alert"><p>{sources.error}</p><button className="underline mt-2" onClick={() => setSourceAttempt(n => n + 1)}>{t("Retry source")}</button></div> : <>
-                {sources.warnings.map((warning, i) => <p key={i} className="text-gold">{warning}</p>)}
-                {sources.units.map(unit => <div key={unit.unitId} className="border border-line rounded-xl p-4"><SourceCitation courseId={doc.courseId} sourceRefs={[{ documentId: doc.id, sourceRevision: doc.sourceRevision, unitId: unit.unitId, label: unit.label }]} /></div>)}
+              {!sources ? <p>{t("Loading source…")}</p> : sources.error ? <div role="alert"><p>{sources.error}</p><button className="ui-button secondary mt-2" onClick={() => setSourceAttempt(n => n + 1)}>{t("Retry source")}</button></div> : <>
+                {sources.warnings.length > 0 && <details className="material-warning-disclosure"><summary><Icon name="alert" size={16} />{t("Source notices")}<span>{sources.warnings.length}</span><Icon name="chevron-down" size={15} /></summary><div>{sources.warnings.map((warning, i) => <p key={i} className="material-inline-notice warning" dir="auto">{warning}</p>)}</div></details>}
+                {sources.units.map(unit => <div key={unit.unitId} className="border-b border-line pb-4"><SourceCitation courseId={doc.courseId} sourceRefs={[{ documentId: doc.id, sourceRevision: doc.sourceRevision, unitId: unit.unitId, label: unit.label }]} /></div>)}
               </>}
             </div>
           ) : activeTab === "analysis" && (doc.guide || doc.analysis) ? (
             <>
               {/* Chapter Navigation Sidebar */}
               {chapters.length > 0 && (
-                <nav className="hidden sm:block w-56 border-r border-line overflow-y-auto flex-shrink-0 p-4">
-                  <div className="text-xs font-mono text-ink-mute uppercase tracking-widest mb-3">
+                <nav aria-label={t("Document sections")} className="hidden sm:block w-56 border-e border-line overflow-y-auto flex-shrink-0 p-4">
+                  <div className="text-xs font-semibold text-ink-soft mb-3">
                     {t(doc.guide ? "Guide sections" : "Chapters")}
                   </div>
                   <div className="space-y-1">
@@ -190,7 +188,8 @@ export default function DocumentViewer({
                       <button
                         key={idx}
                         onClick={() => scrollToChapter(idx)}
-                        className={`w-full text-left px-3 py-2 rounded-lg text-sm transition ${
+                        aria-current={activeChapter === idx ? "location" : undefined}
+                        dir="auto" className={`w-full min-h-11 text-start px-3 py-2 rounded-lg text-sm transition ${
                           activeChapter === idx
                             ? "bg-accent/10 text-accent font-medium"
                             : "text-ink-soft hover:bg-bg-alt"
@@ -203,9 +202,7 @@ export default function DocumentViewer({
 
                   {topics.length > 0 && (
                     <>
-                      <div className="text-xs font-mono text-ink-mute uppercase tracking-widest mt-6 mb-3">
-                        Topics
-                      </div>
+                      <div className="text-xs font-semibold text-ink-soft mt-6 mb-3">{t("Topics")}</div>
                       <div className="flex flex-wrap gap-1.5">
                         {topics.map((t, i) => (
                           <span
@@ -222,12 +219,12 @@ export default function DocumentViewer({
               )}
 
               {/* Analysis Content */}
-              <div className="flex-1 overflow-y-auto p-6 space-y-8">
-                {doc.guide?.warnings.map((warning, i) => <p key={i} className="text-sm text-gold">{warning}</p>)}
+              <div className="material-reader flex-1 overflow-y-auto p-5 md:p-7 space-y-8">
+                {!!doc.guide?.warnings.length && <details className="material-warning-disclosure"><summary><Icon name="alert" size={16} />{t("Source notices")}<span>{doc.guide.warnings.length}</span><Icon name="chevron-down" size={15} /></summary><div>{doc.guide.warnings.map((warning, i) => <p key={i} className="material-inline-notice warning" dir="auto">{warning}</p>)}</div></details>}
                 {/* Chapters */}
                 {chapters.length > 0 && (
                   <section>
-                    <h3 className="font-serif text-lg font-medium mb-4">
+                    <h3 className="section-heading mb-4">
                       {t(doc.guide ? "Guide sections" : "Chapter Breakdown")}
                     </h3>
                     <div className="space-y-4">
@@ -235,15 +232,15 @@ export default function DocumentViewer({
                         <div
                           key={idx}
                           ref={(el) => { chapterRefs.current[idx] = el; }}
-                          className="bg-bg rounded-2xl p-5 border border-line"
+                          className="bg-bg-alt rounded-2xl p-5"
                         >
-                          <h4 className="font-medium text-sm mb-2 flex items-center gap-2">
-                            <span className="w-6 h-6 rounded-full bg-accent/10 text-accent text-xs flex items-center justify-center font-mono">
+                          <h4 dir="auto" className="font-semibold text-sm mb-2 flex items-start gap-2">
+                            <span className="w-6 h-6 rounded-full bg-accent/10 text-accent text-xs flex items-center justify-center tabular-nums">
                               {idx + 1}
                             </span>
                             {ch.chapter}
                           </h4>
-                          <p className="text-sm text-ink-soft leading-relaxed">
+                          <p dir="auto" className="text-sm text-ink-soft leading-relaxed">
                             {ch.content}
                           </p>
                           {doc.guide && <SourceCitation courseId={doc.courseId} sourceRefs={doc.guide.sections[idx].unitIds.map(unitId => ({ documentId: doc.id, sourceRevision: doc.guide?.sourceRevision, unitId }))} />}
@@ -253,12 +250,12 @@ export default function DocumentViewer({
                   </section>
                 )}
 
-                {doc.guide && doc.guide.concepts.length > 0 && <section><h3 className="font-serif text-lg font-medium mb-4">{t("Guide concepts")}</h3><div className="space-y-3">{doc.guide.concepts.map((concept, i) => <div key={i} className="border border-line rounded-xl p-4"><p>{concept.name}</p><SourceCitation courseId={doc.courseId} sourceRefs={concept.unitIds.map(unitId => ({ documentId: doc.id, sourceRevision: doc.guide?.sourceRevision, unitId }))} /></div>)}</div></section>}
+                {doc.guide && doc.guide.concepts.length > 0 && <section><h3 className="section-heading mb-4">{t("Guide concepts")}</h3><div className="space-y-3">{doc.guide.concepts.map((concept, i) => <div key={i} className="border border-line rounded-xl p-4"><p>{concept.name}</p><SourceCitation courseId={doc.courseId} sourceRefs={concept.unitIds.map(unitId => ({ documentId: doc.id, sourceRevision: doc.guide?.sourceRevision, unitId }))} /></div>)}</div></section>}
                 {/* Definitions */}
                 {definitions.length > 0 && (
                   <section>
-                    <h3 className="font-serif text-lg font-medium mb-4">
-                      Definitions ({definitions.length})
+                    <h3 className="section-heading mb-4">
+                      {t("Definitions")} ({definitions.length})
                     </h3>
                     <div className="bg-bg rounded-2xl border border-line overflow-hidden">
                       {definitions.map((def, idx) => (
@@ -283,14 +280,14 @@ export default function DocumentViewer({
                 {/* Formulas */}
                 {formulas.length > 0 && (
                   <section>
-                    <h3 className="font-serif text-lg font-medium mb-4">
-                      Formulas ({formulas.length})
+                    <h3 className="section-heading mb-4">
+                      {t("Formulas")} ({formulas.length})
                     </h3>
                     <div className="space-y-2">
                       {formulas.map((f, idx) => (
                         <div
                           key={idx}
-                          className="bg-bg border border-line rounded-xl px-4 py-3 font-mono text-sm text-ink-soft"
+                          className="bg-bg border border-line rounded-xl px-4 py-3 tabular-nums text-sm text-ink-soft"
                         >
                           {f}
                         </div>
@@ -312,7 +309,7 @@ export default function DocumentViewer({
                   />
                 ) : (
                   <div className="flex items-center justify-center h-full text-ink-mute text-sm">
-                    {pdf.error ? <div role="alert" className="text-center"><p>{pdf.error}</p><button onClick={pdf.retry} className="mt-3 underline">Retry PDF</button></div> : "Loading PDF..."}
+                    {pdf.error ? <div role="alert" className="text-center"><p>{pdf.error}</p><button onClick={pdf.retry} className="ui-button secondary mt-3">{t("Retry PDF")}</button></div> : t("Loading PDF...")}
                   </div>
                 )
               ) : (
