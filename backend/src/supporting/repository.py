@@ -144,7 +144,7 @@ class SupportingRepository:
             queued = deepcopy(job)
             previous = row.get('processingJob') or {}
             if all(previous.get(k) == queued[k] for k in ('inputRevision', 'sourceDigest', 'foundationRevision')):
-                for key in ('checkpointRevision', 'inventoryRevision', 'cursor'):
+                for key in ('checkpointRevision', 'inventoryRevision', 'extractionRevision', 'cursor'):
                     if key in previous: queued[key] = deepcopy(previous[key])
             row.update(status='queued', originalDigest=source_digest, processingJob=queued, error=None)
             row['supportingAnalysis'] = {**row.get('supportingAnalysis', {}), 'version': 1, 'state': 'queued'}
@@ -184,7 +184,8 @@ class SupportingRepository:
 
     def checkpoint(self, identity, job, *, changes, now_ms):
         _clock(now_ms)
-        allowed = {'stage', 'cursor', 'modelCalls', 'error', 'checkpointRevision', 'inventoryRevision'}
+        allowed = {'stage', 'cursor', 'modelCalls', 'error', 'checkpointRevision', 'inventoryRevision',
+                   'extractionRevision'}
         if not isinstance(changes, dict) or set(changes) - allowed: raise ValueError('Invalid supporting checkpoint fields')
         if 'modelCalls' in changes and (type(changes['modelCalls']) is not int or changes['modelCalls'] < 0):
             raise ValueError('Invalid model-call count')
@@ -196,6 +197,7 @@ class SupportingRepository:
                 raise ValueError('Checkpoint cursor must contain compact numeric positions')
         if 'checkpointRevision' in changes: _hash(changes['checkpointRevision'])
         if 'inventoryRevision' in changes: _hash(changes['inventoryRevision'])
+        if 'extractionRevision' in changes: _hash(changes['extractionRevision'])
         if changes.get('error') is not None and (not isinstance(changes['error'], str) or len(changes['error']) > 2000):
             raise ValueError('Invalid checkpoint error')
         def checkpoint(row, versions):

@@ -82,6 +82,8 @@ class SupportingWorkflow:
             raise RuntimeError("Supporting analysis claim changed")
         version = self.library.save_checkpoint(identity, job, deepcopy(state))
         changes = {"checkpointRevision": version["revision"]}
+        if stage == 'extracting':
+            changes['extractionRevision'] = version['revision']
         if inventory_revision is not None:
             changes["inventoryRevision"] = inventory_revision
         if not self.repository.checkpoint(identity, job, changes=changes, now_ms=self._now()):
@@ -90,8 +92,19 @@ class SupportingWorkflow:
 
     def _heartbeat(self, identity, job, stop):
         while not stop.wait(60):
-            if not self.repository.checkpoint(identity, job, changes={}, now_ms=self._now()):
-                return
+            checked = deepcopy(job)
+            if not self.repository.checkpoint(identity, checked, changes={}, now_ms=self._now()):
+                # Capture can bind its digest between a heartbeat's read and
+                # checkpoint. Follow only that transition on this exact claim.
+                current = self.repository.get_owned(identity).get('processingJob') or {}
+                if (checked.get('sourceDigest') is not None or not current.get('sourceDigest')
+                        or any(current.get(key) != checked.get(key) for key in
+                               ('id', 'claimToken', 'inputRevision', 'foundationRevision'))):
+                    return
+                bound = {**checked, 'sourceDigest': current['sourceDigest']}
+                if not self.repository.checkpoint(identity, bound, changes={}, now_ms=self._now()):
+                    return
+                job['sourceDigest'] = bound['sourceDigest']
 
     def _read_original(self, identity, row, job):
         path = row.get('storagePath')
@@ -113,8 +126,11 @@ class SupportingWorkflow:
                 raise RuntimeError('Supporting analysis claim changed before URL capture')
             self.repository.database.upload_file_to_storage(
                 captured, path, identity['userId'], require_remote=True)
-            job = self.repository.bind_capture(identity, job, path=path,
+            bound = self.repository.bind_capture(identity, job, path=path,
                 source_digest=captured_digest, now_ms=self._now())
+            # The heartbeat retains this same dictionary. Never replace it with
+            # a newly fetched worker handle or a competing claim token.
+            job['sourceDigest'] = bound['sourceDigest']
             row = self.repository.get_owned(identity)
         if not path:
             if identity['kind'] == 'notes' and isinstance(row.get('transcript'), str):
@@ -178,6 +194,8 @@ class SupportingWorkflow:
         return build_audio_manifest(identity, original_digest=job['sourceDigest'], transcript=transcript)
 
     def _inventory_checkpoint(self, identity, job, inventory, model_calls, source_revision):
+        if inventory.get('extractionCoverage', {}).get('complete') is not True:
+            raise ValueError('Incomplete supporting extraction cannot be reused as inventory')
         state = {'phase': 'inventory', 'sourceRevision': source_revision,
                  'inventoryDigest': digest(inventory), 'inventory': deepcopy(inventory),
                  'modelCalls': model_calls}
@@ -195,7 +213,8 @@ class SupportingWorkflow:
         state = self.library.load_checkpoint(identity, revision)
         inventory = state.get('inventory') if isinstance(state, dict) and state.get('phase') == 'inventory' else None
         if (not isinstance(inventory, dict) or state.get('inventoryDigest') != digest(inventory)
-                or state.get('sourceRevision') != source_revision):
+                or state.get('sourceRevision') != source_revision
+                or inventory.get('extractionCoverage', {}).get('complete') is not True):
             raise ValueError('Prepared supporting inventory checkpoint source is invalid')
         return inventory
 
@@ -254,6 +273,10 @@ class SupportingWorkflow:
             if inventory is None:
                 resume = current_state if isinstance(current_state, dict) and current_state.get('stage') in (
                     'extract', 'reconcile', 'complete') else None
+                if resume is None and runtime.get('extractionRevision'):
+                    # Alignment and partial-report checkpoints may replace the
+                    # active pointer, but must not erase extraction's exact prefix.
+                    resume = self.library.load_checkpoint(identity, runtime['extractionRevision'])
 
                 def extraction_checkpoint(state):
                     self._persist_checkpoint(identity, job, 'extracting', state)
@@ -269,8 +292,9 @@ class SupportingWorkflow:
                     render=render, checkpoint=extraction_checkpoint, resume=resume,
                     model_call_budget=budget, model_calls=calls)
                 calls = self.repository.get_owned(identity)['processingJob']['modelCalls']
-                inventory_revision = self._inventory_checkpoint(
-                    identity, job, inventory, calls, manifest['sourceRevision'])
+                if inventory.get('extractionCoverage', {}).get('complete') is True:
+                    inventory_revision = self._inventory_checkpoint(
+                        identity, job, inventory, calls, manifest['sourceRevision'])
 
             runtime = self.repository.get_owned(identity)['processingJob']
             calls = runtime['modelCalls']

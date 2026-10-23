@@ -176,7 +176,7 @@ def test_compact_lists_preserve_safe_identity_and_job_aliases(api_module, monkey
               'tutorial': 'get_course_tutorials', 'audio': 'get_course_audio_recordings'}[kind]
     monkeypatch.setattr(api.db_client, getter, lambda course_id, user_id=None: [{
         'id': 'm', 'userId': 'owner', 'courseId': 'course', 'title': 'Saved',
-        'processingJob': {'id': 'opaque-job', 'claimToken': 'secret'},
+        'processingJob': {'id': 'opaque-job', 'claimToken': 'secret', 'extractionRevision': 'e' * 64},
         'supportingAnalysis': {'version': 1}, 'storagePath': 'private/path',
         'analysis': {'private': 'large'}, 'insights': {'private': 'large'},
     }])
@@ -192,7 +192,7 @@ def test_compact_lists_preserve_safe_identity_and_job_aliases(api_module, monkey
     item = next(value for value in response.json().values() if isinstance(value, list))[0]
     assert (item['id'], item['courseId'], item['materialId'], item['jobId']) == (
         'm', 'course', 'm', 'opaque-job')
-    assert not {'storagePath', 'analysis', 'insights', 'processingJob', 'claimToken'} & set(item)
+    assert not {'storagePath', 'analysis', 'insights', 'processingJob', 'claimToken', 'extractionRevision'} & set(item)
     api.app.dependency_overrides.clear()
 
 

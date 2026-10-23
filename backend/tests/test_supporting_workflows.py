@@ -265,7 +265,8 @@ def test_public_status_reports_real_unit_and_requirement_progress(monkeypatch):
     row = {
         "supportingAnalysis": {"version": 1, "state": "completed", "sourceRevision": "a" * 64,
             "reportRevision": "b" * 64, "scopeRevision": "c" * 64, "analysisId": "private"},
-        "processingJob": {"id": "opaque-job", "stage": "completed", "cursor": {"units": 9}},
+        "processingJob": {"id": "opaque-job", "stage": "completed", "cursor": {"units": 9},
+                          "extractionRevision": "e" * 64},
         "error": None,
     }
     library = SupportingLibrary(SimpleNamespace(get_owned=lambda identity: deepcopy(row), database=None))
