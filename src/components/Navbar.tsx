@@ -6,7 +6,6 @@ import { useRouter } from "next/navigation";
 import type { Course } from "@/lib/firestore-helpers";
 import { useAuth } from "@/lib/auth-context";
 import { useLang } from "@/lib/i18n";
-import { useTheme } from "@/lib/theme";
 import { useOverlayMotion } from "@/lib/use-overlay-motion";
 import Icon, { BrandMark } from "./Icon";
 
@@ -16,7 +15,6 @@ export default function Navbar({ workspace = false, course, courses = [], onOpen
   const router = useRouter();
   const { user, profile, signOut, loading } = useAuth();
   const { t, lang, toggle: toggleLanguage } = useLang();
-  const { theme, toggle: toggleTheme } = useTheme();
   const [menuOpen, setMenuOpen] = useState(false);
   const { ref: dropdownRef, close: closeMenu, toggle: toggleMenu } = useOverlayMotion(() => setMenuOpen(false), { enabled: menuOpen, kind: "popover", trapFocus: false });
   const menuRef = useRef<HTMLDivElement>(null);
@@ -44,7 +42,6 @@ export default function Navbar({ workspace = false, course, courses = [], onOpen
     </div> : <div className="navbar-links"><Link href="/">{t("Home")}</Link>{user ? <Link href="/dashboard">{t("Dashboard")}</Link> : <Link href="/#features">{t("Features")}</Link>}</div>}
     <div className="navbar-actions">
       <button onClick={toggleLanguage} className="icon-button language-control" aria-label={lang === "en" ? "Switch to Arabic" : "Switch to English"}>{lang === "en" ? "العربية" : "English"}</button>
-      <button onClick={toggleTheme} className="icon-button" aria-label={theme === "dark" ? t("Switch to light mode") : t("Switch to dark mode")} title={theme === "dark" ? t("Switch to light mode") : t("Switch to dark mode")}><Icon name={theme === "dark" ? "sun" : "moon"} size={18} /></button>
       {loading ? <div className="w-12 h-10 bg-bg-alt rounded-full animate-pulse" /> : user ? <div className="relative" ref={menuRef}>
         <button ref={accountButton} onClick={() => toggleMenu(() => setMenuOpen(true))} className="icon-button account-control" aria-label={t("Account")} title={t("Account")} aria-expanded={menuOpen} aria-controls="account-links">
           {profile?.photoURL ? (

@@ -173,8 +173,6 @@ export const AR: Record<string, string> = {
   "Language": "اللغة",
   "Arabic": "العربية",
   "English": "الإنجليزية",
-  "Switch to dark mode": "الوضع الليلي",
-  "Switch to light mode": "الوضع النهاري",
   "Collapse sidebar": "طيّ القائمة",
   "Expand sidebar": "توسيع القائمة",
 

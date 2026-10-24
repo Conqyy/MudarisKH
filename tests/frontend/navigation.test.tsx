@@ -31,6 +31,13 @@ it("exposes the actual language toggle and changes the document direction", asyn
   await waitFor(() => expect(document.documentElement.dir).toBe("ltr"));
 });
 
+it("does not expose a theme switch, including for a previously saved dark preference", () => {
+  localStorage.setItem("mudaris_theme", "dark");
+  render(<Navbar />);
+  expect(screen.queryByRole("button", { name: /switch to (dark|light) mode/i })).toBeNull();
+  expect(screen.getByRole("button", { name: /switch to (arabic|english)/i })).toBeTruthy();
+});
+
 it("provides Recent and Bookmarked navigation in the account menu", () => {
   render(<Navbar />);
   fireEvent.click(screen.getByTitle("Account"));

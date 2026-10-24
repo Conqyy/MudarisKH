@@ -76,3 +76,11 @@ The owner's warm brown/orange request replaces cool decorative tokens with warm 
 Expanded navigation and the mobile drawer now use full rows with transparent icon slots and plain course monograms. Only the compact desktop rail uses circular glass controls. The icon slots retain the same 46px geometry in both desktop states to avoid snapping during the existing animation. Review also found and corrected a logical-edge calculation that briefly translated RTL rows horizontally as their width changed. Two regressions reproduced the issue before the fix and now pass.
 
 Verified 249 tests across 20 files, full lint, TypeScript, production build, whitespace checks, and independent CSS/motion review. Live Chrome checks covered both themes, English/Arabic, desktop collapse/expand, a 1024px expanded layout, and a 390px Arabic navigation drawer with Escape dismissal. No horizontal page overflow occurred in those checks. Screenshots were captured locally; browser viewport and the original Arabic/light/expanded preferences were restored. The original active course tab was preserved.
+
+## Beige and light-blue, light-only revision
+
+The owner replaced the warm-orange direction with a beige base and light-blue accents and explicitly removed dark mode. Pale-blue selected controls use dark-blue text, while the glass shell keeps a beige tint. Accent text has 5.82:1 contrast on pale-blue depth surfaces and selected controls have 7.71:1 text contrast. Sidebar shapes and motion are unchanged.
+
+Removed the theme toggle, context/API, dark-only styles and translations. Root HTML always starts with the light theme and no longer reads the retired saved theme key. Existing language and sidebar preferences still hydrate and persist. Regressions verify an old saved dark preference cannot reactivate dark styling and no theme switch is exposed.
+
+Verified 251 tests across 20 files, full lint, TypeScript, production build, whitespace checks, and independent source review. Live Chrome checks covered the 1024px English expanded sidebar and 390px Arabic layout with no horizontal page overflow or theme toggle. Saved a local screenshot of the beige/blue design, then restored the original Arabic/expanded navigation preferences and browser viewport. No backend or study workflow changed.

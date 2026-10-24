@@ -5,7 +5,6 @@ import "@/components/material-ui.css";
 import "./glass-shell.css";
 import { AuthProvider } from "@/lib/auth-context";
 import { LanguageProvider } from "@/lib/i18n";
-import { ThemeProvider } from "@/lib/theme";
 import { SidebarProvider } from "@/lib/sidebar";
 import { InputModalityProvider } from "@/lib/input-modality";
 
@@ -23,14 +22,13 @@ export default function RootLayout({
   // English / LTR is the default; the client switches to ar/rtl if the user
   // previously chose Arabic (LanguageProvider updates <html> on mount).
   return (
-    <html lang="en" dir="ltr" suppressHydrationWarning>
+    <html lang="en" dir="ltr" data-theme="light" suppressHydrationWarning>
       <head>
-        {/* Apply the saved theme and sidebar width before first paint, to avoid
-            a light flash and a wide-then-narrow sidebar snap. */}
+        {/* Apply saved navigation preferences before first paint. The visual
+            theme is always light, including for older saved dark preferences. */}
         <script
           dangerouslySetInnerHTML={{
             __html:
-              "try{var t=localStorage.getItem('mudaris_theme');document.documentElement.dataset.theme=t==='dark'?'dark':'light'}catch(e){}" +
               "try{var s=localStorage.getItem('mudaris_sidebar');document.documentElement.dataset.sidebar=s==='expanded'?'expanded':'collapsed'}catch(e){document.documentElement.dataset.sidebar='collapsed'}" +
               "try{var l=localStorage.getItem('mudaris_lang');document.documentElement.lang=l==='ar'?'ar':'en';document.documentElement.dir=l==='ar'?'rtl':'ltr'}catch(e){}",
           }}
@@ -49,13 +47,11 @@ export default function RootLayout({
         />
       </head>
       <body className="antialiased" suppressHydrationWarning>
-        <ThemeProvider>
-          <LanguageProvider>
-            <SidebarProvider>
-              <InputModalityProvider><AuthProvider>{children}</AuthProvider></InputModalityProvider>
-            </SidebarProvider>
-          </LanguageProvider>
-        </ThemeProvider>
+        <LanguageProvider>
+          <SidebarProvider>
+            <InputModalityProvider><AuthProvider>{children}</AuthProvider></InputModalityProvider>
+          </SidebarProvider>
+        </LanguageProvider>
       </body>
     </html>
   );

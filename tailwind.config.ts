@@ -9,9 +9,7 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // RGB-triplet CSS variables (set in globals.css) so the whole palette
-        // swaps for dark mode while opacity modifiers (e.g. bg-sage/10) keep
-        // working via <alpha-value>.
+        // Shared RGB-triplet palette with opacity modifiers such as bg-sage/10.
         bg: "rgb(var(--c-bg) / <alpha-value>)",
         "bg-alt": "rgb(var(--c-bg-alt) / <alpha-value>)",
         ink: "rgb(var(--c-ink) / <alpha-value>)",
@@ -34,8 +32,8 @@ const config: Config = {
         mono: ['Manrope', 'sans-serif'],
       },
       boxShadow: {
-        soft: "0 2px 8px rgba(25,39,74,0.04)",
-        lift: "0 8px 32px rgba(25,39,74,0.08)",
+        soft: "0 2px 8px rgb(var(--c-shadow) / .04)",
+        lift: "0 8px 32px rgb(var(--c-shadow) / .08)",
       },
       animation: {
         "spin-slow": "spin 1.2s linear infinite",

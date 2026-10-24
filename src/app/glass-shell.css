@@ -3,15 +3,11 @@
   --shell-gutter: 18px;
   --glass-fill: 255 253 249;
   --glass-edge: 255 255 255;
-  --glass-shadow: 74 45 29;
-}
-[data-theme="dark"] {
-  --glass-fill: 49 39 33;
-  --glass-edge: 210 185 162;
-  --glass-shadow: 0 0 0;
+  --glass-shadow: 69 65 57;
+  --glass-tint: 232 223 207;
 }
 body {
-  background: radial-gradient(ellipse at 85% 90%, rgb(var(--c-depth) / .7), transparent 55%),
+  background: radial-gradient(ellipse at 85% 90%, rgb(var(--glass-tint) / .7), transparent 55%),
     radial-gradient(ellipse at 15% 0%, rgb(var(--c-paper) / .38), transparent 60%), rgb(var(--c-bg-alt));
   background-attachment: fixed;
 }
@@ -20,7 +16,7 @@ body {
   min-height: calc(100dvh - var(--shell-gutter) * 2);
   border: 1px solid rgb(var(--glass-edge) / .85);
   border-radius: 36px;
-  background: linear-gradient(145deg, rgb(var(--glass-fill) / .36), rgb(var(--c-depth) / .38) 75%);
+  background: linear-gradient(145deg, rgb(var(--glass-fill) / .36), rgb(var(--glass-tint) / .38) 75%);
   box-shadow: 0 16px 64px rgb(var(--glass-shadow) / .055), inset 0 1px 0 rgb(var(--glass-edge) / .9);
 }
 .app-shell > .app-navbar {

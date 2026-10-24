@@ -135,10 +135,6 @@
 [dir="rtl"] .journey-connector .ui-icon, [dir="rtl"] .dashboard-course-open .ui-icon,
 [dir="rtl"] .journey-action-row > .ui-icon:last-child, [dir="rtl"] .journey-support-link > .ui-icon:last-child,
 [dir="rtl"] .journey-tool-direction { transform: scaleX(-1); }
-[data-theme="dark"] .course-journey, [data-theme="dark"] .journey-node,
-[data-theme="dark"] .journey-tool { border-color: rgb(var(--c-line) / .75); }
-[data-theme="dark"] .journey-stage-marker, [data-theme="dark"] .journey-support-icon,
-[data-theme="dark"] .journey-support-link, [data-theme="dark"] .journey-node-icon { border-color: rgb(var(--c-control) / .3); }
 @media (hover: hover) and (pointer: fine) {
   .journey-action-row:hover, .journey-tool:not(:disabled):hover, .journey-support-link:hover { background: rgb(var(--c-paper) / .88); }
 }

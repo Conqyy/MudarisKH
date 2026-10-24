@@ -31,8 +31,6 @@
 .entry-notice svg { flex-shrink: 0; margin-top: 2px; }
 .entry-notice.error { color: #af353d; background: #fff1f2; border-color: #f1cfd3; }
 .entry-notice.success { color: #216248; background: #eff8f3; border-color: #cfe7d9; }
-[data-theme="dark"] .entry-notice.error { color: #ffaeb7; background: #37252c; border-color: #65404a; }
-[data-theme="dark"] .entry-notice.success { color: #a0dbbd; background: #21352d; border-color: #355b49; }
 .entry-step-indicator { display: flex; gap: 8px; margin-bottom: 24px; }
 .entry-step-indicator span { height: 4px; border-radius: 8px; background: rgb(var(--c-line)); flex: 1; }
 .entry-step-indicator span.active { background: rgb(var(--c-ink)); }
@@ -112,7 +110,6 @@
 .account-verified { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; border: 1px solid rgb(var(--c-line)); border-radius: 20px; padding: 4px 8px; }
 .account-provider-note { background: rgb(var(--c-bg-alt)); border: 1px solid rgb(var(--c-line)); border-radius: 13px; padding: 17px; font-size: 13px; color: rgb(var(--c-ink-soft)); line-height: 1.8; }
 .account-danger h2 { color: #af353d; }
-[data-theme="dark"] .account-danger h2 { color: #ffaeb7; }
 .account-delete-confirm { margin-top: 23px; border-top: 1px solid rgb(var(--c-line)); padding-top: 23px; }
 .account-delete-confirm > p { font-size: 13px; line-height: 1.8; margin-bottom: 20px; }
 .account-actions { display: flex; gap: 10px; flex-wrap: wrap; }
