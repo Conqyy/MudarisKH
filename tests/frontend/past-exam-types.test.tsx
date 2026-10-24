@@ -7,7 +7,7 @@ import CoursePage from "../../src/app/course/[id]/page";
 import UploadHistoricalExamModal from "../../src/components/UploadHistoricalExamModal";
 
 const mocks = vi.hoisted(() => ({ api: vi.fn(), update: vi.fn(), search: "", user: { uid: "u1" }, course: { id: "c1", userId: "u1", title: "Algorithms", code: "CS", color: "sage", examOrder: ["q1", "m1", "q2", "f1", "old"] } }));
-vi.mock("@/lib/api", () => ({ apiFetch: mocks.api, apiJson: async (url: string, init?: RequestInit) => { const result = await mocks.api(url, init); const data = await result.json(); if (!result.ok) throw new Error(data.detail); return data; } }));
+vi.mock("@/lib/api", () => ({ API_URL: "http://127.0.0.1:8000", apiFetch: mocks.api, apiJson: async (url: string, init?: RequestInit) => { const result = await mocks.api(url, init); const data = await result.json(); if (!result.ok) throw new Error(data.detail); return data; } }));
 vi.mock("@/lib/auth-context", () => ({ useAuth: () => ({ user: mocks.user, loading: false }) }));
 vi.mock("@/lib/firestore-helpers", () => ({ getCourse: async () => mocks.course, getUserCourses: async () => [mocks.course], updateCourse: mocks.update }));
 vi.mock("@/lib/activity", () => ({ useTrackRecent: () => {} }));
@@ -60,6 +60,94 @@ it.each([["Final", "final"], ["Midterm", "midterm"], ["Quiz", "quiz"]] as const)
   for (const other of ["Final", "Midterm", "Quiz"].filter(label => label !== name)) {
     expect(within(screen.getByRole("region", { name: other })).getByRole("button", { name: other }).getAttribute("aria-expanded")).toBe("false");
   }
+});
+
+it("keeps a past-exam selection and lecture confirmation while focus revalidates the foundation", async () => {
+  const { container } = render(<CoursePage />);
+  const card = await screen.findByRole("region", { name: "Final" });
+  fireEvent.click(within(card).getByRole("button", { name: "Final" }));
+  fireEvent.click(within(card).getByRole("button", { name: /^\+?\s*Upload$/ }));
+  const dialog = await screen.findByRole("dialog", { name: "Upload materials" });
+  const selector = within(dialog).getByRole("combobox", { name: "Past exam type" }) as HTMLSelectElement;
+  const background = deferred<any>();
+  mocks.api.mockImplementationOnce(() => background.promise);
+  const callsBeforeFocus = mocks.api.mock.calls.length;
+
+  // A native file chooser returns window focus before its change event. A
+  // background GET must not revoke the last confirmed result or remount files.
+  fireEvent(window, new Event("focus"));
+  expect(screen.queryByRole("dialog", { name: "Upload materials" })).toBe(dialog);
+  fireEvent.change(within(dialog).getByLabelText("Choose files"), { target: { files: [new File(["synthetic"], "selected-final.pdf", { type: "application/pdf" })] } });
+  expect(within(dialog).getByText("selected-final.pdf")).toBeTruthy();
+  expect(selector.value).toBe("final");
+  expect(container.querySelector(".journey-confirm-node.is-confirmed")).not.toBeNull();
+  expect(screen.getByText("Your lecture foundation is confirmed.")).toBeTruthy();
+  const studyActions = container.querySelectorAll<HTMLButtonElement>("button.journey-tool");
+  expect(studyActions).toHaveLength(4);
+  expect([...studyActions].every(button => button.disabled)).toBe(true);
+  expect(container.querySelector("a.journey-tool")).toBeNull();
+  expect(mocks.api.mock.calls.slice(callsBeforeFocus).map(([url, init]) => [url, init?.method || "GET"]))
+    .toEqual([[expect.stringMatching(/\/foundation$/), "GET"]]);
+
+  await act(async () => background.resolve(response({ ready: true, state: "ready", revision: "r1", documentCount: 2, completedCount: 2 })));
+  expect(screen.getByRole("dialog", { name: "Upload materials" })).toBe(dialog);
+  expect(within(dialog).getByText("selected-final.pdf")).toBeTruthy();
+  expect(within(dialog).getByRole("combobox", { name: "Past exam type" })).toBe(selector);
+});
+
+it("keeps a submitted past-exam request running through focus revalidation", async () => {
+  const { container } = render(<CoursePage />);
+  const card = await screen.findByRole("region", { name: "Final" });
+  fireEvent.click(within(card).getByRole("button", { name: "Final" }));
+  fireEvent.click(within(card).getByRole("button", { name: /^\+?\s*Upload$/ }));
+  const dialog = await screen.findByRole("dialog", { name: "Upload materials" });
+  fireEvent.change(within(dialog).getByLabelText("Choose files"), { target: { files: [new File(["synthetic"], "in-flight-final.pdf", { type: "application/pdf" })] } });
+  const submitted = deferred<any>();
+  let uploadSignal: AbortSignal | undefined;
+  mocks.api.mockImplementationOnce((_url: string, init: RequestInit) => {
+    uploadSignal = init.signal as AbortSignal;
+    return submitted.promise;
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: /Upload & Analyze/ }));
+  await waitFor(() => expect(uploadSignal).toBeDefined());
+  const background = deferred<any>();
+  mocks.api.mockImplementationOnce(() => background.promise);
+
+  fireEvent(window, new Event("focus"));
+  expect(screen.getByRole("dialog", { name: "Upload materials" })).toBe(dialog);
+  expect(uploadSignal?.aborted).toBe(false);
+  expect([...container.querySelectorAll<HTMLButtonElement>("button.journey-tool")].every(button => button.disabled)).toBe(true);
+  await act(async () => background.resolve(response({ ready: true, state: "ready", revision: "r1", documentCount: 2, completedCount: 2 })));
+  expect(uploadSignal?.aborted).toBe(false);
+
+  mocks.api.mockImplementationOnce(async () => response({ materialId: "h1", kind: "historical_exam", jobId: "j1", status: "queued", stage: "queued", courseId: "c1" }));
+  await act(async () => submitted.resolve(response({ exam_id: "h1", materialId: "h1", kind: "historical_exam", jobId: "j1" })));
+  expect(within(dialog).getByText("1/1")).toBeTruthy();
+  expect(within(dialog).getByRole("heading", { name: "Uploaded; analysis is queued." })).toBeTruthy();
+  expect(mocks.api.mock.calls.filter(([url, init]) => url.endsWith("/upload") && init?.method === "POST")).toHaveLength(1);
+  expect(mocks.api.mock.calls.filter(([url]) => url.endsWith("/confirm"))).toHaveLength(0);
+});
+
+it.each(["changed", "failed"] as const)("revokes an active past-exam upload when the foundation check is %s", async outcome => {
+  render(<CoursePage />);
+  const card = await screen.findByRole("region", { name: "Final" });
+  fireEvent.click(within(card).getByRole("button", { name: "Final" }));
+  fireEvent.click(within(card).getByRole("button", { name: /^\+?\s*Upload$/ }));
+  const dialog = await screen.findByRole("dialog", { name: "Upload materials" });
+  fireEvent.change(within(dialog).getByLabelText("Choose files"), { target: { files: [new File(["synthetic"], "unsent-final.pdf", { type: "application/pdf" })] } });
+  const background = deferred<any>();
+  mocks.api.mockImplementationOnce(() => background.promise);
+  fireEvent(window, new Event("focus"));
+  expect(screen.queryByRole("dialog", { name: "Upload materials" })).toBe(dialog);
+
+  await act(async () => {
+    if (outcome === "failed") background.resolve({ ok: false, json: async () => ({ detail: "Foundation unavailable" }) });
+    else background.resolve(response({ ready: false, state: "confirmation_required", revision: "changed", documentCount: 3, completedCount: 3 }));
+  });
+  expect(screen.queryByRole("dialog", { name: "Upload materials" })).toBeNull();
+  expect((within(card).getByRole("button", { name: /^\+?\s*Upload$/ }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.queryByText("Your lecture foundation is confirmed.")).toBeNull();
+  expect(mocks.api.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
 });
 
 it("allows a preselected exam upload category to be changed before sending", async () => {

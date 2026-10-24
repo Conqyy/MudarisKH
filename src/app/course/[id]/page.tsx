@@ -98,9 +98,13 @@ export default function CoursePage() {
     setDocumentChanging(false);
     return () => documentMutation.current?.abort();
   }, [courseId, user?.uid]);
-  const foundationReady = foundation?.ready === true && !foundationLoading && !foundationError && !showDocUpload && !documentChanging;
+  // Returning from a native file chooser rechecks the foundation on focus.
+  // Retain confirmation and active upload state until that check actually
+  // revokes readiness; only starting new actions waits for the response.
+  const foundationConfirmed = foundation?.ready === true && !foundationError && !showDocUpload && !documentChanging;
+  const foundationReady = foundationConfirmed && !foundationLoading;
   const stagesComplete = documents.length > 0 && documents.every(doc => doc.preparationStatus === "completed" && doc.guideStatus === "completed" && !foundation?.failedDocumentIds?.includes(doc.id));
-  const lockReason = t("Complete and confirm all lecture documents to unlock.");
+  const lockReason = t(foundationLoading ? "Checking your lecture document foundation…" : "Complete and confirm all lecture documents to unlock.");
 
   useEffect(() => {
     if (!loading && !user) router.push("/signin");
@@ -536,7 +540,7 @@ export default function CoursePage() {
             <button className="icon-button danger" aria-label={t("Delete")} title={t("Delete course")} onClick={handleDelete}><Icon name="trash" size={17} /></button>
           </div>
         </header>
-        {view === "overview" && <CourseJourney courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} ready={foundationReady}
+        {view === "overview" && <CourseJourney courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} ready={foundationReady} confirmed={foundationConfirmed}
           onRetry={refreshFoundation} onUpload={() => setShowDocUpload(true)} onConfirm={confirmFoundation} canConfirm={stagesComplete}
           showConfirmation={foundation?.state === "confirmation_required" && !foundationLoading && !documentChanging && !showDocUpload}
           supportCount={historicalExams.length + tutorials.length + audioRecordings.length} />}
@@ -770,7 +774,7 @@ export default function CoursePage() {
         />
       )}
 
-      {showAudioUpload && foundationReady && (
+      {showAudioUpload && foundationConfirmed && (
         <UploadAudioModal
           courseId={course.id}
           onClose={() => setShowAudioUpload(false)}
@@ -778,7 +782,7 @@ export default function CoursePage() {
         />
       )}
 
-      {showHistExamUpload && foundationReady && (
+      {showHistExamUpload && foundationConfirmed && (
         <UploadHistoricalExamModal
           courseId={course.id}
           initialExamType={historicalExamUploadType}
@@ -787,7 +791,7 @@ export default function CoursePage() {
         />
       )}
 
-      {showTutorialUpload && foundationReady && (
+      {showTutorialUpload && foundationConfirmed && (
         <UploadTutorialModal
           courseId={course.id}
           onClose={() => setShowTutorialUpload(false)}
