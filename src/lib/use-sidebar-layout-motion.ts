@@ -44,7 +44,8 @@ export function useSidebarLayoutMotion(collapsed: boolean, panelRef: RefObject<H
       panel.querySelectorAll<HTMLElement>(".sidebar-glass, .sidebar-content .sidebar-item, .sidebar-label, .sidebar-heading").forEach(element => {
         elements.set(element, { rect: element.getBoundingClientRect(), opacity: getComputedStyle(element).opacity || "1", visible: visible(element) });
       });
-      const workspace = panel.closest(".app-shell")?.querySelector<HTMLElement>(".app-workspace") || null;
+      const shell = panel.closest(".app-shell");
+      const workspace = shell?.querySelector<HTMLElement>(".app-page-frame") || shell?.querySelector<HTMLElement>(".app-workspace") || null;
       snapshot = { panel, elements, workspace, workspaceRect: workspace && !hasDialog(workspace) ? workspace.getBoundingClientRect() : undefined, rtl: document.documentElement.dir === "rtl" };
     }
     // Read the live presentation above before removing the previous animation.
@@ -85,7 +86,7 @@ export function useSidebarLayoutMotion(collapsed: boolean, panelRef: RefObject<H
       if (Math.abs(delta) > .5) play(snapshot.workspace, [{ transform: `translateX(${delta}px)` }, { transform: "translateX(0px)" }]);
     }
     if (!running.current.length) return;
-    const boundary = snapshot.workspace?.closest<HTMLElement>(".app-shell-body") || null;
+    const boundary = snapshot.workspace?.closest<HTMLElement>(".app-shell-body, .app-shell") || null;
     owner.current = { panel: snapshot.panel, boundary };
     snapshot.panel.dataset.sidebarMotion = "true";
     if (boundary) boundary.dataset.sidebarMotion = "true";

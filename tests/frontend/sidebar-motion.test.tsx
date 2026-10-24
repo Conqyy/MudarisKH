@@ -24,7 +24,7 @@ beforeEach(() => {
       const width = compact ? 52 : 204;
       return box(rtl ? 1188 - width : 42, compact ? 160 : 190, width, 48);
     }
-    if (this.classList.contains("app-workspace")) return rtl ? box(18, 112, compact ? 1062 : 910, 700) : box(compact ? 120 : 272, 112, compact ? 1062 : 910, 700);
+    if (this.classList.contains("app-workspace") || this.classList.contains("app-page-frame")) return rtl ? box(18, 112, compact ? 1062 : 910, 700) : box(compact ? 120 : 272, 112, compact ? 1062 : 910, 700);
     return box(0, 0, 0);
   });
   Object.defineProperty(HTMLElement.prototype, "animate", { configurable: true, value: vi.fn(function (this: HTMLElement, frames: Keyframe[], options: KeyframeAnimationOptions) {
@@ -38,15 +38,16 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); delete document.documentElement.dataset.inputModality; document.documentElement.dir = "ltr"; });
 
-function Example({ initialCompact = true, dialog = false }: { initialCompact?: boolean; dialog?: boolean }) {
+function Example({ initialCompact = true, dialog = false, framed = false, headerDialog = false }: { initialCompact?: boolean; dialog?: boolean; framed?: boolean; headerDialog?: boolean }) {
   const [compact, setCompact] = useState(initialCompact);
   const panel = useRef<HTMLDivElement>(null);
   const animateChange = useSidebarLayoutMotion(compact, panel);
+  const workspace = <main className="app-workspace"><button>Open source</button>{dialog && <div role="dialog">Sources</div>}</main>;
   return <div className="app-shell" data-compact={compact}>
-    <aside><div className="sidebar-panel" ref={panel}><div className="sidebar-glass" /><div className="sidebar-content">
+    <aside><div className="sidebar-panel" ref={panel}><div className="sidebar-glass" style={framed ? { display: "none" } : undefined} /><div className="sidebar-content">
       <button className="sidebar-item" onClick={() => animateChange(() => setCompact(value => !value))}>Toggle sidebar<span className="sidebar-label" style={{ display: compact ? "none" : "inline", opacity: 1 }}>Workspace labels</span></button>
     </div></div></aside>
-    <main className="app-workspace"><button>Open source</button>{dialog && <div role="dialog">Sources</div>}</main>
+    {framed ? <div className="app-page-frame"><header>Workspace header{headerDialog && <div role="dialog">Account dialog</div>}</header><div className="app-shell-body">{workspace}</div></div> : workspace}
   </div>;
 }
 function pointerToggle() { const button = screen.getByRole("button", { name: /Toggle sidebar/ }); fireEvent.pointerDown(button); fireEvent.click(button); }
@@ -76,6 +77,33 @@ it.each([true, false])("keeps RTL icons anchored while row width changes (initia
   pointerToggle();
   const row = motions.find(motion => motion.element.classList.contains("sidebar-item"))!;
   expect(row.frames[0].transform).toBe(`translate(0px, ${initialCompact ? -30 : 30}px)`);
+});
+
+it.each(["ltr", "rtl"])("moves the inset page and its header together in %s", async dir => {
+  document.documentElement.dir = dir;
+  mount({ framed: true }); pointerToggle();
+  const frame = motions.find(motion => motion.element.classList.contains("app-page-frame"))!;
+  expect(frame?.frames[0].transform).toBe(`translateX(${dir === "rtl" ? 152 : -152}px)`);
+  expect(motions.some(motion => motion.element.classList.contains("app-workspace"))).toBe(false);
+  expect(motions.some(motion => motion.element.classList.contains("sidebar-glass"))).toBe(false);
+  expect(document.querySelector<HTMLElement>(".app-shell")!.dataset.sidebarMotion).toBe("true");
+  await act(async () => { motions.forEach(motion => motion.finish()); });
+  expect(document.querySelector<HTMLElement>(".app-shell")!.dataset.sidebarMotion).toBeUndefined();
+});
+
+it("reverses the inset page from its current presentation", () => {
+  mount({ framed: true }); pointerToggle();
+  const frame = document.querySelector<HTMLElement>(".app-page-frame")!;
+  presentation.set(frame, box(190, 112, 992, 700));
+  const previous = motions.length;
+  pointerToggle();
+  expect(motions.slice(0, previous).every(motion => motion.cancel.mock.calls.length === 1)).toBe(true);
+  expect(motions.slice(previous).find(motion => motion.element === frame)?.frames[0].transform).toBe("translateX(70px)");
+});
+
+it("does not transform the inset page when its header owns a fixed dialog", () => {
+  mount({ framed: true, headerDialog: true }); pointerToggle();
+  expect(motions.some(motion => motion.element.classList.contains("app-page-frame") || motion.element.classList.contains("app-workspace"))).toBe(false);
 });
 
 it("reverses from the currently presented geometry and cancels obsolete completions", async () => {

@@ -14,12 +14,15 @@ export default function AppShell({ children, courses = [], course, courseId, act
   const { t } = useLang();
   return <div className={`app-shell ${fullWidth ? "app-shell-wide" : ""} ${className}`}>
     <a className="skip-link" href="#workspace-content">{t("Skip to content")}</a>
-    <Navbar workspace course={course} courses={courses} onOpenNavigation={() => setNavigationOpen(true)} />
-    <div className="app-shell-body"><Sidebar courses={courses} mobileOpen={navigationOpen} onClose={() => setNavigationOpen(false)} />
+    <Sidebar courses={courses} mobileOpen={navigationOpen} onClose={() => setNavigationOpen(false)} />
+    <div className="app-page-frame">
+      <Navbar workspace course={course} courses={courses} onOpenNavigation={() => setNavigationOpen(true)} />
+      <div className="app-shell-body">
       <div className="app-workspace" id="workspace-content" tabIndex={-1}><div className="app-workspace-inner">
         {courseId && <CourseNavigation courseId={courseId} activeTab={activeTab} />}
         {children}
       </div></div>
+      </div>
     </div>
   </div>;
 }

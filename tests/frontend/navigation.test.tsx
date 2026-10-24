@@ -2,6 +2,7 @@ import React from "react";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import Navbar from "../../src/components/Navbar";
+import Sidebar from "../../src/components/Sidebar";
 import ProcessingPage from "../../src/app/lecture/[id]/processing/page";
 import { LanguageProvider } from "../../src/lib/i18n";
 import CreateCourseModal from "../../src/components/CreateCourseModal";
@@ -43,6 +44,12 @@ it("provides Recent and Bookmarked navigation in the account menu", () => {
   fireEvent.click(screen.getByTitle("Account"));
   expect(screen.getByRole("link", { name: /recent/i }).getAttribute("href")).toBe("/dashboard/recent");
   expect(screen.getByRole("link", { name: /bookmarked/i }).getAttribute("href")).toBe("/dashboard/bookmarked");
+});
+
+it("focuses the visible close control when the mobile navigation opens", () => {
+  render(<Sidebar courses={[]} mobileOpen onClose={() => {}} />);
+  const dialog = screen.getByRole("dialog");
+  expect(document.activeElement).toBe(dialog.querySelector(".sidebar-mobile-heading button"));
 });
 
 it("replaces the legacy simulated processing route with a usable destination", async () => {
