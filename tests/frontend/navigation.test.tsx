@@ -23,20 +23,19 @@ vi.mock("next/link", () => ({ default: ({ children, ...props }: any) => <a {...p
 beforeEach(() => { vi.clearAllMocks(); localStorage.clear(); });
 afterEach(cleanup);
 
-it("exposes the actual language toggle and changes the document direction", async () => {
-  render(<LanguageProvider><Navbar /></LanguageProvider>);
-  fireEvent.click(screen.getByRole("button", { name: /switch to arabic/i }));
-  await waitFor(() => expect(document.documentElement.dir).toBe("rtl"));
-  expect(localStorage.getItem("mudaris_lang")).toBe("ar");
-  fireEvent.click(screen.getByRole("button", { name: /switch to english/i }));
-  await waitFor(() => expect(document.documentElement.dir).toBe("ltr"));
+it.each([false, true])("keeps language controls out of the header and Settings accessible (workspace: %s)", workspace => {
+  render(<LanguageProvider><Navbar workspace={workspace} /></LanguageProvider>);
+  expect(screen.queryByRole("button", { name: /switch to (arabic|english)/i })).toBeNull();
+  fireEvent.click(screen.getByTitle("Account"));
+  expect(screen.getByRole("link", { name: "Settings" }).getAttribute("href")).toBe("/settings");
+  expect(localStorage.getItem("mudaris_lang")).toBeNull();
 });
 
 it("does not expose a theme switch, including for a previously saved dark preference", () => {
   localStorage.setItem("mudaris_theme", "dark");
   render(<Navbar />);
   expect(screen.queryByRole("button", { name: /switch to (dark|light) mode/i })).toBeNull();
-  expect(screen.getByRole("button", { name: /switch to (arabic|english)/i })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Account" })).toBeTruthy();
 });
 
 it("provides Recent and Bookmarked navigation in the account menu", () => {

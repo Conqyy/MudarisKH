@@ -24,7 +24,7 @@ export default function SettingsPage() {
     signOut,
   } = useAuth();
   const router = useRouter();
-  const { t } = useLang();
+  const { t, lang, setLang } = useLang();
 
   const usesPassword = hasPasswordProvider();
 
@@ -222,6 +222,19 @@ export default function SettingsPage() {
             ) : <div className="account-profile-avatar">{initials}</div>}
             <div><strong className="text-sm font-semibold">{profile?.fullName || user.displayName || t("Student")}</strong><p className="text-xs text-ink-soft mt-1 break-all" dir="ltr">{user.email}</p></div>
           </div>
+
+          <section className="account-section" aria-labelledby="language-heading">
+            <div className="account-section-intro"><h2 id="language-heading">{t("Language")}</h2><p>{t("Choose the language used across Mudaris.")}</p></div>
+            <div className="account-section-content">
+              <Field label="Interface language">
+                <select value={lang} onChange={event => setLang(event.target.value === "ar" ? "ar" : "en")} className="ui-input">
+                  <option value="en">English</option>
+                  <option value="ar">العربية</option>
+                </select>
+              </Field>
+              <p className="text-xs text-ink-soft mt-3">{t("Changes are saved automatically.")}</p>
+            </div>
+          </section>
 
           <section className="account-section" aria-labelledby="profile-heading">
             <div className="account-section-intro"><h2 id="profile-heading">{t("Profile")}</h2><p>{t("This is how you appear across Mudaris.")}</p></div>
