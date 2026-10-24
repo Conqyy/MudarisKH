@@ -35,6 +35,45 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+it("separates overview exam mini cards by type and keeps unclassified papers discoverable", async () => {
+  render(<CoursePage />);
+  const group = await screen.findByRole("region", { name: "Past Exams" });
+  const cards = ["Final", "Midterm", "Quiz"].map(name => within(group).getByRole("region", { name }));
+  expect([...group.querySelectorAll(".course-material-panel")].map(card => card.id)).toEqual(["past-exams-final", "past-exams-midterm", "past-exams-quiz"]);
+  expect(cards.map(card => card.querySelector('[id$="-count"]')?.textContent)).toEqual(["1", "1", "2"]);
+  expect(screen.queryByText("Paper f1")).toBeTruthy();
+  expect(within(cards[0]).queryByRole("button", { name: /Move Paper f1/ })).toBeNull();
+  fireEvent.click(within(cards[0]).getByRole("button", { name: "Final" }));
+  expect(within(cards[0]).getByText("Paper f1")).toBeTruthy();
+  expect(within(cards[0]).queryByText("Paper q1")).toBeNull();
+  expect(within(cards[0]).queryByText("Paper m1")).toBeNull();
+  expect(within(cards[1]).getByRole("button", { name: "Midterm" }).getAttribute("aria-expanded")).toBe("false");
+  expect(within(group).getByRole("link", { name: /Needs classification.*1/ }).getAttribute("href")).toBe("/course/c1?view=materials#past-exams");
+});
+
+it.each([["Final", "final"], ["Midterm", "midterm"], ["Quiz", "quiz"]] as const)("preselects the %s mini card's upload category", async (name, type) => {
+  render(<CoursePage />);
+  const card = await screen.findByRole("region", { name });
+  fireEvent.click(within(card).getByRole("button", { name }));
+  fireEvent.click(within(card).getByRole("button", { name: /^\+?\s*Upload$/ }));
+  expect((await screen.findByRole("combobox", { name: "Past exam type" }) as HTMLSelectElement).value).toBe(type);
+  for (const other of ["Final", "Midterm", "Quiz"].filter(label => label !== name)) {
+    expect(within(screen.getByRole("region", { name: other })).getByRole("button", { name: other }).getAttribute("aria-expanded")).toBe("false");
+  }
+});
+
+it("allows a preselected exam upload category to be changed before sending", async () => {
+  mocks.api.mockImplementation(async (url: string) => url.endsWith("/upload") ? response({ exam_id: "h1", materialId: "h1", kind: "historical_exam", jobId: "j1" }) : response({ materialId: "h1", kind: "historical_exam", jobId: "j1", status: "queued", stage: "queued", courseId: "c1" }));
+  const { container } = render(<UploadHistoricalExamModal initialExamType="final" courseId="c1" onClose={() => {}} onSuccess={() => {}} />);
+  expect((screen.getByRole("combobox", { name: "Past exam type" }) as HTMLSelectElement).value).toBe("final");
+  fireEvent.change(screen.getByRole("combobox", { name: "Past exam type" }), { target: { value: "quiz" } });
+  fireEvent.change(container.querySelector('input[type="file"]')!, { target: { files: [new File(["a"], "quiz.pdf", { type: "application/pdf" })] } });
+  fireEvent.click(screen.getByRole("button", { name: /Upload & Analyze/ }));
+  await waitFor(() => expect(mocks.api.mock.calls.some(([url]) => url.endsWith("/upload"))).toBe(true));
+  const sent = mocks.api.mock.calls.find(([url]) => url.endsWith("/upload"))?.[1]?.body as FormData;
+  expect(sent.get("exam_type")).toBe("quiz");
+});
+
 it("requires an authoritative batch type and sends it on every real upload", async () => {
   mocks.api.mockImplementation(async (url: string) => url.endsWith("/upload") ? response({ exam_id: "h1", materialId: "h1", kind: "historical_exam", jobId: "j1" }) : response({ materialId: "h1", kind: "historical_exam", jobId: "j1", status: "queued", stage: "queued", courseId: "c1" }));
   const { container, unmount } = render(<UploadHistoricalExamModal courseId="c1" onClose={() => {}} onSuccess={() => {}} />);

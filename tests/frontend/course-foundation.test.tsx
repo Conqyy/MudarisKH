@@ -68,16 +68,17 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("course document foundation", () => {
-  it("shows four compact material panels on overview with details available on expansion", async () => {
+  it("shows three compact exam mini cards beside the other material panels", async () => {
     render(<CoursePage />);
     await screen.findByText("Algorithms");
     const documents = screen.getByRole("heading", { name: "Documents" }).closest("section")!;
     const panels = ["Documents", "Past Exams", "Tutorials", "Audio Recordings"].map(name => screen.getByRole("heading", { name }).closest("section")!);
     expect(new Set(panels.map(panel => panel.parentElement)).size).toBe(1);
     expect(panels.map(panel => panel.id)).toEqual(["documents", "past-exams", "tutorials", "recordings"]);
-    for (const [index, name] of ["Documents", "Past Exams", "Tutorials", "Audio Recordings"].entries()) {
-      expect(within(panels[index]).getByRole("button", { name }).getAttribute("aria-expanded")).toBe("false");
-      expect(within(panels[index]).queryByRole("button", { name: /Upload/ })).toBeNull();
+    for (const name of ["Documents", "Final", "Midterm", "Quiz", "Tutorials", "Audio Recordings"]) {
+      const panel = screen.getByRole("heading", { name }).closest("section")!;
+      expect(within(panel).getByRole("button", { name }).getAttribute("aria-expanded")).toBe("false");
+      expect(within(panel).queryByRole("button", { name: /Upload/ })).toBeNull();
     }
     expect(within(documents).queryByRole("button", { name: /^Lecture notes/ })).toBeNull();
     fireEvent.click(within(documents).getByRole("button", { name: "Documents" }));
@@ -89,7 +90,7 @@ describe("course document foundation", () => {
   it("keeps supporting uploads gated in the overview panels until lectures are confirmed", async () => {
     render(<CoursePage />);
     await screen.findByText("Algorithms");
-    const sections = ["Past Exams", "Tutorials", "Audio Recordings"].map(name => {
+    const sections = ["Final", "Midterm", "Quiz", "Tutorials", "Audio Recordings"].map(name => {
       const section = screen.getByRole("heading", { name }).closest("section")!;
       fireEvent.click(within(section).getByRole("button", { name }));
       return section;

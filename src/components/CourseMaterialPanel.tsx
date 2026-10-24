@@ -5,9 +5,9 @@ import { isPointerInteraction } from "@/lib/input-modality";
 import Icon, { type IconName } from "./Icon";
 import "./course-material-panel.css";
 
-type Props = { id: string; title: string; icon: IconName; count: number; summary: string; description?: string; overview: boolean; actions: ReactNode; holdOpen?: boolean; children: ReactNode };
+type Props = { id: string; title: string; icon: IconName; count: number; summary: string; description?: string; overview: boolean; actions: ReactNode; holdOpen?: boolean; mini?: boolean; children: ReactNode };
 
-export default function CourseMaterialPanel({ id, title, icon, count, summary, description, overview, actions, holdOpen = false, children }: Props) {
+export default function CourseMaterialPanel({ id, title, icon, count, summary, description, overview, actions, holdOpen = false, mini = false, children }: Props) {
   const { t } = useLang();
   const [hovered, setHovered] = useState(false);
   const [pinned, setPinned] = useState(false);
@@ -45,7 +45,7 @@ export default function CourseMaterialPanel({ id, title, icon, count, summary, d
     return () => observer.disconnect();
   }, [expanded, overview]);
 
-  return <section id={id} aria-label={title} className={`course-material-panel ${overview ? "is-overview" : "mb-12"}`} data-expanded={expanded} data-motion={motion}
+  return <section id={id} aria-label={title} className={`course-material-panel ${overview ? "is-overview" : "mb-12"} ${mini ? "is-mini" : ""}`} data-expanded={expanded} data-motion={motion}
     onPointerEnter={event => {
       if (!overview || ignoreHover.current || !["mouse", "pen"].includes(event.pointerType) || !window.matchMedia?.("(hover: hover) and (pointer: fine)").matches) return;
       feedback(true); setHovered(true);

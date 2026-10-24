@@ -9,6 +9,7 @@ import { useLang } from "@/lib/i18n";
 
 interface Props {
   courseId: string;
+  initialExamType?: HistoricalExamType;
   onClose: () => void;
   onSuccess: () => void;
 }
@@ -19,8 +20,8 @@ const STEPS: Step[] = [
   { id: "align", label: "Comparing with lectures…", duration: 0 },
 ];
 
-export default function UploadHistoricalExamModal({ courseId, onClose, onSuccess }: Props) {
-  const [examType, setExamType] = useState<HistoricalExamType | "">("");
+export default function UploadHistoricalExamModal({ courseId, initialExamType, onClose, onSuccess }: Props) {
+  const [examType, setExamType] = useState<HistoricalExamType | "">(initialExamType || "");
   const { t } = useLang();
   const [stage, setStage] = useState<{ documentId: string; step: number } | null>(null);
   const pollAccepted = useCallback(async (result: unknown, signal: AbortSignal) => {

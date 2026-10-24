@@ -42,7 +42,7 @@ import { CourseFoundationGate } from "@/components/CourseFoundationGate";
 import SupportingMaterialAction from "@/components/SupportingMaterialAction";
 import { kindForRow } from "@/lib/supporting-materials";
 import HistoricalExamTypeSelect from "@/components/HistoricalExamTypeSelect";
-import { EXAM_GROUP_LABELS, HISTORICAL_EXAM_TYPES, HistoricalExamType } from "@/lib/historical-exam-types";
+import { EXAM_GROUP_LABELS, EXAM_TYPE_LABELS, HISTORICAL_EXAM_TYPES, HistoricalExamType } from "@/lib/historical-exam-types";
 
 // Reorder an array of items to match a list of ids.
 function applyOrder<T extends { id: string }>(
@@ -87,6 +87,7 @@ export default function CoursePage() {
   const [showDocUpload, setShowDocUpload] = useState(false);
   const [showAudioUpload, setShowAudioUpload] = useState(false);
   const [showHistExamUpload, setShowHistExamUpload] = useState(false);
+  const [historicalExamUploadType, setHistoricalExamUploadType] = useState<HistoricalExamType | undefined>();
   const [showTutorialUpload, setShowTutorialUpload] = useState(false);
   const [viewingDoc, setViewingDoc] = useState<CourseDocument | null>(null);
   const [viewingAudio, setViewingAudio] = useState<AudioRecording | null>(null);
@@ -475,6 +476,50 @@ export default function CoursePage() {
     );
   };
 
+  const openHistoricalExamUpload = (type?: HistoricalExamType) => {
+    setHistoricalExamUploadType(type);
+    setShowHistExamUpload(true);
+  };
+  const examUploadAction = (type?: HistoricalExamType, first = false) => <button
+    onClick={() => openHistoricalExamUpload(type)} disabled={!foundationReady} aria-describedby="foundation-lock-reason" className="ui-button primary">
+    <Icon name={foundationReady ? "plus" : "lock"} size={16} />{t(first ? "Upload your first past exam" : "Upload")}
+  </button>;
+  const examRows = (exams: HistoricalExam[]) => <ReorderableList<HistoricalExam>
+    items={exams} onReorder={handleReorderExams} onRename={handleRenameExam}
+    onDelete={exam => handleDeleteItem("historical-exams", exam.id, exam.title)}
+    renderIcon={() => <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center text-accent"><Icon name="exam" size={22} /></div>}
+    renderMeta={exam => <>{new Date(exam.uploadedAt).toLocaleDateString()}{exam.analysis && (exam.analysis.paperCount
+      ? ` · ${exam.analysis.paperCount} ${t("papers")} · ~${exam.analysis.totalQuestions} ${t("questions per paper")}`
+      : ` · ${exam.analysis.totalQuestions} ${t("questions")}`)}</>}
+    renderStatus={exam => <div>
+      {!exam.examType && <HistoricalExamTypeSelect value="" label={`${t("Classify")} ${exam.title}`} disabled={!!classifying} onChange={type => void handleClassifyExam(exam.id, type)} />}
+      <SupportingMaterialAction kind="historical_exam" materialId={exam.id} courseId={courseId} />
+    </div>}
+  />;
+  const examDetails = (type?: HistoricalExamType) => {
+    const exams = type ? historicalExams.filter(exam => exam.examType === type) : historicalExams;
+    return <div className="course-material-panel-body">
+      {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
+      {exams.length === 0 && <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
+        <div className="text-4xl mb-3 opacity-60"><Icon name="exam" size={22} /></div>
+        <h3 className="font-sans text-xl font-medium mb-2">{t("No past exams yet")}</h3>
+        <p className="text-ink-soft text-sm mb-5 max-w-md mx-auto">{t("Upload old exam PDFs. The AI will analyze topic weights, question patterns, and difficulty distribution.")}</p>
+        {examUploadAction(type, true)}
+      </div>}
+      {!type && classificationError && <p role="alert" className="text-sm text-accent mb-4">{classificationError}</p>}
+      {type ? examRows(exams) : [...HISTORICAL_EXAM_TYPES, "uncategorized" as const].map(group => {
+        const rows = historicalExams.filter(exam => group === "uncategorized" ? !exam.examType : exam.examType === group);
+        if (group === "uncategorized" && !rows.length) return null;
+        const label = group === "uncategorized" ? "Needs classification" : EXAM_GROUP_LABELS[group];
+        return <section key={group} aria-label={t(label)} className="mb-6">
+          <h3 className="font-sans text-xl font-medium mb-3">{t(label)} <span className="font-sans text-sm text-ink-mute">{rows.length}</span></h3>
+          {group === "uncategorized" && <p className="text-sm text-ink-soft mb-3">{t("Assign a type before using these papers for exams or summaries.")}</p>}
+          {examRows(rows)}
+        </section>;
+      })}
+    </div>;
+  };
+
   if (loadError && !pageLoading) return <AppShell courses={allCourses}><main className="workspace-main"><div role="alert" className="ui-notice danger mt-8"><Icon name="alert" /><div><p>{loadError}</p><button onClick={() => void loadData()} className="ui-button secondary mt-3">{t("Retry loading")}</button></div></div></main></AppShell>;
   if (loading || pageLoading) return <AppShell courses={allCourses}><main className="workspace-main"><div className="course-loading"><Icon name="loader" className="animate-spin" /><p>{t("Loading…")}</p></div></main></AppShell>;
   if (!user) return null;
@@ -572,74 +617,21 @@ export default function CoursePage() {
           </CourseMaterialPanel>
 
           {/* Historical Exams Section */}
-          <CourseMaterialPanel id="past-exams" title={t("Past Exams")} icon="exam" count={historicalExams.length}
-            summary={t("Previous quizzes, midterms and finals")} overview={view === "overview"} holdOpen={showHistExamUpload || !!classifying}
-            actions={<button
-                onClick={() => setShowHistExamUpload(true)}
-                disabled={!foundationReady} aria-describedby="foundation-lock-reason"
-                className="ui-button primary"
-              >
-                <span aria-hidden="true">{<Icon name={foundationReady ? "plus" : "lock"} size={16} />}</span> {t("Upload")}
-              </button>}>
-
-            <div className="course-material-panel-body">
-            {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
-
-            {historicalExams.length === 0 && (
-              <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
-                <div className="text-4xl mb-3 opacity-60">{<Icon name="exam" size={22} />}</div>
-                <h3 className="font-sans text-xl font-medium mb-2">
-                  {t("No past exams yet")}
-                </h3>
-                <p className="text-ink-soft text-sm mb-5 max-w-md mx-auto">
-                  {t("Upload old exam PDFs. The AI will analyze topic weights, question patterns, and difficulty distribution.")}
-                </p>
-                <button
-                  onClick={() => setShowHistExamUpload(true)}
-                  disabled={!foundationReady} aria-describedby="foundation-lock-reason"
-                  className="ui-button primary"
-                >
-                  <span aria-hidden="true">{<Icon name={foundationReady ? "plus" : "lock"} size={16} />}</span> {t("Upload your first past exam")}
-                </button>
-              </div>
-            )}
-            {classificationError && <p role="alert" className="text-sm text-accent mb-4">{classificationError}</p>}
-            {[...HISTORICAL_EXAM_TYPES, "uncategorized" as const].map(type => {
-              const exams = historicalExams.filter(exam => type === "uncategorized" ? !exam.examType : exam.examType === type);
-              if (!exams.length && (view === "overview" || type === "uncategorized")) return null;
-              const label = type === "uncategorized" ? "Needs classification" : EXAM_GROUP_LABELS[type];
-              return <section key={type} aria-label={t(label)} className="mb-6">
-                <h3 className="font-sans text-xl font-medium mb-3">{t(label)} <span className="font-sans text-sm text-ink-mute">{exams.length}</span></h3>
-                {type === "uncategorized" && <p className="text-sm text-ink-soft mb-3">{t("Assign a type before using these papers for exams or summaries.")}</p>}
-              <ReorderableList<HistoricalExam>
-                items={exams}
-                onReorder={handleReorderExams}
-                onRename={handleRenameExam}
-                onDelete={(exam) =>
-                  handleDeleteItem("historical-exams", exam.id, exam.title)
-                }
-                renderIcon={() => (
-                  <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center text-accent">
-                    {<Icon name="exam" size={22} />}
-                  </div>
-                )}
-                renderMeta={(exam) => (
-                  <>
-                    {new Date(exam.uploadedAt).toLocaleDateString()}
-                    {exam.analysis && (exam.analysis.paperCount
-                      ? ` · ${exam.analysis.paperCount} ${t("papers")} · ~${exam.analysis.totalQuestions} ${t("questions per paper")}`
-                      : ` · ${exam.analysis.totalQuestions} ${t("questions")}`)}
-                  </>
-                )}
-                renderStatus={(exam) => <div>
-                  {!exam.examType && <HistoricalExamTypeSelect value="" label={`${t("Classify")} ${exam.title}`} disabled={!!classifying} onChange={type => void handleClassifyExam(exam.id, type)} />}
-                  <SupportingMaterialAction kind="historical_exam" materialId={exam.id} courseId={courseId} />
-                </div>}
-              />
-              </section>;
-            })}
-            </div>
-          </CourseMaterialPanel>
+          {view === "overview" ? <section id="past-exams" className="course-exam-panels" aria-label={t("Past Exams")}>
+            <h2 className="sr-only">{t("Past Exams")}</h2>
+            {(["final", "midterm", "quiz"] as const).map(type => <CourseMaterialPanel key={type} mini
+              id={`past-exams-${type}`} title={t(EXAM_TYPE_LABELS[type])} icon="exam"
+              count={historicalExams.filter(exam => exam.examType === type).length} summary={t("Past Exams")} overview
+              holdOpen={showHistExamUpload && historicalExamUploadType === type} actions={examUploadAction(type)}>
+              {examDetails(type)}
+            </CourseMaterialPanel>)}
+            {historicalExams.some(exam => !exam.examType) && <Link className="course-exam-mini-notice" href={`/course/${courseId}?view=materials#past-exams`}>
+              <Icon name="alert" size={15} />{t("Needs classification")} ({historicalExams.filter(exam => !exam.examType).length})<Icon name="arrow-right" size={15} />
+            </Link>}
+          </section> : <CourseMaterialPanel id="past-exams" title={t("Past Exams")} icon="exam" count={historicalExams.length}
+            summary={t("Previous quizzes, midterms and finals")} overview={false} actions={examUploadAction()}>
+            {examDetails()}
+          </CourseMaterialPanel>}
 
           {/* Tutorials Section */}
           <CourseMaterialPanel id="tutorials" title={t("Tutorials")} icon="book" count={tutorials.length}
@@ -789,6 +781,7 @@ export default function CoursePage() {
       {showHistExamUpload && foundationReady && (
         <UploadHistoricalExamModal
           courseId={course.id}
+          initialExamType={historicalExamUploadType}
           onClose={() => setShowHistExamUpload(false)}
           onSuccess={loadData}
         />
