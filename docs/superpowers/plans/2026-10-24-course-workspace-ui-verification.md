@@ -60,3 +60,11 @@ Upload completion callbacks and operation timing remain immediate. Manual busy-s
 Final automated checks: 236 tests across 19 files, full lint, TypeScript, production build, and whitespace checks passed. Eight overlay lifecycle regressions cover pointer exits, immediate keyboard actions, rapid toggle reversal, busy-state changes, cleanup, and reduced motion. Independent source review approved the corrected implementation.
 
 Live Chrome review covered the account menu, document drawer, focus restoration, mobile navigation, compact/expanded tablet navigation, 360/390/768/1440 widths, Arabic RTL, dark mode, and tutor fullscreen. Desktop and Arabic mobile screenshots are saved as local review artifacts. Browser viewport overrides and original preferences were restored after review. Real-device gesture testing and paid generation were not performed.
+
+## Desktop sidebar toggle follow-up
+
+The owner's desktop collapse/expand request now has a 240ms layout transition using the existing drawer easing. Layout switches once; only the decorative glass scales, while navigation controls and workspace translate without stretching readable content. Expanding labels fade in. Rapid reversals capture the current on-screen geometry before cancelling the previous effect. Keyboard and initial preference hydration remain immediate; reduced motion uses a 200ms opacity change.
+
+Temporary transforms are cleared before outside pointer/keyboard actions, resize, direction changes, or unmount. Workspaces containing a dialog are excluded from layout transforms. The mobile drawer retains its existing motion/focus ownership, and scrolling lives in a dedicated content layer so the glass animation is not clipped by the target width.
+
+Verified 247 tests across 20 files, full lint, TypeScript, production build, whitespace checks, and independent source review. Eleven new lifecycle tests cover LTR/RTL, both directions, reversals, hydration, keyboard, reduced motion, cancellation contexts, dialogs, and mobile/unmount behavior. Live browser checks captured active transform interpolation in both directions and RTL, immediate keyboard toggling, and working mobile drawer dismissal. An isolated browser tab was used to preserve the owner's active course page and original preferences.

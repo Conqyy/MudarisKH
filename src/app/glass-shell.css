@@ -86,16 +86,41 @@ body {
   top: 112px;
   bottom: 30px;
   width: var(--rail-width);
-  border: 1px solid rgb(var(--glass-edge) / .9);
   border-radius: 35px;
-  padding: 12px 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  overflow: visible;
+}
+.sidebar-glass {
+  position: absolute;
+  inset: 0;
+  border: 1px solid rgb(var(--glass-edge) / .9);
+  border-radius: inherit;
   background: linear-gradient(165deg, rgb(var(--glass-fill) / .65), rgb(var(--glass-fill) / .24));
   backdrop-filter: blur(24px) saturate(150%);
   -webkit-backdrop-filter: blur(24px) saturate(150%);
   box-shadow: inset 0 1px 0 rgb(var(--glass-edge)), 0 7px 28px rgb(var(--glass-shadow) / .06);
+  transform-origin: left center;
+  pointer-events: none;
+}
+[dir="rtl"] .sidebar-glass { transform-origin: right center; }
+.sidebar-content {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 12px 10px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  border-radius: inherit;
   scrollbar-width: none;
 }
-.sidebar-panel::-webkit-scrollbar { display: none; }
+.sidebar-content::-webkit-scrollbar { display: none; }
 .sidebar-item {
   min-height: 48px;
   padding: 0;
@@ -165,6 +190,7 @@ body {
   .navbar-context > span:first-child { display: none; }
 }
 @media (min-width: 768px) {
+  .app-shell-body[data-sidebar-motion] { overflow-x: clip; }
   @container course-journey (max-width: 560px) {
     .journey-nodes { grid-template-columns: minmax(0, 1fr); row-gap: 18px; }
     .journey-connector { display: none; }
@@ -184,7 +210,9 @@ body {
   .navbar-actions .account-avatar { width: 29px; height: 29px; }
   .app-navbar .mobile-nav-toggle { width: 38px; min-width: 38px; height: 38px; background: rgb(var(--glass-fill) / .5); }
   .sidebar-rail { width: 0; }
-  .sidebar-rail.mobile-open .sidebar-panel { inset-inline-start: 10px; top: 10px; bottom: 10px; height: auto; width: min(290px, calc(100vw - 20px)); border-radius: 30px; padding: 20px 15px; background: rgb(var(--glass-fill) / .9); }
+  .sidebar-rail.mobile-open .sidebar-panel { inset-inline-start: 10px; top: 10px; bottom: 10px; height: auto; width: min(290px, calc(100vw - 20px)); border-radius: 30px; padding: 0; background: transparent; }
+  .sidebar-rail.mobile-open .sidebar-content { padding: 20px 15px; }
+  .sidebar-rail.mobile-open .sidebar-glass { background: rgb(var(--glass-fill) / .9); }
   .sidebar-rail.mobile-open .sidebar-item { padding: 0; }
   .sidebar-mobile-heading { margin-bottom: 12px; padding-inline: 4px; }
   .sidebar-collapse-control { display: none; }
@@ -206,5 +234,5 @@ body {
   [data-input-modality="pointer"] :is(.journey-tool,.journey-action-row,.journey-support-link) { transition: opacity 140ms ease; }
 }
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .app-shell > .app-navbar, .public-nav, .sidebar-panel, .account-dropdown, .dialog-panel, .app-shell .tutor-context-panel { background: rgb(var(--c-paper)); }
+  .app-shell > .app-navbar, .public-nav, .sidebar-glass, .sidebar-rail.mobile-open .sidebar-glass, .account-dropdown, .dialog-panel, .app-shell .tutor-context-panel { background: rgb(var(--c-paper)); }
 }
