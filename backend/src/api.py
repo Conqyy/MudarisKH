@@ -1029,7 +1029,7 @@ def get_course_historical_exams(course_id: str,
     _require_course(course_id, uid)
     exams = owned_only(db_client.get_course_historical_exams(course_id, user_id=uid,
         **({'exam_type': exam_type} if exam_type is not None else {})), uid)
-    exams = [_supporting_projection(row, 'historical_exam') for row in exams if row.get('courseId') == course_id]
+    exams = _supporting_list_projection(exams, 'historical_exam', course_id, uid)
     return {"status": "success", "historical_exams": exams}
 
 
@@ -1076,7 +1076,7 @@ async def upload_tutorial(
 def get_course_tutorials(course_id: str, uid: str = Depends(require_uid)):
     _require_course(course_id, uid)
     tutorials = owned_only(db_client.get_course_tutorials(course_id, user_id=uid), uid)
-    tutorials = [_supporting_projection(row, 'tutorial') for row in tutorials if row.get('courseId') == course_id]
+    tutorials = _supporting_list_projection(tutorials, 'tutorial', course_id, uid)
     return {"status": "success", "tutorials": tutorials}
 
 
@@ -1366,6 +1366,28 @@ def _supporting_projection(row, kind):
             'errorMessage': row.get('errorMessage')}
     return {**status, 'id': row['id'], 'courseId': row['courseId'], **{key: row.get(key) for key in
         ('title', 'fileSize', 'uploadedAt', 'processedAt', 'sourceType', 'lectureId', 'examType') if key in row}}
+
+
+def _supporting_list_projection(rows, kind, course_id, uid):
+    projected = []
+    unavailable = False
+    for row in rows:
+        if row.get('userId') != uid or row.get('courseId') != course_id:
+            continue
+        if row.get('status') == 'deleting':
+            unavailable = True
+            continue
+        row_kind = 'notes' if kind == 'audio' and row.get('sourceType') == 'notes' else kind
+        try:
+            projected.append(_supporting_projection(row, row_kind))
+        except DataConflict:
+            # A query can include a tombstoned row, or lose a row before its
+            # status is read. Direct reads/actions still enforce that conflict.
+            unavailable = True
+    if unavailable:
+        # Do not turn account/course cleanup into a successful partial list.
+        _require_course(course_id, uid)
+    return projected
 
 
 def _legacy_public_content(value):
@@ -1758,8 +1780,7 @@ def reanalyze_audio_recording(rec_id: str, uid: str = Depends(require_uid)):
 def get_course_audio_recordings(course_id: str, uid: str = Depends(require_uid)):
     _require_course(course_id, uid)
     recordings = owned_only(db_client.get_course_audio_recordings(course_id, user_id=uid), uid)
-    recordings = [_supporting_projection(row, 'notes' if row.get('sourceType') == 'notes' else 'audio')
-                  for row in recordings if row.get('courseId') == course_id]
+    recordings = _supporting_list_projection(recordings, 'audio', course_id, uid)
     return {"status": "success", "audio_recordings": recordings}
 
 
