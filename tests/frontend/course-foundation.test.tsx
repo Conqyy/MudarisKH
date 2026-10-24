@@ -68,6 +68,34 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("course document foundation", () => {
+  it("shows all four material sections on overview in place of reminders and the analysis summary", async () => {
+    render(<CoursePage />);
+    await screen.findByText("Algorithms");
+    const documents = screen.getByRole("heading", { name: "Documents" }).closest("section")!;
+    const panels = ["Documents", "Past Exams", "Tutorials", "Audio Recordings"].map(name => screen.getByRole("heading", { name }).closest("section")!);
+    expect(new Set(panels.map(panel => panel.parentElement)).size).toBe(1);
+    expect(panels.map(panel => panel.id)).toEqual(["documents", "past-exams", "tutorials", "recordings"]);
+    expect(within(documents).getByRole("button", { name: /^Lecture notes/ })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Reminders" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Intelligence Summary" })).toBeNull();
+  });
+
+  it("keeps supporting uploads gated in the overview panels until lectures are confirmed", async () => {
+    render(<CoursePage />);
+    await screen.findByText("Algorithms");
+    const sections = ["Past Exams", "Tutorials", "Audio Recordings"].map(name => screen.getByRole("heading", { name }).closest("section")!);
+    for (const section of sections) {
+      for (const upload of within(section).getAllByRole("button", { name: /Upload/ })) expect((upload as HTMLButtonElement).disabled).toBe(true);
+    }
+    const documents = screen.getByRole("heading", { name: "Documents" }).closest("section")!;
+    expect((within(documents).getByRole("button", { name: /Upload/ }) as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(screen.getByRole("button", { name: /I've uploaded all lecture documents/ }));
+    await screen.findByRole("link", { name: /Generate Exam/ });
+    for (const section of sections) {
+      for (const upload of within(section).getAllByRole("button", { name: /Upload/ })) expect((upload as HTMLButtonElement).disabled).toBe(false);
+    }
+  });
+
   it("locks every supporting upload and study action while keeping lecture upload available", async () => {
     const view = render(<CoursePage />);
     await screen.findByText("Algorithms");

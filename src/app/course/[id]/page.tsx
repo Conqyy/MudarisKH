@@ -32,8 +32,6 @@ import UploadTutorialModal from "@/components/UploadTutorialModal";
 import DocumentViewer from "@/components/DocumentViewer";
 import AudioViewer from "@/components/AudioViewer";
 import ReorderableList from "@/components/ReorderableList";
-import CourseReminders from "@/components/CourseReminders";
-import { CourseReminder } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 import { useLang } from "@/lib/i18n";
 
@@ -379,17 +377,6 @@ export default function CoursePage() {
     );
   };
 
-  // ---- Reminders (stored on the course doc) ----
-  const handleRemindersChange = async (reminders: CourseReminder[]) => {
-    try {
-      const saved = await updateCourse(courseId, { reminders }, { reminders: course?.reminders || [] });
-      setCourse((prev) => (prev ? { ...prev, reminders: saved.reminders } : prev));
-    } catch (error) {
-      alert("Could not save reminders. Please retry.");
-      throw error;
-    }
-  };
-
   const handleRenameTutorial = async (id: string, title: string) => {
     await renameItem(id, title);
     setTutorials((prev) =>
@@ -503,125 +490,17 @@ export default function CoursePage() {
             <button className="icon-button danger" aria-label={t("Delete")} title={t("Delete course")} onClick={handleDelete}><Icon name="trash" size={17} /></button>
           </div>
         </header>
-        {view === "overview" ? <>
-          <CourseJourney courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} ready={foundationReady}
-            onRetry={refreshFoundation} onUpload={() => setShowDocUpload(true)} onConfirm={confirmFoundation} canConfirm={stagesComplete}
-            showConfirmation={foundation?.state === "confirmation_required" && !foundationLoading && !documentChanging && !showDocUpload}
-            supportCount={historicalExams.length + tutorials.length + audioRecordings.length} />
-          <div className="course-overview-bottom"><div><CourseReminders reminders={course.reminders || []} onChange={handleRemindersChange} /></div><div className="course-intelligence">
-          {/* Intelligence Summary */}
-          {(documents.some(d => d.status === "completed") ||
-            audioRecordings.some(a => a.status === "completed") ||
-            historicalExams.some(h => h.status === "completed") ||
-            tutorials.some(t => t.status === "completed")) && (
-            <section className="mb-12">
-              <div className="bg-paper border border-line rounded-3xl p-7">
-                <h2 className="font-sans text-2xl font-medium tracking-tight mb-4">
-                  {t("Intelligence Summary")}
-                </h2>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <div className="bg-bg rounded-2xl p-4 text-center">
-                    <div className="font-sans text-2xl font-medium text-sage">
-                      {documents.filter(d => d.status === "completed").length}
-                    </div>
-                    <div className="text-xs text-ink-mute font-sans mt-1">{t("Documents")}</div>
-                  </div>
-                  <div className="bg-bg rounded-2xl p-4 text-center">
-                    <div className="font-sans text-2xl font-medium text-accent">
-                      {historicalExams.filter(h => h.status === "completed").length}
-                    </div>
-                    <div className="text-xs text-ink-mute font-sans mt-1">{t("Past Exams")}</div>
-                  </div>
-                  <div className="bg-bg rounded-2xl p-4 text-center">
-                    <div className="font-sans text-2xl font-medium text-accent">
-                      {tutorials.filter(t => t.status === "completed").length}
-                    </div>
-                    <div className="text-xs text-ink-mute font-sans mt-1">{t("Tutorials")}</div>
-                  </div>
-                  <div className="bg-bg rounded-2xl p-4 text-center">
-                    <div className="font-sans text-2xl font-medium text-gold">
-                      {audioRecordings.filter(a => a.status === "completed").length}
-                    </div>
-                    <div className="text-xs text-ink-mute font-sans mt-1">{t("Audio")}</div>
-                  </div>
-                </div>
-
-                {historicalExams.some(h => h.status === "completed" && h.analysis?.topicWeights?.length) && (
-                  <div className="mt-4 pt-4 border-t border-line">
-                    <div className="text-xs font-sans text-ink-mute  mb-2">{t("Top Exam Topics")}</div>
-                    <div className="flex flex-wrap gap-2">
-                      {historicalExams
-                        .filter(h => h.status === "completed" && h.analysis?.topicWeights)
-                        .flatMap(h => h.analysis!.topicWeights.slice(0, 5))
-                        .slice(0, 8)
-                        .map((tw, i) => (
-                          <span key={i} className="bg-accent/10 text-accent text-xs px-3 py-1 rounded-full">
-                            {tw.topic} ({Math.round(tw.weight * 100)}%)
-                          </span>
-                        ))}
-                    </div>
-                  </div>
-                )}
-
-                {tutorials.some(t => t.status === "completed" && t.analysis?.problems?.length) && (
-                  <div className="mt-4 pt-4 border-t border-line">
-                    <div className="text-xs font-sans text-ink-mute  mb-2">
-                      {t("Practice Problems · likely to reappear with new numbers")}
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {Array.from(
-                        new Set(
-                          tutorials
-                            .filter(t => t.status === "completed" && t.analysis?.problems)
-                            .flatMap(t =>
-                              t.analysis!.problems.map(
-                                p => p.concept || p.type || ""
-                              )
-                            )
-                            .filter(Boolean)
-                        )
-                      )
-                        .slice(0, 10)
-                        .map((concept, i) => (
-                          <span
-                            key={i}
-                            className="text-xs px-3 py-1 rounded-full"
-                            style={{ backgroundColor: "rgb(var(--c-depth))", color: "rgb(var(--c-accent))" }}
-                          >
-                            {concept}
-                          </span>
-                        ))}
-                    </div>
-                  </div>
-                )}
-
-                {audioRecordings.some(a => a.status === "completed" && a.insights?.examHints?.length) && (
-                  <div className="mt-4 pt-4 border-t border-line">
-                    <div className="text-xs font-sans text-ink-mute  mb-2">{t("Exam Hints")}</div>
-                    <div className="space-y-1.5">
-                      {audioRecordings
-                        .filter(a => a.status === "completed" && a.insights?.examHints)
-                        .flatMap(a => a.insights!.examHints.filter(h => h.confidence >= 0.7))
-                        .slice(0, 5)
-                        .map((hint, i) => (
-                          <div key={i} className="text-sm text-ink-soft flex items-start gap-2">
-                            <span className="text-gold flex-shrink-0">●</span>
-                            <span>{hint.hint}</span>
-                          </div>
-                        ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </section>
-          )}
-
-          </div></div>
-        </> : <div className="course-materials">
-          <div className="section-heading"><div><h2>{t("Course materials")}</h2><p className="page-subtitle">{t("Your lecture foundation and supporting sources, in one place.")}</p></div><Link href={"/course/" + courseId} className="ui-button ghost">{t("Back to overview")}<Icon name="arrow-right" size={15} /></Link></div>
-          <CourseFoundationGate courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} onRetry={refreshFoundation} />
-          {!foundationReady && <p id="foundation-lock-reason" className="text-sm text-ink-soft mb-4">{lockReason}</p>}
-          <nav className="materials-groups" aria-label={t("Material groups")}><a href="#documents"><Icon name="file" size={17} />{t("Documents")}<span>{documents.length}</span></a><a href="#past-exams"><Icon name="exam" size={17} />{t("Past Exams")}<span>{historicalExams.length}</span></a><a href="#tutorials"><Icon name="book" size={17} />{t("Tutorials")}<span>{tutorials.length}</span></a><a href="#recordings"><Icon name="audio" size={17} />{t("Audio Recordings")}<span>{audioRecordings.length}</span></a></nav>
+        {view === "overview" && <CourseJourney courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} ready={foundationReady}
+          onRetry={refreshFoundation} onUpload={() => setShowDocUpload(true)} onConfirm={confirmFoundation} canConfirm={stagesComplete}
+          showConfirmation={foundation?.state === "confirmation_required" && !foundationLoading && !documentChanging && !showDocUpload}
+          supportCount={historicalExams.length + tutorials.length + audioRecordings.length} />}
+        {!foundationReady && <p id="foundation-lock-reason" className="text-sm text-ink-soft mb-4">{lockReason}</p>}
+        <div className={view === "overview" ? "course-materials course-materials-overview" : "course-materials"}>
+          {view === "materials" && <>
+            <div className="section-heading"><div><h2>{t("Course materials")}</h2><p className="page-subtitle">{t("Your lecture foundation and supporting sources, in one place.")}</p></div><Link href={"/course/" + courseId} className="ui-button ghost">{t("Back to overview")}<Icon name="arrow-right" size={15} /></Link></div>
+            <CourseFoundationGate courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} onRetry={refreshFoundation} />
+            <nav className="materials-groups" aria-label={t("Material groups")}><a href="#documents"><Icon name="file" size={17} />{t("Documents")}<span>{documents.length}</span></a><a href="#past-exams"><Icon name="exam" size={17} />{t("Past Exams")}<span>{historicalExams.length}</span></a><a href="#tutorials"><Icon name="book" size={17} />{t("Tutorials")}<span>{tutorials.length}</span></a><a href="#recordings"><Icon name="audio" size={17} />{t("Audio Recordings")}<span>{audioRecordings.length}</span></a></nav>
+          </>}
           {/* Documents Section */}
           <section id="documents" className="mb-12 scroll-mt-24" aria-label={t("Documents")}>
             <div className="flex items-center justify-between mb-6">
@@ -636,6 +515,7 @@ export default function CoursePage() {
               </button>
             </div>
 
+            <div className="course-material-panel-body">
             {documents.length === 0 ? (
               <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
                 <div className="text-4xl mb-3 opacity-60">{<Icon name="file" size={22} />}</div>
@@ -691,10 +571,11 @@ export default function CoursePage() {
                 }}
               />
             )}
+            </div>
           </section>
 
           {/* Historical Exams Section */}
-          <section id="past-exams" className="mb-12">
+          <section id="past-exams" className="mb-12" aria-label={t("Past Exams")}>
             <div className="flex items-center justify-between mb-6">
               <h2 className="font-sans text-2xl font-medium tracking-tight">
                 {t("Past Exams")}
@@ -708,6 +589,7 @@ export default function CoursePage() {
               </button>
             </div>
 
+            <div className="course-material-panel-body">
             {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
 
             {historicalExams.length === 0 && (
@@ -731,7 +613,7 @@ export default function CoursePage() {
             {classificationError && <p role="alert" className="text-sm text-accent mb-4">{classificationError}</p>}
             {[...HISTORICAL_EXAM_TYPES, "uncategorized" as const].map(type => {
               const exams = historicalExams.filter(exam => type === "uncategorized" ? !exam.examType : exam.examType === type);
-              if (type === "uncategorized" && !exams.length) return null;
+              if (!exams.length && (view === "overview" || type === "uncategorized")) return null;
               const label = type === "uncategorized" ? "Needs classification" : EXAM_GROUP_LABELS[type];
               return <section key={type} aria-label={t(label)} className="mb-6">
                 <h3 className="font-sans text-xl font-medium mb-3">{t(label)} <span className="font-sans text-sm text-ink-mute">{exams.length}</span></h3>
@@ -763,10 +645,11 @@ export default function CoursePage() {
               />
               </section>;
             })}
+            </div>
           </section>
 
           {/* Tutorials Section */}
-          <section id="tutorials" className="mb-12">
+          <section id="tutorials" className="mb-12" aria-label={t("Tutorials")}>
             <div className="flex items-center justify-between mb-6">
               <div>
                 <h2 className="font-sans text-2xl font-medium tracking-tight">
@@ -785,6 +668,7 @@ export default function CoursePage() {
               </button>
             </div>
 
+            <div className="course-material-panel-body">
             {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
 
             {tutorials.length === 0 ? (
@@ -828,10 +712,11 @@ export default function CoursePage() {
                 renderStatus={(tut) => <SupportingMaterialAction kind="tutorial" materialId={tut.id} courseId={courseId} />}
               />
             )}
+            </div>
           </section>
 
           {/* Audio Recordings Section */}
-          <section id="recordings" className="mb-12">
+          <section id="recordings" className="mb-12" aria-label={t("Audio Recordings")}>
             <div className="flex items-center justify-between mb-6">
               <h2 className="font-sans text-2xl font-medium tracking-tight">
                 {t("Audio Recordings")}
@@ -845,6 +730,7 @@ export default function CoursePage() {
               </button>
             </div>
 
+            <div className="course-material-panel-body">
             {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
 
             {audioRecordings.length === 0 ? (
@@ -887,10 +773,11 @@ export default function CoursePage() {
                 renderStatus={(rec) => <SupportingMaterialAction kind={kindForRow(rec, "audio")} materialId={rec.id} courseId={courseId} />}
               />
             )}
+            </div>
           </section>
 
 
-        </div>}
+        </div>
       </main>
     </AppShell>
 
