@@ -68,13 +68,19 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe("course document foundation", () => {
-  it("shows all four material sections on overview in place of reminders and the analysis summary", async () => {
+  it("shows four compact material panels on overview with details available on expansion", async () => {
     render(<CoursePage />);
     await screen.findByText("Algorithms");
     const documents = screen.getByRole("heading", { name: "Documents" }).closest("section")!;
     const panels = ["Documents", "Past Exams", "Tutorials", "Audio Recordings"].map(name => screen.getByRole("heading", { name }).closest("section")!);
     expect(new Set(panels.map(panel => panel.parentElement)).size).toBe(1);
     expect(panels.map(panel => panel.id)).toEqual(["documents", "past-exams", "tutorials", "recordings"]);
+    for (const [index, name] of ["Documents", "Past Exams", "Tutorials", "Audio Recordings"].entries()) {
+      expect(within(panels[index]).getByRole("button", { name }).getAttribute("aria-expanded")).toBe("false");
+      expect(within(panels[index]).queryByRole("button", { name: /Upload/ })).toBeNull();
+    }
+    expect(within(documents).queryByRole("button", { name: /^Lecture notes/ })).toBeNull();
+    fireEvent.click(within(documents).getByRole("button", { name: "Documents" }));
     expect(within(documents).getByRole("button", { name: /^Lecture notes/ })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Reminders" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Intelligence Summary" })).toBeNull();
@@ -83,17 +89,47 @@ describe("course document foundation", () => {
   it("keeps supporting uploads gated in the overview panels until lectures are confirmed", async () => {
     render(<CoursePage />);
     await screen.findByText("Algorithms");
-    const sections = ["Past Exams", "Tutorials", "Audio Recordings"].map(name => screen.getByRole("heading", { name }).closest("section")!);
+    const sections = ["Past Exams", "Tutorials", "Audio Recordings"].map(name => {
+      const section = screen.getByRole("heading", { name }).closest("section")!;
+      fireEvent.click(within(section).getByRole("button", { name }));
+      return section;
+    });
     for (const section of sections) {
       for (const upload of within(section).getAllByRole("button", { name: /Upload/ })) expect((upload as HTMLButtonElement).disabled).toBe(true);
     }
     const documents = screen.getByRole("heading", { name: "Documents" }).closest("section")!;
+    fireEvent.click(within(documents).getByRole("button", { name: "Documents" }));
     expect((within(documents).getByRole("button", { name: /Upload/ }) as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(screen.getByRole("button", { name: /I've uploaded all lecture documents/ }));
     await screen.findByRole("link", { name: /Generate Exam/ });
     for (const section of sections) {
       for (const upload of within(section).getAllByRole("button", { name: /Upload/ })) expect((upload as HTMLButtonElement).disabled).toBe(false);
     }
+  });
+
+  it("keeps overview document actions open while their upload dialog is active", async () => {
+    vi.stubGlobal("matchMedia", vi.fn((query: string) => ({ matches: query.includes("hover") })));
+    const hover = (element: Element, entering: boolean) => {
+      const event = new MouseEvent(entering ? "pointerover" : "pointerout", { bubbles: true, relatedTarget: entering ? null : document.body });
+      Object.defineProperty(event, "pointerType", { value: "mouse" });
+      fireEvent(element, event);
+    };
+    render(<CoursePage />);
+    await screen.findByText("Algorithms");
+    const documents = screen.getByRole("heading", { name: "Documents" }).closest("section")!;
+    const toggle = within(documents).getByRole("button", { name: "Documents" });
+    hover(documents, true);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(within(documents).getByRole("button", { name: /Upload/ }));
+    await screen.findByRole("dialog", { name: "Document upload" });
+    hover(documents, false);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Close after a failed upload" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Document upload" })).toBeNull());
+    const panel = (await screen.findByRole("heading", { name: "Documents" })).closest("section")!;
+    const afterCloseToggle = within(panel).getByRole("button", { name: "Documents" });
+    if (afterCloseToggle.getAttribute("aria-expanded") === "false") fireEvent.click(afterCloseToggle);
+    expect((within(panel).getByRole("button", { name: /Upload/ }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("locks every supporting upload and study action while keeping lecture upload available", async () => {

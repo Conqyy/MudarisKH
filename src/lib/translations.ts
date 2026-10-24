@@ -740,6 +740,12 @@ export const AR: Record<string, string> = {
   "Learning workspace": "مساحة التعلّم",
   "Supporting material": "مادة مساندة",
   "Prepared and analyzed": "مجهّزة ومحلّلة",
+  "Show details": "اعرض التفاصيل",
+  "Hide details": "أخفِ التفاصيل",
+  "Lecture documents and source guides": "مستندات المحاضرات وأدلة المصادر",
+  "Previous quizzes, midterms and finals": "كويزات واختبارات نصفية ونهائية سابقة",
+  "Practice sheets and worked problems": "أوراق التمارين والمسائل المحلولة",
+  "Lecture recordings and typed notes": "تسجيلات المحاضرات والملاحظات المكتوبة",
 
   // ---- Study readers, material controls and planning ----
   "Saved library": "المكتبة المحفوظة",

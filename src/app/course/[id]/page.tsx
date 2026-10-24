@@ -6,6 +6,7 @@ import Link from "next/link";
 import AppShell from "@/components/AppShell";
 import Icon from "@/components/Icon";
 import CourseJourney from "@/components/CourseJourney";
+import CourseMaterialPanel from "@/components/CourseMaterialPanel";
 import { resolveCourseView } from "@/lib/course-navigation";
 import EditCourseModal from "@/components/EditCourseModal";
 import BookmarkButton from "@/components/BookmarkButton";
@@ -502,18 +503,14 @@ export default function CoursePage() {
             <nav className="materials-groups" aria-label={t("Material groups")}><a href="#documents"><Icon name="file" size={17} />{t("Documents")}<span>{documents.length}</span></a><a href="#past-exams"><Icon name="exam" size={17} />{t("Past Exams")}<span>{historicalExams.length}</span></a><a href="#tutorials"><Icon name="book" size={17} />{t("Tutorials")}<span>{tutorials.length}</span></a><a href="#recordings"><Icon name="audio" size={17} />{t("Audio Recordings")}<span>{audioRecordings.length}</span></a></nav>
           </>}
           {/* Documents Section */}
-          <section id="documents" className="mb-12 scroll-mt-24" aria-label={t("Documents")}>
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="font-sans text-2xl font-medium tracking-tight">
-                {t("Documents")}
-              </h2>
-              <button
+          <CourseMaterialPanel id="documents" title={t("Documents")} icon="file" count={documents.length}
+            summary={t("Lecture documents and source guides")} overview={view === "overview"} holdOpen={showDocUpload || !!viewingDoc}
+            actions={<button
                 onClick={() => setShowDocUpload(true)}
                 className="ui-button primary"
               >
                 <span>+</span> {t("Upload")}
-              </button>
-            </div>
+              </button>}>
 
             <div className="course-material-panel-body">
             {documents.length === 0 ? (
@@ -572,22 +569,18 @@ export default function CoursePage() {
               />
             )}
             </div>
-          </section>
+          </CourseMaterialPanel>
 
           {/* Historical Exams Section */}
-          <section id="past-exams" className="mb-12" aria-label={t("Past Exams")}>
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="font-sans text-2xl font-medium tracking-tight">
-                {t("Past Exams")}
-              </h2>
-              <button
+          <CourseMaterialPanel id="past-exams" title={t("Past Exams")} icon="exam" count={historicalExams.length}
+            summary={t("Previous quizzes, midterms and finals")} overview={view === "overview"} holdOpen={showHistExamUpload || !!classifying}
+            actions={<button
                 onClick={() => setShowHistExamUpload(true)}
                 disabled={!foundationReady} aria-describedby="foundation-lock-reason"
                 className="ui-button primary"
               >
                 <span aria-hidden="true">{<Icon name={foundationReady ? "plus" : "lock"} size={16} />}</span> {t("Upload")}
-              </button>
-            </div>
+              </button>}>
 
             <div className="course-material-panel-body">
             {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
@@ -646,27 +639,19 @@ export default function CoursePage() {
               </section>;
             })}
             </div>
-          </section>
+          </CourseMaterialPanel>
 
           {/* Tutorials Section */}
-          <section id="tutorials" className="mb-12" aria-label={t("Tutorials")}>
-            <div className="flex items-center justify-between mb-6">
-              <div>
-                <h2 className="font-sans text-2xl font-medium tracking-tight">
-                  {t("Tutorials")}
-                </h2>
-                <p className="text-ink-soft text-sm mt-1">
-                  {t("Practice problems. The exam generator reuses their ideas (with different numbers) — no marks or format weighting.")}
-                </p>
-              </div>
-              <button
+          <CourseMaterialPanel id="tutorials" title={t("Tutorials")} icon="book" count={tutorials.length}
+            summary={t("Practice sheets and worked problems")} overview={view === "overview"} holdOpen={showTutorialUpload}
+            description={t("Practice problems. The exam generator reuses their ideas (with different numbers) — no marks or format weighting.")}
+            actions={<button
                 onClick={() => setShowTutorialUpload(true)}
                 disabled={!foundationReady} aria-describedby="foundation-lock-reason"
                 className="ui-button primary"
               >
                 <span aria-hidden="true">{<Icon name={foundationReady ? "plus" : "lock"} size={16} />}</span> {t("Upload")}
-              </button>
-            </div>
+              </button>}>
 
             <div className="course-material-panel-body">
             {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
@@ -713,22 +698,18 @@ export default function CoursePage() {
               />
             )}
             </div>
-          </section>
+          </CourseMaterialPanel>
 
           {/* Audio Recordings Section */}
-          <section id="recordings" className="mb-12" aria-label={t("Audio Recordings")}>
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="font-sans text-2xl font-medium tracking-tight">
-                {t("Audio Recordings")}
-              </h2>
-              <button
+          <CourseMaterialPanel id="recordings" title={t("Audio Recordings")} icon="audio" count={audioRecordings.length}
+            summary={t("Lecture recordings and typed notes")} overview={view === "overview"} holdOpen={showAudioUpload || !!viewingAudio}
+            actions={<button
                 onClick={() => setShowAudioUpload(true)}
                 disabled={!foundationReady} aria-describedby="foundation-lock-reason"
                 className="ui-button primary"
               >
                 <span aria-hidden="true">{<Icon name={foundationReady ? "plus" : "lock"} size={16} />}</span> {t("Upload")}
-              </button>
-            </div>
+              </button>}>
 
             <div className="course-material-panel-body">
             {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
@@ -774,7 +755,7 @@ export default function CoursePage() {
               />
             )}
             </div>
-          </section>
+          </CourseMaterialPanel>
 
 
         </div>
