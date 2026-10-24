@@ -2,7 +2,7 @@
 .study-page-header { gap: 20px; }
 .study-heading-group { display: flex; align-items: flex-start; gap: 16px; min-width: 0; }
 .study-heading-group .page-subtitle { max-width: 66ch; }
-.study-tool-icon { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 17px; background: var(--depth, #e3e9fc); color: var(--accent); flex-shrink: 0; }
+.study-tool-icon { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 17px; background: var(--depth, #efdac5); color: var(--accent); flex-shrink: 0; }
 .study-count { display: grid; place-items: center; min-width: 24px; height: 24px; padding-inline: 6px; border-radius: 50px; background: var(--bg-alt); font-variant-numeric: tabular-nums; }
 .study-workspace .study-layout { display: grid; grid-template-columns: minmax(290px, 340px) minmax(0, 1fr); align-items: start; gap: 24px; }
 .study-sources, .study-options { padding: 24px; min-width: 0; }
@@ -23,7 +23,7 @@
 .study-source-status.missing, .study-source-status.retry { color: rgb(var(--c-danger)); }
 .study-options h2 { margin-block-end: 6px; }
 .study-options .ui-button.primary { width: 100%; }
-.study-options input:not([type="range"]), .study-options textarea { border-color: var(--control-border, #7b8599); background: var(--paper); }
+.study-options input:not([type="range"]), .study-options textarea { border-color: var(--control-border, #998679); background: var(--paper); }
 .study-library { scroll-margin-block-start: 32px; min-width: 0; }
 .study-library > h3 { display: flex; align-items: center; gap: 10px; }
 .study-library [role="button"], .study-library a { min-width: 0; gap: 12px; }
@@ -51,7 +51,7 @@
 .study-summary h3 { font-size: 20px; }
 .study-summary table, .study-summary pre { max-width: 100%; overflow-x: auto; }
 .study-flashcards { max-width: 780px; margin-inline: auto; }
-.study-flashcard { width: 100%; min-height: 330px; max-height: 65dvh; overflow-y: auto; padding: clamp(24px, 5vw, 56px); border: 1px solid var(--line); border-radius: 24px; background: var(--paper); color: var(--ink); display: flex; flex-direction: column; justify-content: flex-start; align-items: center; gap: 26px; text-align: center; margin-block: 24px; cursor: pointer; box-shadow: 0 8px 24px rgb(30 44 82 / 4%); }
+.study-flashcard { width: 100%; min-height: 330px; max-height: 65dvh; overflow-y: auto; padding: clamp(24px, 5vw, 56px); border: 1px solid var(--line); border-radius: 24px; background: var(--paper); color: var(--ink); display: flex; flex-direction: column; justify-content: flex-start; align-items: center; gap: 26px; text-align: center; margin-block: 24px; cursor: pointer; box-shadow: 0 8px 24px rgb(var(--c-shadow) / 4%); }
 .study-flashcard[data-side="answer"] { background: var(--depth, var(--bg-alt)); border-color: var(--accent); }
 .study-flashcard > p { font-size: clamp(19px, 2.5vw, 25px); line-height: 1.65; overflow-wrap: anywhere; margin-block: auto; }
 .study-flashcard > span { font-size: 12px; color: var(--ink-soft); }
@@ -91,8 +91,8 @@
 .tutor-message pre, .tutor-message table { max-width: 100%; overflow-x: auto; }
 .tutor-message.user-message { background: var(--primary, #000); color: var(--primary-text, #fff); }
 .tutor-is-fullscreen > .app-navbar, .tutor-is-fullscreen > .skip-link, .tutor-is-fullscreen .sidebar-rail, .tutor-is-fullscreen .course-navigation { display: none; }
-.tutor-overlay { position: fixed; inset: 0; z-index: 140; background: rgb(18 25 45 / 22%); display: flex; justify-content: flex-end; }
-.tutor-context-panel { width: min(380px, 100%); height: 100dvh; margin-inline-start: auto; padding: 24px; background: var(--paper); border-inline-start: 1px solid var(--line); box-shadow: -12px 0 48px rgb(18 25 45 / 12%); display: flex; flex-direction: column; outline: none; }
+.tutor-overlay { position: fixed; inset: 0; z-index: 140; background: rgb(var(--c-shadow) / 22%); display: flex; justify-content: flex-end; }
+.tutor-context-panel { width: min(380px, 100%); height: 100dvh; margin-inline-start: auto; padding: 24px; background: var(--paper); border-inline-start: 1px solid var(--line); box-shadow: -12px 0 48px rgb(var(--c-shadow) / 12%); display: flex; flex-direction: column; outline: none; }
 .tutor-context-panel button { min-height: 44px; }
 .tutor-composer .ui-button { flex-shrink: 0; }
 @media (max-width: 1199px) {

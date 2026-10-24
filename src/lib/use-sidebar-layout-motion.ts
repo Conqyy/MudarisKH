@@ -72,7 +72,8 @@ export function useSidebarLayoutMotion(collapsed: boolean, panelRef: RefObject<H
         else if (previous.rect.width && rect.width) play(element, [{ transform: `scaleX(${previous.rect.width / rect.width})` }, { transform: "scaleX(1)" }]);
       } else if (element.classList.contains("sidebar-item")) {
         if (!reduced && previous.visible) {
-          const x = previous.rect.left - rect.left, y = previous.rect.top - rect.top;
+          const x = snapshot.rtl ? previous.rect.right - rect.right : previous.rect.left - rect.left;
+          const y = previous.rect.top - rect.top;
           if (Math.abs(x) > .5 || Math.abs(y) > .5) play(element, [{ transform: `translate(${x}px, ${y}px)` }, { transform: "translate(0px, 0px)" }]);
         }
       } else if (!previous.visible || previous.opacity !== opacity) {

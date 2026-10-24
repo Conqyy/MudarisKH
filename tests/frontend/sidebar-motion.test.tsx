@@ -20,7 +20,10 @@ beforeEach(() => {
     const compact = this.closest<HTMLElement>(".app-shell")?.dataset.compact === "true";
     const rtl = document.documentElement.dir === "rtl";
     if (this.classList.contains("sidebar-glass")) return box(rtl ? 1200 - (compact ? 72 : 224) : 30, 112, compact ? 72 : 224, 700);
-    if (this.classList.contains("sidebar-item")) return box(rtl ? 1132 : 42, compact ? 160 : 190, 46);
+    if (this.classList.contains("sidebar-item")) {
+      const width = compact ? 52 : 204;
+      return box(rtl ? 1188 - width : 42, compact ? 160 : 190, width, 48);
+    }
     if (this.classList.contains("app-workspace")) return rtl ? box(18, 112, compact ? 1062 : 910, 700) : box(compact ? 120 : 272, 112, compact ? 1062 : 910, 700);
     return box(0, 0, 0);
   });
@@ -65,6 +68,14 @@ it.each(["ltr", "rtl"])("animates expansion and collapse without scaling readabl
   pointerToggle();
   const collapse = motions.slice(previous).find(motion => motion.element.classList.contains("sidebar-glass"))!;
   expect(collapse.frames[0].transform).toBe(`scaleX(${224 / 72})`);
+});
+
+it.each([true, false])("keeps RTL icons anchored while row width changes (initial compact: %s)", initialCompact => {
+  document.documentElement.dir = "rtl";
+  mount({ initialCompact });
+  pointerToggle();
+  const row = motions.find(motion => motion.element.classList.contains("sidebar-item"))!;
+  expect(row.frames[0].transform).toBe(`translate(0px, ${initialCompact ? -30 : 30}px)`);
 });
 
 it("reverses from the currently presented geometry and cancels obsolete completions", async () => {
