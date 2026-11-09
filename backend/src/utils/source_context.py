@@ -48,7 +48,7 @@ def resolve_source_scope(database, library, user_id: str, course_id: str,
             raise ValueError('Selected source is unavailable')
     else:
         rows = foundation_rows
-    documents, manifests, refs = [], [], []
+    ready_documents = []
     seen = set()
     for row in rows:
         row = deepcopy(row)
@@ -65,7 +65,37 @@ def resolve_source_scope(database, library, user_id: str, course_id: str,
         if row['id'] in seen:
             continue
         seen.add(row['id'])
-        manifest = ready['_sourceManifest']
+        ready_documents.append(ready)
+    return _source_scope_snapshot(ready_documents, foundation_material_revision(foundation_rows))
+
+
+def source_scope_from_foundation(foundation: dict, user_id: str, course_id: str) -> dict:
+    """Reuse this request's fully hydrated foundation, never a public GET status.
+
+    This pure conversion performs no source I/O and accepts only the complete
+    validated owned foundation. Callers must recheck current metadata and retain
+    the existing publication/claim fences; this is not a cross-request cache.
+    """
+    validate_component(user_id, 'user ID')
+    validate_component(course_id, 'course ID')
+    course = foundation.get('course') or {}
+    rows = foundation.get('documents')
+    if (foundation.get('ready') is not True or course.get('id') != course_id
+            or course.get('userId') != user_id or not isinstance(rows, list) or not rows
+            or any(not isinstance(row, dict) or row.get('userId') != user_id
+                   or row.get('courseId') != course_id for row in rows)):
+        raise ValueError('A validated owned lecture foundation is required')
+    ids = [validate_component(row.get('id'), 'document ID') for row in rows]
+    revision = foundation.get('revision')
+    if len(set(ids)) != len(ids) or not build_foundation_status(rows, revision)['ready']:
+        raise ValueError('The validated lecture foundation changed')
+    return _source_scope_snapshot(rows, revision)
+
+
+def _source_scope_snapshot(rows, foundation_revision):
+    documents, manifests, refs = [], [], []
+    for row in rows:
+        manifest = row['_sourceManifest']
         documents.append({'id': row['id'], 'title': row.get('title', ''),
                           'sourceRevision': manifest['sourceRevision'],
                           'guideRevision': row['guideRevision'], 'guide': deepcopy(row['guide'])})
@@ -76,7 +106,7 @@ def resolve_source_scope(database, library, user_id: str, course_id: str,
                                      'guideRevision': d['guideRevision']} for d in documents]).encode()).hexdigest()
     return {'documents': documents, 'manifests': manifests, 'allowedRefs': refs,
             'scopeRevision': revision,
-            'foundationRevision': foundation_material_revision(foundation_rows)}
+            'foundationRevision': foundation_revision}
 
 
 def _units(scope):
@@ -141,17 +171,21 @@ def navigation_guides(documents, batch):
 
 def build_source_plan(scope: dict, purpose: str, query: str = '',
                       text_budget: int = 30000, image_budget: int = 8,
-                      include_blank_assets: bool = False) -> list[dict]:
+                      include_blank_assets: bool = False,
+                      max_batches: int = MAX_SOURCE_PLAN_BATCHES) -> list[dict]:
     """Bound each canonical JSON bundle, including metadata, in characters.
 
     Broad purposes cover every character in both text fields and every original
     image locator in source order. Focused retrieval ranks complete-source
     windows, then supplies one bounded partial bundle. Ranking is not matching.
+    The default plan cap stays unchanged; a job may supply its own explicit
+    remaining-call bound. Exceeding either bound raises without truncating.
     """
     if purpose not in {'summary', 'exam', 'flashcards', 'focused'}:
         raise ValueError('Unknown source plan purpose')
     if (type(text_budget) is not int or text_budget <= 0 or type(image_budget) is not int
-            or image_budget < 0 or type(include_blank_assets) is not bool):
+            or image_budget < 0 or type(include_blank_assets) is not bool
+            or type(max_batches) is not int or max_batches < 1):
         raise ValueError('Invalid source budget. Select fewer sources or split the file.')
     if len(scope['allowedRefs']) > MAX_SOURCE_PLAN_UNITS:
         raise ValueError(f"Source plan has {len(scope['allowedRefs'])} units; limit {MAX_SOURCE_PLAN_UNITS}. Select fewer sources or split the file.")
@@ -164,8 +198,8 @@ def build_source_plan(scope: dict, purpose: str, query: str = '',
 
     def flush():
         if entries:
-            if len(batches) >= MAX_SOURCE_PLAN_BATCHES:
-                raise ValueError(f'Source plan needs at least {len(batches) + 1} batches; limit {MAX_SOURCE_PLAN_BATCHES}. Select fewer sources or split the file.')
+            if len(batches) >= max_batches:
+                raise ValueError(f'Source plan needs at least {len(batches) + 1} batches; limit {max_batches}. Select fewer sources or split the file.')
             batches.append(_bundle(scope, purpose, entries))
             entries.clear()
 

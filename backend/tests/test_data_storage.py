@@ -232,6 +232,36 @@ class DataStorageTests(unittest.TestCase):
                 self.assertFalse(blob.present)
                 self.assertFalse((Path(self.temp.name) / 'uploads/documents/u/c/a.pdf').exists())
 
+    def test_cloud_delete_treats_an_already_missing_object_as_deleted(self):
+        # Storage can report 404 even after an existence check (for example when
+        # its client retries a delete that already succeeded). A tutorial delete
+        # then failed on every attempt, one missing artifact further each time.
+        from google.api_core.exceptions import Forbidden, NotFound
+        root = Path(self.temp.name) / 'uploads'
+        local = root / 'tutorials/u/c/supporting-part-0.json'
+        self.client.use_local = False
+        self.client.db = FakeFirestore({'courses/c': {'userId': 'u'}})
+        for error, should_raise in ((NotFound('No such object'), False), (Forbidden('denied'), True)):
+            with self.subTest(error=type(error).__name__):
+                class Blob:
+                    def exists(self): return True
+                    def delete(self): raise error
+                fake = types.ModuleType('firebase_admin')
+                fake.storage = types.SimpleNamespace(bucket=lambda: types.SimpleNamespace(blob=lambda path: Blob()))
+                local.parent.mkdir(parents=True, exist_ok=True)
+                local.write_bytes(b'artifact')
+                with patch.dict(sys.modules, {'firebase_admin': fake}), \
+                        patch('src.database.firebase_client.UPLOADS_ROOT', root, create=True):
+                    if should_raise:
+                        # A real remote failure still stops cleanup and keeps the
+                        # local copy, so the delete can be retried rather than hidden.
+                        with self.assertRaises(Forbidden):
+                            self.client.delete_file_from_storage('tutorials/u/c/supporting-part-0.json', user_id='u')
+                        self.assertTrue(local.exists())
+                    else:
+                        self.client.delete_file_from_storage('tutorials/u/c/supporting-part-0.json', user_id='u')
+                        self.assertFalse(local.exists())
+
     def cloud_client(self, rows, fail_delete=None):
         self.client.use_local = False
         self.client.db = FakeFirestore(rows, fail_delete)

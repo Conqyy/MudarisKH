@@ -33,7 +33,12 @@ beforeEach(() => {
     return response({});
   });
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+function focusAfterFreshnessWindow() {
+  vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_001);
+  fireEvent(window, new Event("focus"));
+}
 
 it("separates overview exam mini cards by type and keeps unclassified papers discoverable", async () => {
   render(<CoursePage />);
@@ -75,7 +80,7 @@ it("keeps a past-exam selection and lecture confirmation while focus revalidates
 
   // A native file chooser returns window focus before its change event. A
   // background GET must not revoke the last confirmed result or remount files.
-  fireEvent(window, new Event("focus"));
+  focusAfterFreshnessWindow();
   expect(screen.queryByRole("dialog", { name: "Upload materials" })).toBe(dialog);
   fireEvent.change(within(dialog).getByLabelText("Choose files"), { target: { files: [new File(["synthetic"], "selected-final.pdf", { type: "application/pdf" })] } });
   expect(within(dialog).getByText("selected-final.pdf")).toBeTruthy();
@@ -113,7 +118,7 @@ it("keeps a submitted past-exam request running through focus revalidation", asy
   const background = deferred<any>();
   mocks.api.mockImplementationOnce(() => background.promise);
 
-  fireEvent(window, new Event("focus"));
+  focusAfterFreshnessWindow();
   expect(screen.getByRole("dialog", { name: "Upload materials" })).toBe(dialog);
   expect(uploadSignal?.aborted).toBe(false);
   expect([...container.querySelectorAll<HTMLButtonElement>("button.journey-tool")].every(button => button.disabled)).toBe(true);
@@ -137,7 +142,7 @@ it.each(["changed", "failed"] as const)("revokes an active past-exam upload when
   fireEvent.change(within(dialog).getByLabelText("Choose files"), { target: { files: [new File(["synthetic"], "unsent-final.pdf", { type: "application/pdf" })] } });
   const background = deferred<any>();
   mocks.api.mockImplementationOnce(() => background.promise);
-  fireEvent(window, new Event("focus"));
+  focusAfterFreshnessWindow();
   expect(screen.queryByRole("dialog", { name: "Upload materials" })).toBe(dialog);
 
   await act(async () => {

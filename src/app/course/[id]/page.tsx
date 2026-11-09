@@ -53,6 +53,15 @@ function applyOrder<T extends { id: string }>(
   return orderedIds.map((id) => map.get(id)).filter(Boolean) as T[];
 }
 
+// A supporting material whose delete stopped partway. It is never a usable
+// material; finishing re-runs that material's own idempotent DELETE.
+type UnfinishedDeletion = { id: string; kind: "historical_exam" | "tutorial" | "audio" | "notes"; title: string | null };
+const DELETE_ROUTES: Record<UnfinishedDeletion["kind"], string> = {
+  historical_exam: "historical-exams", tutorial: "tutorials", audio: "audio", notes: "audio",
+};
+const unfinishedDeletions = (data: { unfinished_deletions?: UnfinishedDeletion[] }) =>
+  (data.unfinished_deletions || []).filter(item => item && typeof item.id === "string" && item.kind in DELETE_ROUTES);
+
 export default function CoursePage() {
   const { user, loading } = useAuth();
   const router = useRouter();
@@ -82,6 +91,9 @@ export default function CoursePage() {
     return () => classificationRequest.current?.abort();
   }, [courseId, user?.uid]);
   const [tutorials, setTutorials] = useState<Tutorial[]>([]);
+  const [stalledDeletions, setStalledDeletions] = useState<UnfinishedDeletion[]>([]);
+  const [finishingDeletion, setFinishingDeletion] = useState<string | null>(null);
+  const [finishDeletionError, setFinishDeletionError] = useState("");
   const [examCount, setExamCount] = useState(0);
   const [showEdit, setShowEdit] = useState(false);
   const [showDocUpload, setShowDocUpload] = useState(false);
@@ -224,12 +236,17 @@ export default function CoursePage() {
       // Fetch from backend API (bypasses Firestore security rules)
       await Promise.all([
         apiJson(`${API_URL}/api/documents/${courseId}`, { signal: controller.signal }).then(d => d.documents || []),
-        apiJson(`${API_URL}/api/audio/${courseId}`, { signal: controller.signal }).then(d => d.audio_recordings || []),
-        apiJson(`${API_URL}/api/historical-exams/${courseId}`, { signal: controller.signal }).then(d => d.historical_exams || []),
+        apiJson(`${API_URL}/api/audio/${courseId}`, { signal: controller.signal }),
+        apiJson(`${API_URL}/api/historical-exams/${courseId}`, { signal: controller.signal }),
         apiJson(`${API_URL}/api/exams/list/${courseId}`, { signal: controller.signal }).then(d => d.exams || []),
-        apiJson(`${API_URL}/api/tutorials/${courseId}`, { signal: controller.signal }).then(d => d.tutorials || []),
-      ]).then(([docsData, audioData, histData, examData, tutData]) => {
+        apiJson(`${API_URL}/api/tutorials/${courseId}`, { signal: controller.signal }),
+      ]).then(([docsData, audioList, histList, examData, tutList]) => {
         if (controller.signal.aborted) return;
+        const audioData = audioList.audio_recordings || [];
+        const histData = histList.historical_exams || [];
+        const tutData = tutList.tutorials || [];
+        setStalledDeletions([...unfinishedDeletions(histList), ...unfinishedDeletions(tutList), ...unfinishedDeletions(audioList)]);
+        setFinishDeletionError("");
         setDocuments(
           ordered(docsData, courseData?.documentOrder, courseData?.titleOverrides)
         );
@@ -290,6 +307,22 @@ export default function CoursePage() {
     } catch (error) {
       console.error(error);
       alert("Failed to delete. Make sure the backend is running.");
+    }
+  };
+
+  const handleFinishDeletion = async (item: UnfinishedDeletion) => {
+    setFinishingDeletion(item.id);
+    setFinishDeletionError("");
+    try {
+      const res = await apiFetch(`${API_URL}/api/${DELETE_ROUTES[item.kind]}/${item.id}`, { method: "DELETE" });
+      // 404: the material is already gone, which is what finishing means.
+      if (!res.ok && res.status !== 404) throw new Error(`Delete failed (${res.status})`);
+      setStalledDeletions(prev => prev.filter(other => other.id !== item.id));
+    } catch (error) {
+      console.error(error);
+      setFinishDeletionError(t("The deletion still could not finish. Please retry."));
+    } finally {
+      setFinishingDeletion(null);
     }
   };
 
@@ -545,6 +578,25 @@ export default function CoursePage() {
           showConfirmation={foundation?.state === "confirmation_required" && !foundationLoading && !documentChanging && !showDocUpload}
           supportCount={historicalExams.length + tutorials.length + audioRecordings.length} />}
         {!foundationReady && <p id="foundation-lock-reason" className="text-sm text-ink-soft mb-4">{lockReason}</p>}
+        {stalledDeletions.length > 0 && <section className="ui-notice danger mb-6" aria-label={t("Unfinished deletions")}>
+          <Icon name="alert" size={18} />
+          <div>
+            <p>{t("These materials were only partly deleted. They stay out of your study tools until the deletion finishes.")}</p>
+            <ul className="mt-2 space-y-2">
+              {stalledDeletions.map(item => {
+                const title = item.title || t("Untitled material");
+                return <li key={`${item.kind}:${item.id}`} className="flex flex-wrap items-center gap-3">
+                  <span className="font-semibold text-ink">{title}</span>
+                  <button className="ui-button secondary" disabled={finishingDeletion !== null}
+                    aria-label={`${t("Finish deleting")}: ${title}`} onClick={() => void handleFinishDeletion(item)}>
+                    {finishingDeletion === item.id ? t("Finishing…") : t("Finish deleting")}
+                  </button>
+                </li>;
+              })}
+            </ul>
+            {finishDeletionError && <p role="alert" className="text-sm text-accent mt-2">{finishDeletionError}</p>}
+          </div>
+        </section>}
         <div className={view === "overview" ? "course-materials course-materials-overview" : "course-materials"}>
           {view === "materials" && <>
             <div className="section-heading"><div><h2>{t("Course materials")}</h2><p className="page-subtitle">{t("Your lecture foundation and supporting sources, in one place.")}</p></div><Link href={"/course/" + courseId} className="ui-button ghost">{t("Back to overview")}<Icon name="arrow-right" size={15} /></Link></div>

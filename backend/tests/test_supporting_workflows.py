@@ -80,7 +80,7 @@ def test_checkpoint_persists_call_count_before_detached_checkpoint():
     class Library:
         repository = Repository()
 
-        def save_checkpoint(self, identity, job, state):
+        def save_checkpoint(self, identity, job, state, **publication):
             events.append(("save", deepcopy(state)))
             return {"revision": "a" * 64}
 
@@ -100,7 +100,7 @@ def test_crash_after_count_before_checkpoint_never_undercounts():
             return True
 
     class Library:
-        def save_checkpoint(self, identity, job, state):
+        def save_checkpoint(self, identity, job, state, **publication):
             raise RuntimeError("synthetic storage interruption")
 
     repository = Repository()
@@ -121,7 +121,9 @@ def test_alignment_checkpoint_keeps_separate_inventory_revision():
 
     changes_log = changes
     class Library:
-        def save_checkpoint(self, identity, job, state):
+        def save_checkpoint(self, identity, job, state, *, publication_changes, revision_fields):
+            changes_log.append({**publication_changes, 'checkpointRevision': 'b' * 64,
+                                **{field: 'b' * 64 for field in revision_fields}})
             return {"revision": "b" * 64}
 
     workflow = SupportingWorkflow(Repository(), Library(), object(), object(), lambda identity: None)
@@ -138,15 +140,13 @@ def test_crash_after_direct_alignment_checkpoint_retains_inventory_pointer():
         calls = 0
         def checkpoint(self, identity, job, *, changes, now_ms):
             self.calls += 1
-            if self.calls == 2:
-                raise RuntimeError("synthetic crash after adoption")
             row["processingJob"].update(deepcopy(changes))
             return True
 
     class Library:
-        def save_checkpoint(self, identity, job, state):
-            row["processingJob"]["checkpointRevision"] = "b" * 64
-            return {"revision": "b" * 64}
+        def save_checkpoint(self, identity, job, state, *, publication_changes, revision_fields):
+            row["processingJob"].update(deepcopy(publication_changes), checkpointRevision="b" * 64)
+            raise RuntimeError("synthetic crash after adoption")
 
     workflow = SupportingWorkflow(Repository(), Library(), object(), object(), lambda identity: None)
     with pytest.raises(RuntimeError, match="after adoption"):
@@ -264,7 +264,7 @@ def test_legacy_audio_worker_cannot_publish_managed_row(api_module, monkeypatch)
 def test_public_status_reports_real_unit_and_requirement_progress(monkeypatch):
     row = {
         "supportingAnalysis": {"version": 1, "state": "completed", "sourceRevision": "a" * 64,
-            "reportRevision": "b" * 64, "scopeRevision": "c" * 64, "analysisId": "private"},
+            "reportRevision": "b" * 64, "scopeRevision": "c" * 64, "analysisId": "opaque-job"},
         "processingJob": {"id": "opaque-job", "stage": "completed", "cursor": {"units": 9},
                           "extractionRevision": "e" * 64},
         "error": None,
@@ -371,9 +371,11 @@ def test_run_prepares_extracts_aligns_and_publishes_with_one_budget(monkeypatch,
     class Library:
         def __init__(self): self.saved_report = None; self.saved = {}
         def save_source(self, identity, job, body, value): return {"revision": value["sourceRevision"]}
-        def save_checkpoint(self, identity, job, state):
+        def save_checkpoint(self, identity, job, state, *, publication_changes=None, revision_fields=()):
             revision = __import__("hashlib").sha256(repr(state).encode()).hexdigest()
             self.saved[revision] = deepcopy(state)
+            repository.row['processingJob'].update(publication_changes or {}, checkpointRevision=revision,
+                **{field: revision for field in revision_fields})
             return {"revision": revision}
         def load_checkpoint(self, identity, revision): return deepcopy(self.saved[revision])
         def render_reference(self, identity, ref): return []

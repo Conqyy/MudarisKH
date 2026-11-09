@@ -2,6 +2,7 @@
 from copy import deepcopy
 import hashlib
 import json
+import re
 import time
 import uuid
 
@@ -13,6 +14,75 @@ from src.supporting.alignment_evidence import proof_in_supplied, ref_key, valida
 from src.utils.storage_paths import build_supporting_artifact_path
 
 REPORT_ARRAYS = ('items', 'alignments', 'sharedContexts', 'papers', 'topics')
+
+
+def _provider_failure_message(error):
+    """Translate stored exception-class markers, never provider response bodies."""
+    if not isinstance(error, str):
+        return None
+    marker = re.match(r'^(?:Supporting|Reconciliation|Alignment) provider failure \(([A-Za-z_][A-Za-z0-9_]*)\)', error)
+    name = marker.group(1) if marker else re.split(r'[:\s]', error, maxsplit=1)[0]
+    http_error = re.match(r'^Error code: (\d{3})\b', error)
+    if http_error:
+        name = {'400': 'BadRequestError', '401': 'AuthenticationError', '402': 'InsufficientQuotaError',
+                '403': 'PermissionDeniedError', '404': 'NotFoundError', '408': 'APITimeoutError',
+                '422': 'UnprocessableEntityError', '429': 'RateLimitError', '504': 'APITimeoutError'}.get(http_error.group(1), 'APIStatusError')
+    if name == 'NotFoundError':
+        return 'The selected AI model is unavailable or lacks required analysis features. Choose a compatible model, then retry analysis.'
+    if name in ('BadRequestError', 'UnprocessableEntityError'):
+        return 'The AI provider rejected this analysis request. Check that the selected model supports images and structured responses, then retry.'
+    if name in ('RateLimitError', 'InsufficientQuotaError'):
+        return 'The AI provider has reached its rate or quota limit. Wait for the limit to reset or choose another model, then retry.'
+    if name in ('AuthenticationError', 'PermissionDeniedError'):
+        return 'The AI provider rejected the API credentials. Check the backend API key, then retry analysis.'
+    if name in ('APITimeoutError', 'TimeoutError', 'ReadTimeout', 'ConnectTimeout'):
+        return 'The AI provider did not respond in time. Retry analysis; if this continues, choose another model.'
+    if name == 'APIConnectionError':
+        return 'The AI provider could not be reached. Retry analysis when the connection is available.'
+    if marker or name in ('APIError', 'APIStatusError', 'InternalServerError'):
+        return 'The AI provider could not complete this analysis. Retry analysis; if this continues, choose another model.'
+    return None
+
+
+def _analysis_failure_message(error):
+    if not isinstance(error, str):
+        return None
+    provider_message = _provider_failure_message(error)
+    if provider_message:
+        return provider_message
+    if 'missing or truncated' in error:
+        return 'The AI response was incomplete. Retry analysis to read the remaining source content.'
+    if 'budget exhausted' in error:
+        return 'Analysis reached its processing limit. Retry analysis to continue.'
+    if 'Invalid original inventory' in error or 'Invalid original reconciliation audit' in error:
+        return 'The AI returned an invalid source analysis. Retry analysis.'
+    if 'Reconciliation schema and originals exceed request bounds' in error:
+        return 'This file is too large for one analysis request. Split it into smaller files, then retry.'
+    return None
+
+
+def _incomplete_message(coverage, *, report_available=True):
+    extraction = (coverage or {}).get('extraction') or {}
+    failure = _analysis_failure_message(extraction.get('error'))
+    if failure:
+        return failure
+    if any('Independent original reconciliation disagrees' in reason
+           for reasons in (extraction.get('reasons') or {}).values() for reason in reasons):
+        return 'The independent source checks disagreed. Retry analysis to recheck the original file.'
+    if not report_available:
+        return 'Some source content could not be checked.'
+    return 'Some source content could not be verified. Open the report for details, then retry analysis.'
+
+
+def _public_extraction_coverage(coverage):
+    """Keep diagnostic bodies private without touching immutable study content."""
+    public = deepcopy(coverage)
+    if public.get('error'):
+        public['error'] = _incomplete_message({'extraction': coverage})
+    if isinstance(public.get('reasons'), dict):
+        public['reasons'] = {unit: [_analysis_failure_message(reason) or reason for reason in reasons]
+                             for unit, reasons in public['reasons'].items()}
+    return public
 
 
 class SupportingLibrary:
@@ -35,7 +105,7 @@ class SupportingLibrary:
         self.repository.get_owned(identity)
         return body
 
-    def _store(self, identity, job, payloads, descriptor, *, expected=None):
+    def _store(self, identity, job, payloads, descriptor, *, expected=None, checkpoint_changes=None):
         attempt = uuid.uuid4().hex
         handle = job if job is not None else {'id': uuid.uuid4().hex, 'claimToken': uuid.uuid4().hex}
         paths = [build_supporting_artifact_path(identity, handle['id'], handle['claimToken'], attempt, name) for name, data in payloads]
@@ -66,7 +136,8 @@ class SupportingLibrary:
             adopted = self.repository.publish(identity, job,
                 manifest_version=descriptor if descriptor['versionKind'] == 'source' else None,
                 report_version=descriptor if descriptor['versionKind'] == 'report' else None,
-                checkpoint_version=descriptor if descriptor['versionKind'] == 'checkpoint' else None, now_ms=self._now())
+                checkpoint_version=descriptor if descriptor['versionKind'] == 'checkpoint' else None,
+                now_ms=self._now(), **({'checkpoint_changes': checkpoint_changes} if checkpoint_changes is not None else {}))
         else:
             adopted = self.repository.publish_scoped_report(identity, expected, report_version=descriptor)
         if not adopted:
@@ -298,17 +369,29 @@ class SupportingLibrary:
         payloads, descriptor = self._report_payloads(identity, report, foundation_revision=job['foundationRevision'])
         return self._store(identity, job, payloads, descriptor)
 
-    def save_checkpoint(self, identity, job, data):
+    def save_checkpoint(self, identity, job, data, *, publication_changes=None, revision_fields=()):
         bindings = {key: job[key] for key in ('inputRevision', 'sourceDigest', 'foundationRevision')}
         body = canonical_bytes({**bindings, 'data': data})
         parts = [body[start:start+MAX_REPORT_CHUNK_BYTES] for start in range(0, len(body), MAX_REPORT_CHUNK_BYTES)]
         header = canonical_bytes({'encoding': 'json-utf8', 'byteLength': len(body)})
         revision = hashlib.sha256(body).hexdigest()
+        from src.supporting.repository import checkpoint_publication_changes
+        if (not isinstance(revision_fields, (tuple, list))
+                or any(field not in ('extractionRevision', 'inventoryRevision') for field in revision_fields)
+                or len(set(revision_fields)) != len(revision_fields)):
+            raise ValueError('Invalid checkpoint revision fields')
+        changes = checkpoint_publication_changes({} if publication_changes is None else publication_changes, revision)
+        if any(field in changes for field in revision_fields):
+            raise ValueError('Checkpoint revision field supplied twice')
+        changes.update({field: revision for field in revision_fields})
+        if ('progress' in changes and changes['progress'] != data.get('progress')
+                or 'phase' in changes and changes['phase'] != data.get('stage')):
+            raise ValueError('Checkpoint publication differs from its durable state')
         descriptor = {**bindings, 'versionKind': 'checkpoint', 'revision': revision, 'contentDigest': revision,
             'coverageComplete': False, 'headerDigest': hashlib.sha256(header).hexdigest(),
             'chunks': [{'digest': hashlib.sha256(part).hexdigest(), 'count': len(part)} for part in parts]}
         payloads = [('checkpoint.json', header), *[(f'part-{i}.json', part) for i, part in enumerate(parts)]]
-        return self._store(identity, job, payloads, descriptor)
+        return self._store(identity, job, payloads, descriptor, checkpoint_changes=changes)
 
     def load_checkpoint(self, identity, revision):
         version = self.repository.get_version(identity, 'checkpoint', revision)
@@ -371,6 +454,8 @@ class SupportingLibrary:
             stage = 'upgrade_required'
         elif stage == 'capturing':
             stage = 'preparing'
+        elif stage == 'extracting' and job.get('phase') in ('reconcile', 'complete'):
+            stage = 'reconciling'
         stale = legacy or bool(row.get('stale'))
         database = getattr(self.repository, 'database', None)
         if job.get('foundationRevision') and database is not None:
@@ -381,18 +466,35 @@ class SupportingLibrary:
                 pass
         progress = {'completedUnits': 0, 'totalUnits': None,
                     'completedRequirements': 0, 'totalRequirements': None}
+        active = analysis.get('state') in ('queued', 'processing', 'preparing', 'extracting', 'aligning')
+        current_report = (bool(analysis.get('reportRevision'))
+                          and analysis.get('analysisId') == job.get('id'))
+        saved_progress = job.get('progress') or {}
+        stopped_without_report = analysis.get('state') == 'incomplete' and not current_report
+        if (active or analysis.get('state') == 'failed' or stopped_without_report) and isinstance(saved_progress, dict):
+            for completed_key, total_key in (('completedUnits', 'totalUnits'),
+                                              ('completedRequirements', 'totalRequirements')):
+                completed, total = saved_progress.get(completed_key), saved_progress.get(total_key)
+                if type(completed) is int and type(total) is int and 0 <= completed <= total:
+                    progress.update({completed_key: completed, total_key: total})
+        has_job_progress = progress['totalUnits'] is not None
         coverage = None
         source_revision, report_revision = analysis.get('sourceRevision'), analysis.get('reportRevision')
-        if source_revision:
+        if source_revision and not has_job_progress:
             try:
                 manifest = self.load_source(identity, source_revision)
                 total = len(manifest['units'])
-                unresolved = len(manifest['coverage']['unresolvedUnitIds'])
-                progress.update(completedUnits=total-unresolved, totalUnits=total)
+                # Capturing readable pages does not mean the AI has analyzed
+                # or independently checked them yet.
+                progress.update(totalUnits=total)
                 coverage = {'source': deepcopy(manifest['coverage'])}
             except ValueError:
                 pass
-        if report_revision:
+        # A retry retains its previous report link, but that report cannot
+        # describe the new job after failure or incomplete extraction. Saved
+        # job progress remains authoritative; older rows can use their own
+        # report (including legacy rows where both job identities are absent).
+        if report_revision and not active and not has_job_progress and current_report:
             try:
                 report = self.load_report(identity, report_revision)
                 requirement_ids = {requirement['id'] for item in report['items']
@@ -405,15 +507,26 @@ class SupportingLibrary:
                 progress.update(completedRequirements=total-len(unresolved), totalRequirements=total)
                 coverage = {**(coverage or {}), 'extraction': deepcopy(report['extractionCoverage']),
                             'alignment': deepcopy(report['alignmentCoverage'])}
+                extraction = report['extractionCoverage']
+                units = set(extraction.get('unitIds', []))
+                accounted = units if extraction.get('complete') is True else set(extraction.get('accountedUnitIds', []))
+                checked = accounted.intersection(units) - set(extraction.get('unresolvedUnitIds', []))
+                progress.update(completedUnits=len(checked), totalUnits=len(units))
             except ValueError:
                 pass
+        error_message = row.get('errorMessage') or row.get('error') or job.get('error')
+        error_message = _analysis_failure_message(error_message) or error_message
+        if not error_message and analysis.get('state') == 'incomplete':
+            error_message = _incomplete_message(coverage)
+        if coverage and coverage.get('extraction') is not None:
+            coverage['extraction'] = _public_extraction_coverage(coverage['extraction'])
         return {'materialId': identity['materialId'], 'kind': identity['kind'],
             'jobId': job.get('id') if not legacy else None,
             'status': analysis.get('state', 'legacy'), 'stage': stage, 'progress': progress,
             'sourceRevision': source_revision, 'reportRevision': report_revision,
             'scopeRevision': analysis.get('scopeRevision'), 'coverage': coverage,
             'legacy': legacy, 'stale': stale,
-            'errorMessage': row.get('errorMessage') or row.get('error') or job.get('error')}
+            'errorMessage': error_message}
 
     def report_page(self, identity, *, report_revision, offset=0, limit=50):
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
@@ -430,4 +543,5 @@ class SupportingLibrary:
             'papers': [paper for paper in report['papers'] if paper.get('paperId') in paper_ids],
             'topics': [topic for topic in report['topics'] if ids.intersection(topic.get('itemIds', []))],
             'scopeSnapshot': report['scopeSnapshot'],
-            'extractionCoverage': report['extractionCoverage'], 'alignmentCoverage': report['alignmentCoverage']}
+            'extractionCoverage': _public_extraction_coverage(report['extractionCoverage']),
+            'alignmentCoverage': report['alignmentCoverage']}

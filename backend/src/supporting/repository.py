@@ -37,6 +37,17 @@ def _clock(value):
     if type(value) is not int or value < 0: raise ValueError('Invalid job clock')
 
 
+def checkpoint_publication_changes(changes, revision):
+    """Validate the small job projection adopted with an immutable checkpoint."""
+    if (not isinstance(changes, dict) or set(changes) -
+            {'progress', 'phase', 'extractionRevision', 'inventoryRevision'}):
+        raise ValueError('Invalid checkpoint publication fields')
+    SupportingRepository._validate_checkpoint_changes(changes)
+    if 'extractionRevision' in changes and changes['extractionRevision'] != revision:
+        raise ValueError('Extraction pointer must identify the published checkpoint')
+    return deepcopy(changes)
+
+
 class SupportingRepository:
     def __init__(self, database):
         self.database = database
@@ -203,11 +214,26 @@ class SupportingRepository:
         except DataConflict:
             return None
 
-    def checkpoint(self, identity, job, *, changes, now_ms):
-        _clock(now_ms)
+    @staticmethod
+    def _validate_checkpoint_changes(changes):
         allowed = {'stage', 'cursor', 'modelCalls', 'error', 'checkpointRevision', 'inventoryRevision',
-                   'extractionRevision'}
+                   'extractionRevision', 'progress', 'phase'}
         if not isinstance(changes, dict) or set(changes) - allowed: raise ValueError('Invalid supporting checkpoint fields')
+        if 'phase' in changes and changes['phase'] not in ('extract', 'reconcile', 'complete', 'align'):
+            raise ValueError('Invalid supporting progress phase')
+        if 'progress' in changes:
+            progress = changes['progress']
+            if (not isinstance(progress, dict)
+                    or set(progress) - {'completedUnits', 'totalUnits', 'completedRequirements', 'totalRequirements'}
+                    or not {'completedUnits', 'totalUnits'} <= set(progress)):
+                raise ValueError('Invalid supporting progress')
+            for completed, total in (('completedUnits', 'totalUnits'),
+                                     ('completedRequirements', 'totalRequirements')):
+                if completed not in progress and total not in progress:
+                    continue
+                if (type(progress.get(completed)) is not int or type(progress.get(total)) is not int
+                        or not 0 <= progress[completed] <= progress[total]):
+                    raise ValueError('Invalid supporting progress counts')
         if 'modelCalls' in changes and (type(changes['modelCalls']) is not int or changes['modelCalls'] < 0):
             raise ValueError('Invalid model-call count')
         if 'stage' in changes and changes['stage'] not in ACTIVE_STAGES - {'queued'} | {'failed', 'incomplete'}:
@@ -221,6 +247,10 @@ class SupportingRepository:
         if 'extractionRevision' in changes: _hash(changes['extractionRevision'])
         if changes.get('error') is not None and (not isinstance(changes['error'], str) or len(changes['error']) > 2000):
             raise ValueError('Invalid checkpoint error')
+
+    def checkpoint(self, identity, job, *, changes, now_ms):
+        _clock(now_ms)
+        self._validate_checkpoint_changes(changes)
         def checkpoint(row, versions):
             if not self._live(row, job, now_ms): return None, {}, False
             current = row['processingJob']
@@ -298,8 +328,14 @@ class SupportingRepository:
             for field in ('sourceRevision', 'scopeRevision', 'foundationRevision'): _hash(version.get(field))
         return version
 
-    def publish(self, identity, job, *, manifest_version, report_version, now_ms, checkpoint_version=None):
+    def publish(self, identity, job, *, manifest_version, report_version, now_ms, checkpoint_version=None,
+                checkpoint_changes=None):
         _clock(now_ms)
+        projection = {}
+        if checkpoint_changes is not None:
+            if checkpoint_version is None:
+                raise ValueError('Checkpoint publication fields require a checkpoint')
+            projection = checkpoint_publication_changes(checkpoint_changes, checkpoint_version.get('revision'))
         entries = [(v, kind) for v, kind in ((manifest_version, 'source'), (report_version, 'report'),
                                             (checkpoint_version, 'checkpoint')) if v is not None]
         if not entries: raise ValueError('Nothing to publish')
@@ -332,7 +368,8 @@ class SupportingRepository:
                 elif kind == 'checkpoint':
                     if any(version.get(k) != job[k] for k in ('inputRevision', 'sourceDigest', 'foundationRevision')):
                         raise DataConflict('Checkpoint source identity changed')
-                    row['processingJob']['checkpointRevision'] = version['revision']
+                    row['processingJob'].update(projection, checkpointRevision=version['revision'],
+                                                leaseUntil=now_ms+CLAIM_LEASE_MS)
                 else:
                     if version['sourceRevision'] != row['supportingAnalysis'].get('sourceRevision'):
                         raise DataConflict('Report source version changed')

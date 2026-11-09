@@ -76,10 +76,13 @@ def test_incomplete_workflow_explicit_retry_completes_exact_extraction_prefix(li
     elif failure == 'invalid':
         rows['p0002'] = {'invalid': True}
     assert workflow.run(identity()) is True
-    first = library.load_report(identity())
-    assert first['extractionCoverage']['complete'] is False
-    first_job = library.repository.get_owned(identity())['processingJob']
-    assert first_job.get('extractionRevision'), 'alignment must retain the exact extraction checkpoint'
+    first = library.repository.get_owned(identity())
+    assert first['status'] == 'incomplete'
+    assert not first['supportingAnalysis'].get('reportRevision'), 'unverified extraction cannot publish a report'
+    with pytest.raises(ValueError, match='report is not ready'):
+        library.load_report(identity())
+    first_job = first['processingJob']
+    assert first_job.get('extractionRevision'), 'incomplete extraction must retain its exact checkpoint'
     assert not first_job.get('inventoryRevision'), 'incomplete extraction cannot be reused as inventory'
     prefix = library.load_checkpoint(identity(), first_job['extractionRevision'])
     assert prefix['responses']['extract']['0']['items'][0]['text'] == 'Question 1'
@@ -96,7 +99,7 @@ def test_incomplete_workflow_explicit_retry_completes_exact_extraction_prefix(li
     assert len(final['items']) == 2
     assert library.repository.get_owned(identity())['status'] == 'completed'
     requests = [json.loads(c['messages'][1]['content'][0]['text']) for c in provider.calls]
-    assert [r['source']['ref']['unitId'] for r in requests if r['stage'] == 'extract'] == ['p0002']
+    assert [r['sourceReferences'][r['source']['ref']]['unitId'] for r in requests if r['stage'] == 'extract'] == ['p0002']
 
 
 def test_existing_incomplete_inventory_retry_reextracts_retained_original(library, monkeypatch):
@@ -128,8 +131,8 @@ def test_lease_recovery_keeps_spent_calls_and_pending_extraction_without_fresh_b
     class WorkerCrash(BaseException):
         pass
 
-    def interrupted(identity, job, state):
-        version = save_checkpoint(identity, job, state)
+    def interrupted(identity, job, state, **publication):
+        version = save_checkpoint(identity, job, state, **publication)
         if state.get('stage') == 'extract' and state.get('modelCalls') == 2 and state.get('pending'):
             raise WorkerCrash()
         return version

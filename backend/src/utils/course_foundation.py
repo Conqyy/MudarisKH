@@ -1,6 +1,7 @@
 """Pure readiness and bounded source evidence for the lecture foundation."""
 import hashlib
 import json
+import re
 from datetime import date, datetime
 
 from src.utils.ai_contracts import validate_analysis
@@ -100,20 +101,129 @@ def foundation_material_revision(documents: list) -> str:
 
 
 def build_foundation_status(documents: list, confirmed_revision: str = '') -> dict:
-    """Both validated stages and confirmation of the material retry identity."""
+    """Authoritative readiness: requires hydrated and verified source artifacts."""
+    return _build_foundation_status(documents, confirmed_revision, _artifact_failure)
+
+
+def build_foundation_status_projection(documents: list, confirmed_revision: str = '') -> dict:
+    """Display the published readiness snapshot without downloading source files.
+
+    Source/guide publication already verifies immutable artifacts before saving
+    these descriptors. Validate their identities and coverage on every refresh;
+    confirmation and study actions must still use build_foundation_status with
+    hydrate_document_source to detect later artifact loss or corruption.
+    """
+    return _build_foundation_status(documents, confirmed_revision, _metadata_failure)
+
+
+def _artifact_failure(document):
     from src.utils.source_contracts import validate_manifest, validate_guide, guide_digest
+    try:
+        manifest = validate_manifest(document.get('_sourceManifest'))
+        if (document.get('_sourceArtifactsValid') is not True or not manifest['coverage']['complete']
+                or manifest['documentId'] != document.get('id')
+                or manifest['originalDigest'] != document.get('originalDigest')
+                or manifest['sourceRevision'] != document.get('sourceRevision')):
+            raise ValueError('Source unavailable')
+    except (ValueError, TypeError, AttributeError):
+        return 'preparation', 'The exact source artifacts are unavailable or invalid. Prepare or replace this document.'
+    try:
+        guide = validate_guide(document.get('guide'), manifest)
+        if guide_digest(guide) != document.get('guideRevision'):
+            raise ValueError('Guide mismatch')
+    except (ValueError, TypeError, AttributeError):
+        return 'guide', 'The guide does not match the complete source. Retry this document.'
+    return None, None
+
+
+def _metadata_failure(document):
+    from src.utils.source_contracts import FILE_TYPES, GUIDE_VERSION, guide_digest
+    from src.utils.storage_paths import build_storage_path, document_artifact_prefix
+    try:
+        for key in ('originalDigest', 'sourceRevision'):
+            if not isinstance(document.get(key), str) or not re.fullmatch(r'[0-9a-f]{64}', document[key]):
+                raise ValueError('Invalid source identity')
+        version = document['sourceVersions'][document['sourceRevision']]
+        file_type = version['fileType']
+        if (file_type not in FILE_TYPES or file_type != document.get('fileType')
+                or version['originalDigest'] != document['originalDigest']
+                or version.get('coverageComplete') is not True
+                or type(version.get('unitCount')) is not int or version['unitCount'] <= 0
+                or type(document.get('unitCount')) is not int or version['unitCount'] != document['unitCount']
+                or not isinstance(version.get('manifestDigest'), str)
+                or not re.fullmatch(r'[0-9a-f]{64}', version['manifestDigest'])):
+            raise ValueError('Invalid source descriptor')
+        job = document.get('processingJob')
+        if (not isinstance(job, dict) or job.get('stage') != 'completed'
+                or not isinstance(job.get('id'), str) or not re.fullmatch(r'[0-9a-f]{32}', job['id'])
+                or ('sourceDigest' in job and job['sourceDigest'] != document['originalDigest'])):
+            raise ValueError('Incomplete document job')
+        prefix = document_artifact_prefix(document['id'])
+        for path, suffix in ((document['storagePath'], None), (version['manifestPath'], 'manifest.json'),
+                             (version['originalPath'], 'original.' + file_type)):
+            filename = path.split('/')[-1]
+            if path != build_storage_path(document['userId'], document['courseId'], 'documents', filename):
+                raise ValueError('Source path belongs to another owner or course')
+            if suffix and not re.fullmatch(re.escape(prefix) + r'[0-9a-f]{32}-[0-9a-f]{32}-[0-9a-f]{32}-' + re.escape(suffix), filename):
+                raise ValueError('Source path belongs to another document')
+        for row_key, version_key in (('sourceManifestPath', 'manifestPath'), ('sourceManifestDigest', 'manifestDigest')):
+            if row_key in document and document[row_key] != version[version_key]:
+                raise ValueError('Current manifest descriptor mismatch')
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return 'preparation', 'The saved source metadata is unavailable or invalid. Prepare or replace this document.'
+    try:
+        guide = document['guide']
+        if (type(guide.get('version')) is not int or guide['version'] != GUIDE_VERSION
+                or guide.get('sourceRevision') != document['sourceRevision']
+                or guide_digest(guide) != document['guideRevision']):
+            raise ValueError('Guide identity mismatch')
+        coverage = guide['unitCoverage']
+        keys = ('unitIds', 'readableUnitIds', 'blankUnitIds', 'unresolvedUnitIds')
+        if not isinstance(coverage, dict) or set(coverage) != {*keys, 'complete'}:
+            raise ValueError('Missing source coverage')
+        for key in keys:
+            values = coverage[key]
+            if (not isinstance(values, list) or any(not isinstance(value, str) for value in values)
+                    or len(set(values)) != len(values)):
+                raise ValueError('Invalid source coverage')
+        if (len(coverage['unitIds']) != version['unitCount']
+                or coverage['unitIds'] != [f'{FILE_TYPES[file_type][0]}{index:04d}' for index in range(1, version['unitCount'] + 1)]
+                or coverage['complete'] is not True or coverage['unresolvedUnitIds']
+                or not coverage['readableUnitIds']):
+            raise ValueError('Incomplete source coverage')
+        allowed, readable, blank = (set(coverage[key]) for key in keys[:3])
+        if readable & blank or readable | blank != allowed:
+            raise ValueError('Source coverage does not account for every unit')
+        for key, fields in [('sections', ('label', 'purpose')), ('concepts', ('name',)), ('visualReferences', ('kind', 'label'))]:
+            rows = guide.get(key)
+            if not isinstance(rows, list):
+                raise ValueError('Invalid guide sections')
+            for row in rows:
+                if (not isinstance(row, dict)
+                        or any(not isinstance(row.get(field), str) or not row[field].strip() for field in fields)):
+                    raise ValueError('Invalid guide content')
+                refs = row.get('unitIds')
+                if (not isinstance(refs, list) or not refs or any(not isinstance(ref, str) for ref in refs)
+                        or len(set(refs)) != len(refs) or not set(refs) <= allowed):
+                    raise ValueError('Invalid guide references')
+        if not any(readable.intersection(row['unitIds']) for row in guide['sections'] + guide['concepts']):
+            raise ValueError('Guide requires readable academic content')
+        if not isinstance(guide.get('warnings'), list) or any(not isinstance(warning, str) or not warning.strip() for warning in guide['warnings']):
+            raise ValueError('Invalid guide warnings')
+    except (ValueError, TypeError, AttributeError, KeyError):
+        return 'guide', 'The guide does not match the complete source. Retry this document.'
+    return None, None
+
+
+def _build_foundation_status(documents, confirmed_revision, validate_completed):
     documents = documents or []
     completed = pending = failed = 0
-    failed_ids, failed_stages, sources = [], {}, []
+    failed_ids, failed_stages = [], {}
     for document in documents:
         if not isinstance(document, dict):
             failed += 1
-            sources.append(_stable_json({'malformedDocument': document}))
             continue
-        identity = {field: document.get(field) for field in _REVISION_FIELDS}
         job = document.get('processingJob')
-        identity['jobId'] = job.get('id') if isinstance(job, dict) else None
-        sources.append(_stable_json(identity))
         stage, error = None, None
         if job is not None and not isinstance(job, dict):
             stage, error = 'preparation', 'Invalid document job metadata. Prepare this document again.'
@@ -130,22 +240,7 @@ def build_foundation_status(documents: list, confirmed_revision: str = '') -> di
             pending += 1
             continue
         else:
-            try:
-                manifest = validate_manifest(document.get('_sourceManifest'))
-                if (document.get('_sourceArtifactsValid') is not True or not manifest['coverage']['complete']
-                        or manifest['documentId'] != document.get('id')
-                        or manifest['originalDigest'] != document.get('originalDigest')
-                        or manifest['sourceRevision'] != document.get('sourceRevision')):
-                    raise ValueError('Source unavailable')
-            except (ValueError, TypeError, AttributeError):
-                stage, error = 'preparation', 'The exact source artifacts are unavailable or invalid. Prepare or replace this document.'
-            if stage is None:
-                try:
-                    guide = validate_guide(document.get('guide'), manifest)
-                    if guide_digest(guide) != document.get('guideRevision'):
-                        raise ValueError('Guide mismatch')
-                except (ValueError, TypeError, AttributeError):
-                    stage, error = 'guide', 'The guide does not match the complete source. Retry this document.'
+            stage, error = validate_completed(document)
         if stage:
             failed += 1
             if isinstance(document.get('id'), str):

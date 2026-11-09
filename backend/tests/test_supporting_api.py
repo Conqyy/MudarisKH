@@ -88,6 +88,33 @@ def test_supporting_lists_omit_deleting_rows_without_hiding_valid_materials(
 
 
 @pytest.mark.parametrize('route,getter,result_key,kind', _LIST_CASES)
+def test_supporting_lists_name_unfinished_deletions_apart_from_usable_materials(
+        api_module, monkeypatch, route, getter, result_key, kind):
+    api = api_module
+    _auth(monkeypatch, api)
+    rows = [_list_row('stalled', kind, status='deleting', title='Tutorial 4 (1)',
+                      processingJob={}, storagePath='private/path'),
+            _list_row('valid', kind),
+            _list_row('foreign-owner', kind, userId='another-owner', status='deleting'),
+            _list_row('foreign-course', kind, courseId='another-course', status='deleting')]
+    monkeypatch.setattr(api.db_client, getter, lambda *args, **kwargs: deepcopy(rows))
+    library = MagicMock()
+    library.public_status.side_effect = _public_status
+    monkeypatch.setattr(api, 'supporting_library', library)
+    with TestClient(api.app) as client:
+        response = client.get(route)
+    assert response.status_code == 200
+    body = response.json()
+    # Study tools read only the material list, so a deleting row never
+    # becomes selectable; the course page offers to finish the deletion.
+    assert [row['id'] for row in body[result_key]] == ['valid']
+    assert body['unfinished_deletions'] == [
+        {'id': 'stalled', 'kind': kind, 'courseId': 'course', 'title': 'Tutorial 4 (1)'}]
+    library.public_status.assert_called_once()
+    api.app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize('route,getter,result_key,kind', _LIST_CASES)
 @pytest.mark.parametrize('reason', ['Supporting material was deleted', 'Supporting material is no longer available'])
 def test_supporting_lists_survive_a_material_disappearing_after_the_query(
         api_module, monkeypatch, route, getter, result_key, kind, reason):

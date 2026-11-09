@@ -36,7 +36,7 @@ def complete(library):
     assert pipeline(library, Processor()).run(doc)
     return doc
 
-def test_readiness_validates_actual_artifacts_and_public_projection(source_api, library):
+def test_authoritative_readiness_validates_actual_artifacts_and_public_projection(source_api, library):
     doc = complete(library)
     result = source_api.get_course_foundation('c', uid='u')
     assert result['state'] == 'confirmation_required'
@@ -52,7 +52,7 @@ def test_readiness_validates_actual_artifacts_and_public_projection(source_api, 
     assert unit.status_code == 200
     assert 'Complete lecture' in unit.text
     library.database.delete_file_from_storage(row['sourceVersions'][row['sourceRevision']]['originalPath'], 'u')
-    failed = source_api.get_course_foundation('c', uid='u')
+    failed = source_api._load_document_foundation('c', uid='u')
     assert failed['ready'] is False
     assert failed['failedDocumentIds'] == [doc]
 
@@ -211,7 +211,7 @@ def test_original_view_rechecks_owner_after_download(source_api, library, monkey
     assert response.status_code == 404
     assert not response.content.startswith(b'%PDF')
 
-def test_readiness_rechecks_document_after_artifact_io(source_api, library, monkeypatch):
+def test_authoritative_readiness_rechecks_document_after_artifact_io(source_api, library, monkeypatch):
     doc = complete(library)
     db = library.database
     status = source_api.get_course_foundation('c', uid='u')
@@ -223,5 +223,5 @@ def test_readiness_rechecks_document_after_artifact_io(source_api, library, monk
         if path == original: db.delete_document(doc)
         return result
     monkeypatch.setattr(db, 'download_file_from_storage', delete_during_read)
-    result = source_api.get_course_foundation('c', uid='u')
+    result = source_api._load_document_foundation('c', uid='u')
     assert result['ready'] is False

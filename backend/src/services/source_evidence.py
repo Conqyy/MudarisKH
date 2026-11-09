@@ -92,7 +92,8 @@ class SourceEvidence:
         packet['imageParts'] = parts
         return packet
 
-    def _request_messages(self, batch, policy, data=None, *, strict=False):
+    def _request_messages(self, batch, policy, data=None, *, strict=False, request_options=None,
+                          packet_transform=None):
         packet = self._materialize(batch)
         images = packet.pop('imageParts')
         if strict:
@@ -114,6 +115,8 @@ class SourceEvidence:
                     raise ValueError('Original supporting images are unavailable')
                 images.extend(supporting_images)
             packet['task'] = task
+        if packet_transform is not None:
+            packet = packet_transform(packet)
         serialized = source_bundle_text(packet)
         if strict:
             if len(images) > min(self.image_budget, 8):
@@ -121,21 +124,28 @@ class SourceEvidence:
             text_messages = [{'role': 'system', 'content': policy + SOURCE_POLICY},
                 {'role': 'user', 'content': [{'type': 'text', 'text': serialized},
                     *[{'type': 'image_url', 'image_url': {'url': ''}} for _ in images]]}]
-            if len(json.dumps(text_messages, ensure_ascii=False, separators=(',', ':'))) > 24000:
+            request_size = len(json.dumps(text_messages, ensure_ascii=False, separators=(',', ':')))
+            if request_options:
+                request_size += len(json.dumps(request_options, ensure_ascii=False, separators=(',', ':')))
+            if request_size > 24000:
                 raise ValueError('Original request exceeds 24,000 text characters; split the source request')
         elif len(serialized) > max(self.text_budget, 48000):
             raise ValueError('Source reader request exceeds its budget; select fewer sources or split them.')
         return [{'role': 'system', 'content': policy + SOURCE_POLICY},
                 {'role': 'user', 'content': [{'type': 'text', 'text': serialized}, *images]}]
 
-    def _request(self, batch, policy, data=None, *, on_response=None, strict=False):
-        messages = self._request_messages(batch, policy, data, strict=strict)
+    def _request(self, batch, policy, data=None, *, on_response=None, strict=False,
+                 request_options=None, response_decoder=None, packet_transform=None):
+        messages = self._request_messages(batch, policy, data, strict=strict,
+            request_options=request_options, packet_transform=packet_transform)
         answer = chat_with_retry(self.client, model=self.model,
             messages=messages,
-            temperature=0, max_tokens=8000)
+            temperature=0, max_tokens=8000, **(request_options or {}))
         if on_response is not None:
             on_response()
         result = extract_json_object(response_text(answer))
+        if response_decoder is not None:
+            result = response_decoder(result)
         # This ledger is derived solely from the exact successful call above.
         supplied = deepcopy(batch['evidence'])
         for entry in supplied:
@@ -149,12 +159,22 @@ class SourceEvidence:
         """Read bounded originals with a returned-completion accounting hook."""
         if not isinstance(policy, str) or not isinstance(task, dict):
             raise ValueError('Original read requires policy and task data')
-        return self._request(batch, policy, task, on_response=on_response, strict=True)
+        from src.supporting.alignment_output import (
+            alignment_request_policy, alignment_response_options, decode_alignment_response, encode_alignment_packet)
+        options = alignment_response_options(batch, task)
+        return self._request(batch, alignment_request_policy(policy, task), task,
+            on_response=on_response, strict=True, request_options=options,
+            packet_transform=encode_alignment_packet if options else None,
+            response_decoder=(lambda value: decode_alignment_response(value, batch, task)) if options else None)
 
     def original_batch_fits(self, batch: dict, *, policy: str, task: dict) -> bool:
         """Measure the exact strict request without calling the provider."""
+        from src.supporting.alignment_output import (
+            alignment_request_policy, alignment_response_options, encode_alignment_packet)
         try:
-            self._request_messages(batch, policy, task, strict=True)
+            self._request_messages(batch, alignment_request_policy(policy, task), task, strict=True,
+                request_options=alignment_response_options(batch, task),
+                packet_transform=encode_alignment_packet)
         except ValueError as exc:
             if str(exc).startswith(('Original image count exceeds eight',
                                     'Original request exceeds 24,000 text characters')):

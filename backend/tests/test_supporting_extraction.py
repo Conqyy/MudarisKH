@@ -3,6 +3,7 @@ import copy
 import importlib
 import io
 import json
+import re
 from types import SimpleNamespace
 
 import pymupdf as fitz
@@ -72,6 +73,16 @@ def item(anchor, text='Explain trees', *, item_type='question', parent=None, mar
             'choices': [], 'givenData': [], 'contextOrigins': [], 'proofs': [anchor], 'requirements': [requirement]}
 
 
+def nonacademic_page_item(manifest, number=1):
+    unit = manifest['units'][number - 1]
+    proofs = ([proof(manifest, number)] if unit['text'].strip() else [])
+    if unit['visualAssets']:
+        proofs.append(proof(manifest, number, visual=True))
+    retained = item(proofs[0], unit['text'] or 'Original nonacademic page', item_type='nonacademic')
+    retained.update(proofs=proofs, requirements=[], printedLabel=None)
+    return retained
+
+
 def page(items=(), *, start=False, title='Final', role='questions', disposition='readable'):
     return {'disposition': disposition, 'pageRole': role,
             'paper': {'startsPaper': start, 'title': title, 'examType': 'final', 'totalMarks': None,
@@ -94,9 +105,61 @@ class Provider:
                    sum(len(p.get('text', '')) for p in m['content']) for m in kwargs['messages']) <= 24000
         assert sum(p['type'] == 'image_url' for p in parts) <= 8
         rows = self.reconciliation if request['stage'] == 'reconcile' else self.rows
-        key = request['source']['ref']['unitId']
-        value = rows(request) if callable(rows) else rows[key]
+        key = request['sourceReferences'][request['source']['ref']]['unitId']
+        # Fixture authors work with academic originals, not navigation markers.
+        # Keep the actual request in calls for budget/transport assertions.
+        original_request = copy.deepcopy(request)
+        for name in ('source', 'previous'):
+            record = original_request.get(name)
+            if record is not None:
+                record['ref'] = original_request['sourceReferences'][record['ref']]
+            for span in (record or {}).get('ranges', []):
+                span['text'] = re.sub(r'\[/?t_[0-9a-f]{16}\]', '', span['text'])
+        value = rows(original_request) if callable(rows) else rows[key]
+        value = provider_wire_response(value, request)
         return SimpleNamespace(choices=[SimpleNamespace(finish_reason='stop', message=SimpleNamespace(content=json.dumps(value)))])
+
+
+def provider_wire_response(value, request):
+    """Fixtures model the new wire identity without repairing malformed content."""
+    references = request.get('sourceReferences')
+    if references is None:
+        return value
+    source = request.get('source') or {}
+    source_ref = references.get(source.get('ref'), source.get('ref')) if isinstance(source.get('ref'), str) else source.get('ref')
+
+    def is_current(proof):
+        if not isinstance(proof, dict):
+            return False
+        ref = proof.get('ref')
+        if isinstance(ref, str):
+            ref = references.get(ref, ref)
+        if ref != source_ref:
+            return False
+        if proof.get('type') == 'visual_region':
+            return proof.get('assetId') in source.get('assetIds', [])
+        if proof.get('type') != 'text_span' or type(proof.get('start')) is not int or type(proof.get('end')) is not int:
+            return False
+        return any(span['field'] == proof.get('field') and span['start'] <= proof['start'] < proof['end'] <= span['end']
+                   for span in source.get('ranges', []))
+
+    def encode(value):
+        if isinstance(value, dict):
+            result = {key: next((alias for alias, ref in references.items() if ref == row), 'foreign')
+                    if key == 'ref' and isinstance(row, dict) else encode(row)
+                    for key, row in value.items()}
+            if isinstance(value.get('proofs'), list):
+                proofs = value['proofs']
+                selected = next((index for index, proof in enumerate(proofs) if is_current(proof)), 0)
+                # Invalid fixtures retain their existing wrong/missing proof;
+                # the adapter must not invent valid current evidence for them.
+                result['proofs'] = {'current': encode(proofs[selected]) if proofs else None,
+                                    'context': [encode(proof) for index, proof in enumerate(proofs) if index != selected]}
+            return result
+        if isinstance(value, list):
+            return [encode(row) for row in value]
+        return value
+    return encode(value)
 
 
 def run(raw, *, kind='historical_exam', file_type='pdf', rows=None, reconciliation=None, **kwargs):
@@ -122,26 +185,30 @@ def test_ten_papers_mixed_numbering_and_answer_key_have_distinct_original_identi
     def rows(m):
         result = {}
         for n in range(1, 12):
-            questions = [item(proof(m, n))] if n <= 10 else []
+            questions = [item(proof(m, n))] if n <= 10 else [nonacademic_page_item(m, n)]
             for question in questions:
-                question['printedLabel'] = 'I' if n % 2 else '1'
+                if question['itemType'] == 'question':
+                    question['printedLabel'] = 'I' if n % 2 else '1'
             result[f'p{n:04d}'] = page(questions, start=n <= 10, title=f'Final {min(n,10)}',
                                      role='questions' if n <= 10 else 'answer_key')
         return result
     result, provider, manifest, _ = run(raw, rows=rows)
     assert result['extractionCoverage']['complete'] is True
     assert len(result['papers']) == 10
-    assert len({i['id'] for i in result['items']}) == len(result['items']) == 10
+    assert len({i['id'] for i in result['items']}) == len(result['items']) == 11
     assert repeated_answer_key_text_not_counted_as_question(result)
-    assert [i['printedLabel'] for i in result['items']] == ['I', '1']*5
+    assert [i['printedLabel'] for i in result['items'] if i['itemType'] == 'question'] == ['I', '1']*5
     assert all(i['printedMarks'] is None for i in result['items'])
     assert manifest == validate_supporting_manifest(manifest)
     for stage in ('extract', 'reconcile'):
         requests = [json.loads(c['messages'][1]['content'][0]['text']) for c in provider.calls]
-        assert [r['source']['ref']['unitId'] for r in requests if r['stage'] == stage] == [f'p{n:04d}' for n in range(1, 12)]
+        assert [r['sourceReferences'][r['source']['ref']]['unitId'] for r in requests if r['stage'] == stage] == [f'p{n:04d}' for n in range(1, 12)]
     next_call = provider.calls[1]['messages'][1]['content']
-    assert json.loads(next_call[0]['text'])['previous']['ref']['unitId'] == 'p0001'
-    assert next_call[1]['image_url']['url'] == provider.calls[0]['messages'][1]['content'][1]['image_url']['url']
+    next_request = json.loads(next_call[0]['text'])
+    assert next_request['sourceReferences'][next_request['previous']['ref']]['unitId'] == 'p0001'
+    previous_image = next(part for part in next_call if part['type'] == 'image_url')
+    first_image = next(part for part in provider.calls[0]['messages'][1]['content'] if part['type'] == 'image_url')
+    assert previous_image['image_url']['url'] == first_image['image_url']['url']
 
 
 def test_photo_and_vector_pages_keep_original_visual_proofs():
@@ -179,18 +246,20 @@ def test_scanned_tutorial_reaches_unique_late_exercise_and_cross_page_subpart():
     raw = pdf(['Course administration: exam-room instructions']*10 + ['Question 1: Unique late problem [10 marks]', '(a) Late subpart'], scanned=True)
     def rows(m):
         anchor = proof(m, 11, visual=True)
-        result = {f'p{n:04d}': page([], role='other', disposition='nonacademic') for n in range(1, 11)}
+        result = {f'p{n:04d}': page([nonacademic_page_item(m, n)], role='other', disposition='nonacademic')
+                  for n in range(1, 11)}
         result['p0011'] = page([item(anchor, 'Unique late problem', marks=10)])
         result['p0012'] = page([item(proof(m, 12, visual=True), 'Late subpart', item_type='subpart',
                                           parent={'origin': anchor, 'itemType': 'question'})])
         return result
     result, _, _, _ = run(raw, kind='tutorial', rows=rows)
     assert result['extractionCoverage']['complete']
-    assert len(result['items']) == 2
+    academic_items = [row for row in result['items'] if row['itemType'] != 'nonacademic']
+    assert len(academic_items) == 2
     late_subpart_id = next(i['id'] for i in result['items'] if i['text'] == 'Late subpart')
     assert late_subpart_id in {i['id'] for i in result['items']}
     child = next(i for i in result['items'] if i['id'] == late_subpart_id)
-    assert child['parentId'] == result['items'][0]['id']
+    assert child['parentId'] == academic_items[0]['id']
     assert child['printedMarks'] is None
 
 
@@ -261,7 +330,7 @@ def test_long_text_question_keeps_every_character_across_windows():
     for stage in ('extract', 'reconcile'):
         ranges = [r['source']['ranges'][0] for call in provider.calls
                   if (r := json.loads(call['messages'][1]['content'][0]['text']))['stage'] == stage]
-        assert ''.join(r['text'] for r in ranges) == manifest['units'][0]['text']
+        assert ''.join(re.sub(r'\[/?t_[0-9a-f]{16}\]', '', r['text']) for r in ranges) == manifest['units'][0]['text']
         assert ranges[0]['start'] == 0 and ranges[-1]['end'] == len(original_text)
 
 
@@ -439,7 +508,8 @@ def test_more_than_eight_office_assets_are_all_submitted_and_reconciled():
 def test_original_dispositions_and_answer_key_role_survive_in_coverage():
     raw = pdf(['Question 1', 'Answers 1'])
     result, _, _, _ = run(raw, rows=lambda m: {
-        'p0001': page([item(proof(m))], start=True), 'p0002': page([], role='answer_key')})
+        'p0001': page([item(proof(m))], start=True),
+        'p0002': page([nonacademic_page_item(m, 2)], role='answer_key')})
     assert result['extractionCoverage']['complete']
     assert result['extractionCoverage']['pageRoles']['p0002'] == ['answer_key']
     assert result['extractionCoverage']['dispositions']['p0001'] == ['readable']
@@ -494,7 +564,7 @@ def test_explicit_retry_rechecks_disagreement_without_repeating_valid_prefix():
         resume=states[-1], model_calls=0)
     assert retried['extractionCoverage']['complete']
     extract_requests = [json.loads(c['messages'][1]['content'][0]['text']) for c in provider.calls]
-    assert [r['source']['ref']['unitId'] for r in extract_requests if r['stage'] == 'extract'] == ['p0002']
+    assert [r['sourceReferences'][r['source']['ref']]['unitId'] for r in extract_requests if r['stage'] == 'extract'] == ['p0002']
 
 
 def test_duplicate_atomic_requirement_cannot_produce_complete_unpublishable_report():
@@ -655,7 +725,8 @@ def test_structured_retry_reuses_full_available_navigation_budget():
     raw = pdf(['Question 1'])
     manifest = extractor().prepare_pages(IDENTITY, raw, 'pdf')
     scope = source_scope(['Algorithms definition'])
-    scope['documents'][0]['guide']['sections'][0]['purpose'] = 'Original navigation '*600
+    # Reserve the strict response schema as well as the original/context payload.
+    scope['documents'][0]['guide']['sections'][0]['purpose'] = 'Original navigation '*400
     source_reader = SourceEvidence(scope, object(), 'u', 'c', None, 'no-lecture-model-calls')
     provider = Provider({'p0001': page([item(proof(manifest))], start=True)})
     calls = 0

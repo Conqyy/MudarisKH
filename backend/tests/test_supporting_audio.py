@@ -249,6 +249,7 @@ def test_structured_transcription_requires_configured_provider_key(monkeypatch):
 
 def test_notes_reanalysis_reaches_late_statement_and_preserves_note_source():
     from .test_source_context import source_scope
+    from .test_supporting_extraction import provider_wire_response
     from src.services.source_evidence import SourceEvidence
     original_notes = ('Administration and schedule. ' * 4500) + ' \nProfessor said AVL rotations are on the midterm.'
     manifest = build_notes_manifest(NOTES, original_notes)
@@ -264,19 +265,31 @@ def test_notes_reanalysis_reaches_late_statement_and_preserves_note_source():
             request = json.loads(kwargs['messages'][1]['content'][0]['text'])
             source = request['source']
             window = source['ranges'][0]
+            source_ref = request['sourceReferences'][source['sourceId']]
+            unit = next(unit for unit in manifest['units'] if unit['unitId'] == source_ref['unitId'])
+            original_window = unit['text'][window['start']:window['end']]
             items, topics = [], []
-            if late in window['text']:
-                start = window['start'] + window['text'].index(late)
-                proof = {'type': 'text_span', 'ref': source['ref'], 'field': 'text',
+            academic = late in original_window
+            if academic:
+                start = window['start'] + original_window.index(late)
+                proof = {'type': 'text_span', 'ref': source['sourceId'], 'field': 'text',
                          'start': start, 'end': start + len(late), 'quote': late}
                 req = {'origin': proof, 'text': late, 'category': 'concept', 'proofs': [proof]}
-                items = [{'origin': proof, 'itemType': 'emphasis', 'parent': None, 'text': late,
+                items = [{'origin': proof, 'itemType': 'emphasis', 'parent': None, 'text': late, 'textJoin': '\n',
                           'printedLabel': None, 'printedMarks': None, 'questionType': None,
                           'choices': [], 'givenData': [], 'contextOrigins': [], 'proofs': [proof], 'requirements': [req]}]
                 topics = [{'text': 'AVL rotations', 'items': [{'origin': proof, 'itemType': 'emphasis'}],
                            'requirements': [{'origin': proof, 'text': late, 'category': 'concept'}], 'proofs': [proof]}]
-            row = {'disposition': 'readable' if items else 'nonacademic', 'pageRole': 'other',
+            else:
+                proof = {'type': 'text_span', 'ref': source['sourceId'], 'field': 'text',
+                         'start': window['start'], 'end': window['end'], 'quote': original_window}
+                items = [{'origin': proof, 'itemType': 'nonacademic', 'parent': None,
+                          'text': original_window, 'printedLabel': None, 'printedMarks': None,
+                          'questionType': None, 'choices': [], 'givenData': [], 'contextOrigins': [],
+                          'proofs': [proof], 'requirements': []}]
+            row = {'disposition': 'readable' if academic else 'nonacademic', 'pageRole': 'other',
                    'paper': None, 'items': items, 'sharedContexts': [], 'topics': topics}
+            row = provider_wire_response(row, request)
             return SimpleNamespace(choices=[SimpleNamespace(finish_reason='stop',
                 message=SimpleNamespace(content=json.dumps(row, ensure_ascii=False)))])
 
@@ -286,11 +299,13 @@ def test_notes_reanalysis_reaches_late_statement_and_preserves_note_source():
     first = extract_teaching_items(manifest, client=provider, model='fixture', lecture_reader=reader,
                                    checkpoint=checkpoints.append, course_title='Algorithms')
     assert first['extractionCoverage']['complete'] is True
-    assert first['items'][0]['itemType'] == 'emphasis'
-    proof = first['items'][0]['supportingSourceProofs'][0]
+    academic_items = [item for item in first['items'] if item['itemType'] != 'nonacademic']
+    assert len(academic_items) == 1 and academic_items[0]['itemType'] == 'emphasis'
+    assert any(item['itemType'] == 'nonacademic' for item in first['items'])
+    proof = academic_items[0]['supportingSourceProofs'][0]
     assert proof['quote'] == original_notes[proof['start']:proof['end']] == late
     assert proof['ref']['kind'] == 'notes'
-    assert first['topics'][0]['requirementIds'] == [first['items'][0]['requirements'][0]['id']]
+    assert first['topics'][0]['requirementIds'] == [academic_items[0]['requirements'][0]['id']]
     assert any(json.loads(c['messages'][1]['content'][0]['text'])['source']['ranges'][0]['start'] >= 120000
                for c in provider.calls)
     again = extract_teaching_items(manifest, client=provider, model='fixture', lecture_reader=reader,

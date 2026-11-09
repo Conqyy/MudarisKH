@@ -563,7 +563,7 @@ def test_strict_planner_reads_page_asset_even_when_extracted_text_is_blank():
     assert all(entry['disposition'] == 'candidate' for batch in strict for entry in batch['evidence'])
 
 
-def test_malformed_response_spends_one_call_without_review_and_resume_keeps_spent_count(monkeypatch):
+def test_malformed_response_counts_bounded_repair_without_review_and_resume_keeps_spent_count(monkeypatch):
     from src.supporting.alignment import SupportingAligner
 
     scope = source_scope(['Lists are taught.'])
@@ -576,7 +576,7 @@ def test_malformed_response_spends_one_call_without_review_and_resume_keeps_spen
     interrupted = SupportingAligner(reader(scope), SupportingOriginals(manifest)).align(
         manifest['identity'], inventory, scope=scope, checkpoint=checkpoints.append)
     assert interrupted['alignments'][0]['requirements'][0]['relation'] == 'unverified'
-    assert checkpoints[-1]['modelCalls'] == 1
+    assert checkpoints[-1]['modelCalls'] == 2
     assert checkpoints[-1]['ledgers']['r1'] == []
 
     observed_before_calls = []
@@ -595,9 +595,9 @@ def test_malformed_response_spends_one_call_without_review_and_resume_keeps_spen
     resumed = SupportingAligner(reader(scope), SupportingOriginals(manifest)).align(
         manifest['identity'], inventory, scope=scope, checkpoint=checkpoints.append,
         resume=checkpoints[-1], model_call_budget=8)
-    assert observed_before_calls[0] == 1
+    assert observed_before_calls[0] == 2
     assert resumed['alignments'][0]['requirements'][0]['relation'] == 'not_found'
-    assert checkpoints[-1]['modelCalls'] > 1
+    assert checkpoints[-1]['modelCalls'] > 2
 
 
 def test_transport_failure_does_not_spend_returned_completion_budget(monkeypatch):
@@ -930,7 +930,7 @@ def test_deduction_combines_premises_from_separate_original_batches(monkeypatch)
         json.dumps(proof, sort_keys=True) for proof in proofs}
 
 
-def test_indivisible_combined_premises_fail_without_provider_verification(monkeypatch):
+def test_indivisible_combined_premises_fail_without_oversized_provider_verification(monkeypatch):
     from src.supporting.alignment import SupportingAligner
     from src.supporting.contracts import digest
     from src.utils.source_contracts import build_source_manifest, guide_digest
@@ -971,7 +971,10 @@ def test_indivisible_combined_premises_fail_without_provider_verification(monkey
                 'reason': 'Actual deduction request'}]})
         if stage == 'verify':
             verify_calls.append(packet)
-            raise AssertionError('Oversized combined proof must fail before provider submission')
+            nominated = packet['task']['nominatedProofs']['r1']['lectureProofs']
+            assert len(nominated) < 9, 'Oversized combined proof must fail before provider submission'
+            return response({'judgments': [{'targetId': 'r1', 'verdict': 'reject',
+                'lectureProofs': [], 'reason': 'The partial focused evidence omits required premises'}]})
         complete_units = [entry['ref']['unitId'] for entry in packet['evidence'] if entry['images']]
         return response({'judgments': [{'targetId': 'r1',
             'verdict': 'premise' if complete_units else 'no_support',
@@ -982,7 +985,8 @@ def test_indivisible_combined_premises_fail_without_provider_verification(monkey
     finding = SupportingAligner(reader(scope), SupportingOriginals(manifest)).align(
         manifest['identity'], inventory, scope=scope, checkpoint=lambda state: None,
         model_call_budget=64)['alignments'][0]['requirements'][0]
-    assert verify_calls == []
+    assert len(verify_calls) == 1
+    assert len(verify_calls[0]['task']['nominatedProofs']['r1']['lectureProofs']) < 9
     assert finding['relation'] == 'unverified'
     assert finding['reviewCoverage']['complete'] is True
     assert 'split' in finding['reason'].lower()

@@ -155,6 +155,47 @@ def test_deletion_cleans_versions_and_fences_old_claim(library):
     with pytest.raises(ValueError): queue_claim(library.repository)
 
 
+@pytest.mark.parametrize('failure', ['artifact', 'namespace', 'descriptor', 'row'])
+def test_deletion_that_fails_partway_can_be_finished(library, monkeypatch, failure):
+    manifest, claim = prepare(library)
+    source = library.repository.get_version(identity(), 'source', manifest['sourceRevision'])
+    report = library.save_report(identity(), claim, report_for(library, manifest))
+    paths = source['supportingArtifactPaths'] + report['supportingArtifactPaths']
+    db = library.database
+    target = {'artifact': 'delete_file_from_storage', 'namespace': '_cleanup_storage_namespace',
+              'descriptor': '_flat_delete', 'row': '_flat_delete'}[failure]
+    original = getattr(db, target)
+
+    def interrupted(*args, **kwargs):
+        if failure == 'row' and args[0] != 'historical_exams':
+            return original(*args, **kwargs)
+        raise ConnectionError('storage unavailable')
+    monkeypatch.setattr(db, target, interrupted)
+    with pytest.raises(ConnectionError):
+        db.delete_historical_exam('source')
+    monkeypatch.setattr(db, target, original)
+
+    stalled = db.get_historical_exam('source')
+    assert stalled['status'] == 'deleting' and stalled['processingJob'] == {}
+    # The tombstone is written before any cleanup, so stale workers stay fenced
+    # while the delete is unfinished.
+    assert not library.repository.checkpoint(identity(), claim, changes={}, now_ms=int(time.time()*1000))
+    with pytest.raises(ValueError): queue_claim(library.repository)
+    with pytest.raises(ValueError): library.repository.get_owned(identity())
+
+    # Finishing re-runs the same delete the material's DELETE endpoint uses.
+    assert db.delete_historical_exam('source')['materials'] == 1
+    assert db.get_historical_exam('source') == {}
+    from src.database import firebase_client
+    from src.utils.storage_paths import resolve_storage_path
+    for path in paths:
+        assert not resolve_storage_path(path, 'u', root=firebase_client.UPLOADS_ROOT).exists()
+    remaining = db._flat_query_by_course('supporting_material_versions', 'c', 'u')
+    assert [row.get('versionKind') for row in remaining] == ['tombstone']
+    with pytest.raises(ValueError): queue_claim(library.repository)
+    with pytest.raises(ValueError): library.load_source(identity())
+
+
 def test_hashed_artifact_prefix_cannot_match_adjacent_material(library):
     from src.utils.storage_paths import build_supporting_artifact_path
     manifest, claim = prepare(library)

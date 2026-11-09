@@ -1,5 +1,5 @@
 """Durable preparation, extraction, alignment, and publication workflow."""
-from copy import deepcopy
+from copy import copy, deepcopy
 import hashlib
 from pathlib import Path
 import tempfile
@@ -10,6 +10,7 @@ import uuid
 from src.supporting.contracts import digest, validate_identity
 from src.supporting.alignment import SupportingAligner
 from src.supporting.audio_sources import build_audio_manifest, build_notes_manifest
+from src.supporting.evidence_cache import JobEvidenceCache
 from src.utils.storage_paths import build_supporting_artifact_path
 
 
@@ -80,15 +81,19 @@ class SupportingWorkflow:
         changes = {"stage": stage, "modelCalls": state.get("modelCalls", 0)}
         if not self.repository.checkpoint(identity, job, changes=changes, now_ms=self._now()):
             raise RuntimeError("Supporting analysis claim changed")
-        version = self.library.save_checkpoint(identity, job, deepcopy(state))
-        changes = {"checkpointRevision": version["revision"]}
-        if stage == 'extracting':
-            changes['extractionRevision'] = version['revision']
+        changes = {}
+        if isinstance(state.get('progress'), dict):
+            changes['progress'] = deepcopy(state['progress'])
+        if state.get('stage') in ('extract', 'reconcile', 'complete', 'align'):
+            changes['phase'] = state['stage']
         if inventory_revision is not None:
             changes["inventoryRevision"] = inventory_revision
-        if not self.repository.checkpoint(identity, job, changes=changes, now_ms=self._now()):
-            raise RuntimeError("Supporting analysis claim changed")
-        return version
+        # Adoption already fences the live claim, source and lecture foundation.
+        # Publish its exact progress/pointers there, rather than a second write
+        # that can fail after the durable checkpoint has already been adopted.
+        return self.library.save_checkpoint(identity, job, deepcopy(state),
+            publication_changes=changes,
+            revision_fields=('extractionRevision',) if stage == 'extracting' else ())
 
     def _heartbeat(self, identity, job, stop):
         while not stop.wait(60):
@@ -238,11 +243,22 @@ class SupportingWorkflow:
             if reader.scope.get('foundationRevision') != job['foundationRevision']:
                 raise ValueError('Lecture foundation changed; confirm documents and retry')
 
+            def live_evidence():
+                if not self.repository.checkpoint(identity, job, changes={}, now_ms=self._now()):
+                    raise RuntimeError('Supporting analysis claim changed')
+
+            # Reuse immutable evidence only within this live claim. Every cache
+            # hit still crosses the ownership, deletion and foundation fence.
+            evidence_library = JobEvidenceCache(self.library, live_evidence)
+            if hasattr(reader, 'library'):
+                reader = copy(reader)
+                reader.library = JobEvidenceCache(reader.library, live_evidence)
+
             manifest = None
             source_revision = (row.get('supportingAnalysis') or {}).get('sourceRevision')
             if source_revision:
                 try:
-                    manifest = self.library.load_source(identity, source_revision)
+                    manifest = evidence_library.load_source(identity, source_revision)
                     if manifest.get('originalDigest') != job.get('sourceDigest'):
                         raise ValueError('Prepared supporting source no longer matches the queued original')
                 except ValueError:
@@ -284,7 +300,7 @@ class SupportingWorkflow:
                 def render(unit):
                     ref = {'kind': identity['kind'], 'materialId': identity['materialId'],
                            'sourceRevision': manifest['sourceRevision'], 'unitId': unit['unitId']}
-                    return self.library.render_reference(identity, ref)
+                    return evidence_library.render_reference(identity, ref)
 
                 course = self.repository.database.get_owned_course(identity['userId'], identity['courseId'])
                 inventory = self.extractor.extract(manifest,
@@ -295,6 +311,16 @@ class SupportingWorkflow:
                 if inventory.get('extractionCoverage', {}).get('complete') is True:
                     inventory_revision = self._inventory_checkpoint(
                         identity, job, inventory, calls, manifest['sourceRevision'])
+
+            if inventory.get('extractionCoverage', {}).get('complete') is not True:
+                # An unfinished inventory may contain unresolved relationships.
+                # Keep its exact extraction checkpoint for retry; it cannot yet
+                # authorize lecture alignment or publication as a study report.
+                from src.supporting.library import _incomplete_message
+                return self.repository.checkpoint(identity, job,
+                    changes={'stage': 'incomplete', 'error': _incomplete_message({
+                        'extraction': inventory.get('extractionCoverage') or {}}, report_available=False)},
+                    now_ms=self._now())
 
             runtime = self.repository.get_owned(identity)['processingJob']
             calls = runtime['modelCalls']
@@ -309,10 +335,17 @@ class SupportingWorkflow:
                     pass
 
             def alignment_checkpoint(state):
+                state = deepcopy(state)
+                extracted = inventory.get('extractionCoverage') or {}
+                units = set(extracted.get('unitIds') or [])
+                accounted = set(extracted.get('accountedUnitIds') or
+                                (units if extracted.get('complete') is True else []))
+                state['progress'] = {'completedUnits': len((accounted & units) -
+                    set(extracted.get('unresolvedUnitIds') or [])), 'totalUnits': len(units)}
                 self._persist_checkpoint(identity, job, 'aligning', state,
                                          inventory_revision=inventory_revision)
 
-            report = SupportingAligner(reader, self.library).align(identity, inventory,
+            report = SupportingAligner(reader, evidence_library).align(identity, inventory,
                 scope=reader.scope, checkpoint=alignment_checkpoint,
                 resume_revision=resume_revision, model_call_budget=budget, model_calls=calls)
             self.library.save_report(identity, job, report)
