@@ -61,21 +61,6 @@ export interface Course {
   createdAt: number;
 }
 
-export interface Lecture {
-  id: string;
-  courseId: string;
-  userId: string;
-  title: string;
-  duration: number;
-  uploadedAt: number;
-  status: "processing" | "ready" | "failed";
-  audioUrl?: string;
-  transcript?: any[];
-  summary?: any;
-  quiz?: any[];
-  flashcards?: any[];
-}
-
 // ============ DOCUMENTS (Model 1) ============
 export interface CourseDocument {
   id: string;
@@ -322,20 +307,6 @@ export async function deleteCourse(courseId: string): Promise<void> {
   const response = await apiFetch(`${API_URL}/api/courses/${encodeURIComponent(courseId)}`, { method: "DELETE" });
   await requireDeletionSuccess(response, "course");
   if (uid) clearDeletedActivity(uid, courseId);
-}
-
-// ============ LECTURES ============
-export async function getLecture(lectureId: string): Promise<Lecture | null> {
-  const snapshot = await getDoc(doc(db, "lectures", lectureId));
-  if (!snapshot.exists()) return null;
-  return { id: snapshot.id, ...snapshot.data() } as Lecture;
-}
-
-export async function updateLecture(
-  lectureId: string,
-  data: Partial<Lecture>
-): Promise<void> {
-  await updateDoc(doc(db, "lectures", lectureId), stripUndefinedDeep(data));
 }
 
 // NOTE: documents, audio recordings, historical exams and tutorials are

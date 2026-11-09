@@ -82,11 +82,6 @@ def extract_pdf_text(file_bytes: bytes) -> str:
     return best
 
 
-def is_meaningful_text(text: str) -> bool:
-    """True if the extracted text has enough content to be worth analyzing."""
-    return bool(text) and len(text.strip()) >= _MIN_MEANINGFUL
-
-
 def image_to_image_uri(file_bytes: bytes) -> str:
     """Normalize an uploaded photo/image into a PNG data-URI a vision model can
     read. Applies EXIF orientation (so sideways phone photos are upright),
@@ -108,33 +103,6 @@ def image_to_image_uri(file_bytes: bytes) -> str:
     except Exception as e:
         logger.warning('Image normalization failed: %s', type(e).__name__)
         raise ValueError('The uploaded image could not be decoded') from e
-
-
-def pdf_to_image_uris(file_bytes: bytes, max_pages: int = 8, zoom: float = 2.0) -> list:
-    """Render PDF pages to PNG data-URIs so a vision model can SEE the page —
-    including equations, diagrams, figures, and code that plain text extraction
-    misses. Returns [] if PyMuPDF is unavailable or rendering fails."""
-    try:
-        import base64
-        import fitz  # PyMuPDF
-    except Exception as e:  # pragma: no cover
-        logger.warning(f"PyMuPDF not available for rendering: {e}")
-        return []
-
-    uris = []
-    try:
-        with fitz.open(stream=file_bytes, filetype="pdf") as doc:
-            count = min(max(1, max_pages), len(doc))
-            indices = sorted({round(i * (len(doc) - 1) / max(1, count - 1)) for i in range(count)})
-            for index in indices:
-                page = doc[index]
-                pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
-                png = pix.tobytes("png")
-                uris.append("data:image/png;base64," + base64.b64encode(png).decode())
-    except Exception as e:
-        logger.warning(f"PDF->image render failed: {e}")
-        return []
-    return uris
 
 
 def extract_pdf_pages(file_bytes: bytes, max_pages: int = 160,

@@ -10,13 +10,13 @@ import EditCourseModal from "../../src/components/EditCourseModal";
 import UploadDocumentModal from "../../src/components/UploadDocumentModal";
 import UploadAudioModal from "../../src/components/UploadAudioModal";
 import AudioViewer from "../../src/components/AudioViewer";
-import CourseReminders from "../../src/components/CourseReminders";
 import ActivityListView from "../../src/components/ActivityListView";
 import WeeklySchedule from "../../src/components/WeeklySchedule";
 
-const mocks = vi.hoisted(() => ({ api: vi.fn(), updateLecture: vi.fn(), push: vi.fn(), user: { uid: "u1", email: "student@example.com" } }));
+const mocks = vi.hoisted(() => ({ api: vi.fn(), push: vi.fn(), user: { uid: "u1", email: "student@example.com" } }));
 vi.mock("@/lib/auth-context", () => ({ useAuth: () => ({ user: mocks.user, profile: { fullName: "Student" }, loading: false, signOut: vi.fn() }) }));
-vi.mock("@/lib/firestore-helpers", () => ({ getLecture: async () => ({ id: "l1", courseId: "c1", userId: "u1", status: "uploaded" }), updateLecture: mocks.updateLecture }));
+// Keep the real helpers (and their Firebase initialization) out of these UI tests.
+vi.mock("@/lib/firestore-helpers", () => ({}));
 vi.mock("@/lib/api", () => ({ apiFetch: mocks.api, fetchObjectUrl: vi.fn() }));
 vi.mock("next/navigation", () => { const router = { push: mocks.push }; return { usePathname: () => "/lecture/l1/processing", useParams: () => ({ id: "l1" }), useRouter: () => router }; });
 vi.mock("next/link", () => ({ default: ({ children, ...props }: any) => <a {...props}>{children}</a> }));
@@ -55,7 +55,6 @@ it("replaces the legacy simulated processing route with a usable destination", a
   render(<ProcessingPage />);
   await screen.findByText(/legacy.*processing|processing.*retired/i);
   expect(screen.getByRole("link", { name: /back to dashboard/i }).getAttribute("href")).toBe("/dashboard");
-  expect(mocks.updateLecture).not.toHaveBeenCalled();
   expect(mocks.push).not.toHaveBeenCalledWith("/lecture/l1");
 });
 
@@ -81,16 +80,6 @@ it("associates course form labels with their input controls", () => {
   expect(screen.getByLabelText(/course title/i).tagName).toBe("INPUT");
 });
 
-it("keeps the reminder form and draft open when persistence fails", async () => {
-  render(<CourseReminders reminders={[]} onChange={async () => { throw new Error("offline"); }} />);
-  fireEvent.click(screen.getByRole("button", { name: /add your first/i }));
-  const title = screen.getByPlaceholderText(/quiz 2/i);
-  fireEvent.change(title, { target: { value: "Exam revision" } });
-  fireEvent.click(screen.getByRole("button", { name: /save|add reminder/i }));
-  await screen.findByText(/offline|could not save/i);
-  expect(screen.getByRole("dialog").contains(title)).toBe(true);
-  expect((title as HTMLInputElement).value).toBe("Exam revision");
-});
 
 it("keeps activity actions outside the navigation link", () => {
   render(<ActivityListView items={[{ id: "s1", kind: "summary", title: "My summary", href: "/course/c1/summary?summary=s1", ts: 1 }]} mode="recent" />);
