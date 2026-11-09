@@ -15,9 +15,56 @@ function Probe({ courseId }: { courseId: string }) {
   return <><p role="status">{loading ? "Checking" : foundation?.ready ? "Unlocked" : "Locked"}</p><p>Revision: {foundation?.revision || "unknown"}</p>{error && <p role="alert">{error}</p>}<button onClick={() => void refresh()}>Refresh</button>{foundation?.state === "confirmation_required" && <button onClick={() => void confirm()}>Confirm</button>}</>;
 }
 beforeEach(() => { fake.api.mockReset(); fake.user = { uid: "student" }; });
-afterEach(() => { cleanup(); vi.useRealTimers(); });
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("foundation request lifecycle", () => {
+  it("does not recheck a fresh foundation when the file picker returns focus", async () => {
+    fake.api.mockResolvedValue(ready);
+    render(<Probe courseId="course" />);
+    await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Unlocked"));
+    fireEvent(window, new Event("focus"));
+    fireEvent(window, new Event("focus"));
+    expect(fake.api).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("status").textContent).toBe("Unlocked");
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => expect(fake.api).toHaveBeenCalledTimes(2));
+  });
+
+  it("reuses an unfinished focus check instead of aborting and restarting it", async () => {
+    const pending = deferred<typeof ready>();
+    let signal!: AbortSignal;
+    fake.api.mockImplementation((_url: string, init: RequestInit) => {
+      signal = init.signal as AbortSignal;
+      return pending.promise;
+    });
+    render(<Probe courseId="course" />);
+    fireEvent(window, new Event("focus"));
+    fireEvent(window, new Event("focus"));
+    expect(fake.api).toHaveBeenCalledTimes(1);
+    expect(signal.aborted).toBe(false);
+    await act(async () => pending.resolve(ready));
+    expect(screen.getByRole("status").textContent).toBe("Unlocked");
+  });
+
+  it("does not let a focus event cancel a confirmation in progress", async () => {
+    const pending = deferred<typeof ready>();
+    let signal!: AbortSignal;
+    fake.api.mockResolvedValueOnce({ ...ready, ready: false, state: "confirmation_required" })
+      .mockImplementationOnce((_url: string, init: RequestInit) => {
+        signal = init.signal as AbortSignal;
+        return pending.promise;
+      }).mockResolvedValue(ready);
+    render(<Probe courseId="course" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_001);
+    fireEvent(window, new Event("focus"));
+    expect(fake.api).toHaveBeenCalledTimes(2);
+    expect(signal.aborted).toBe(false);
+    await act(async () => pending.resolve(ready));
+    expect(screen.getByRole("status").textContent).toBe("Unlocked");
+    expect(fake.api).toHaveBeenCalledTimes(3);
+  });
+
   it("stays locked before an authoritative response and after a failed refresh", async () => {
     const pending = deferred<typeof ready>();
     fake.api.mockReturnValueOnce(pending.promise);
@@ -110,6 +157,7 @@ describe("foundation request lifecycle", () => {
     fake.api.mockResolvedValueOnce(ready).mockReturnValueOnce(background.promise);
     render(<Probe courseId="course" />);
     await waitFor(() => expect(screen.getByRole("status").textContent).toBe("Unlocked"));
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_001);
     fireEvent(window, new Event("focus"));
     expect(screen.getByRole("status").textContent).toBe("Checking");
     expect(screen.queryByText("Revision: current")).not.toBeNull();

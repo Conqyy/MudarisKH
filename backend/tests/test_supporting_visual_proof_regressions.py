@@ -67,10 +67,19 @@ def test_forged_search_proof_never_reaches_independent_verification(monkeypatch,
     assert checkpoints[-1]['ledgers']['r1'] == []
     assert checkpoints[-1]['error']
 
-    # Control: bypass the named proof/ref/range guards and the same fake answer
-    # enters independent verification. The assertions above would then fail.
+    # Control: bypass both transport decoding and the canonical proof/ref/range
+    # guards. The same forged answer then enters independent verification, so
+    # the real protection assertions above would fail without those boundaries.
+    monkeypatch.setattr('src.supporting.alignment_output.decode_alignment_response',
+                        lambda value, batch, task: deepcopy(value))
+    monkeypatch.setattr('src.supporting.alignment_output.alignment_response_options',
+                        lambda batch, task: {})
+    monkeypatch.setattr('src.supporting.alignment_output.encode_alignment_packet',
+                        lambda packet: deepcopy(packet))
     monkeypatch.setattr(alignment, 'validate_source_proof',
                         lambda proof, *, ref, unit: deepcopy(proof))
+    monkeypatch.setattr(alignment, 'validate_source_proof_shape',
+                        lambda proof, *, supporting: deepcopy(proof))
     monkeypatch.setattr(alignment, 'proof_in_supplied',
                         lambda proof, supplied: None)
     if damage == 'altered_ref':

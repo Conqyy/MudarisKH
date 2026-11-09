@@ -1,5 +1,7 @@
 "use client";
 
+import Icon from "@/components/Icon";
+import { useLang } from "@/lib/i18n";
 import { useState, KeyboardEvent } from "react";
 
 export interface ReorderableItem {
@@ -38,6 +40,7 @@ export default function ReorderableList<T extends ReorderableItem>({
   canClick,
   onDelete,
 }: Props<T>) {
+  const { t } = useLang();
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
 
@@ -111,150 +114,44 @@ export default function ReorderableList<T extends ReorderableItem>({
     }
   };
 
-  return (
-    <div className="bg-paper border border-line rounded-3xl overflow-hidden">
-      {rowError && !editingId && <p role="alert" className="p-3 text-sm text-accent">{rowError}</p>}
-      {items.map((item, idx) => {
-        const isEditing = editingId === item.id;
-        const isDragging = dragIndex === idx;
-        const isOver = overIndex === idx && dragIndex !== idx;
-        const clickable = !isEditing && canClick?.(item) && !!onItemClick;
-
-        return (
-          <div
-            key={item.id}
-            draggable={!isEditing && !reordering}
-            onDragStart={(e) => {
-              setDragIndex(idx);
-              e.dataTransfer.effectAllowed = "move";
-            }}
-            onDragOver={(e) => {
-              e.preventDefault();
-              e.dataTransfer.dropEffect = "move";
-              setOverIndex(idx);
-            }}
-            onDragLeave={() => {
-              setOverIndex((cur) => (cur === idx ? null : cur));
-            }}
-            onDrop={(e) => {
-              e.preventDefault();
-              handleDrop(idx);
-            }}
-            onDragEnd={() => {
-              setDragIndex(null);
-              setOverIndex(null);
-            }}
-            className={`flex items-center gap-3 p-5 transition ${
-              idx !== 0 ? "border-t border-line" : ""
-            } ${isDragging ? "opacity-40" : ""} ${
-              isOver ? "bg-accent/5 ring-1 ring-inset ring-accent/40" : ""
-            }`}
-          >
-            {/* Drag handle */}
-            <span
-              className="flex-shrink-0 text-ink-mute hover:text-ink cursor-grab active:cursor-grabbing select-none"
-              title="Drag to reorder"
-              aria-label="Drag to reorder"
-            >
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-                <circle cx="5" cy="3" r="1.4" />
-                <circle cx="11" cy="3" r="1.4" />
-                <circle cx="5" cy="8" r="1.4" />
-                <circle cx="11" cy="8" r="1.4" />
-                <circle cx="5" cy="13" r="1.4" />
-                <circle cx="11" cy="13" r="1.4" />
-              </svg>
-            </span>
-
-            {/* Icon */}
-            <div className="flex-shrink-0">{renderIcon(item)}</div>
-
-            {/* Title + meta */}
-            <div className="flex-1 min-w-0">
-              {isEditing ? (
-                <div>
-                  <div className="flex items-center gap-2">
-                    <input
-                      autoFocus
-                      type="text"
-                      value={editValue}
-                      onChange={(e) => setEditValue(e.target.value)}
-                      onKeyDown={(e) => onEditKeyDown(e, item.id)}
-                      maxLength={120}
-                      className="flex-1 min-w-0 px-3 py-1.5 border border-accent rounded-lg bg-bg text-sm focus:outline-none"
-                    />
-                    <button
-                      onClick={() => saveEdit(item.id)}
-                      disabled={savingId === item.id}
-                      className="flex-shrink-0 w-8 h-8 rounded-full bg-sage text-paper text-sm flex items-center justify-center hover:bg-ink transition disabled:opacity-50"
-                      title="Save"
-                    >
-                      {savingId === item.id ? "…" : "✓"}
-                    </button>
-                    <button
-                      onClick={cancelEdit}
-                      disabled={savingId === item.id}
-                      className="flex-shrink-0 w-8 h-8 rounded-full bg-bg-alt text-ink-soft text-sm flex items-center justify-center hover:bg-line transition disabled:opacity-50"
-                      title="Cancel"
-                    >
-                      ×
-                    </button>
-                  </div>
-                  {rowError && (
-                    <div className="text-xs text-accent mt-1.5">{rowError}</div>
-                  )}
-                </div>
-              ) : (
-                <div
-                  role={clickable ? "button" : undefined}
-                  tabIndex={clickable ? 0 : undefined}
-                  onKeyDown={(e) => { if (clickable && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onItemClick!(item); } }}
-                  onClick={() => clickable && onItemClick!(item)}
-                  className={`${clickable ? "cursor-pointer group" : ""}`}
-                >
-                  <div
-                    className={`font-medium truncate ${
-                      clickable ? "group-hover:text-accent transition" : ""
-                    }`}
-                  >
-                    {item.title}
-                  </div>
-                  <div className="text-xs text-ink-mute font-mono mt-0.5 truncate">
-                    {renderMeta(item)}
-                  </div>
-                </div>
-              )}
+  return <div className="ui-panel overflow-hidden">
+    {rowError && !editingId && <p role="alert" className="p-4 text-sm text-danger">{rowError}</p>}
+    {items.map((item, index) => {
+      const isEditing = editingId === item.id;
+      const clickable = !isEditing && canClick?.(item) && !!onItemClick;
+      return <div key={item.id} draggable={!isEditing && !reordering}
+        onDragStart={event => { setDragIndex(index); event.dataTransfer.effectAllowed = "move"; }}
+        onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; setOverIndex(index); }}
+        onDragLeave={() => setOverIndex(value => value === index ? null : value)}
+        onDrop={event => { event.preventDefault(); handleDrop(index); }}
+        onDragEnd={() => { setDragIndex(null); setOverIndex(null); }}
+        className={"material-list-row " + (index ? "border-t border-line " : "") + (dragIndex === index ? "opacity-40 " : "") + (overIndex === index && dragIndex !== index ? "bg-depth ring-1 ring-inset ring-accent " : "")}>
+        <span className="shrink-0 text-ink-soft cursor-grab active:cursor-grabbing select-none" title={t("Drag to reorder")} aria-label={t("Drag to reorder")}><Icon name="grip" size={18} /></span>
+        <div className="shrink-0">{renderIcon(item)}</div>
+        <div className="material-row-copy">
+          {isEditing ? <div>
+            <div className="flex items-center gap-1">
+              <input autoFocus type="text" aria-label={t("Material name")} value={editValue} onChange={event => setEditValue(event.target.value)} onKeyDown={event => onEditKeyDown(event,item.id)} maxLength={120} className="ui-input flex-1 min-w-0" />
+              <button type="button" onClick={() => saveEdit(item.id)} disabled={savingId === item.id} title={t("Save")} aria-label={t("Save")} className="icon-button"><Icon name={savingId === item.id ? "loader" : "check"} className={savingId === item.id ? "animate-spin" : ""} /></button>
+              <button type="button" onClick={cancelEdit} disabled={savingId === item.id} title={t("Cancel")} aria-label={t("Cancel")} className="icon-button"><Icon name="close" /></button>
             </div>
-
-            {/* Status + actions */}
-            {!isEditing && (
-              <div className="flex items-center gap-3 flex-shrink-0">
-                <button aria-label={`Move ${item.title} up`} disabled={reordering || idx === 0} onClick={() => saveOrder(idx, idx - 1)} className="text-sm disabled:opacity-30">↑</button>
-                <button aria-label={`Move ${item.title} down`} disabled={reordering || idx === items.length - 1} onClick={() => saveOrder(idx, idx + 1)} className="text-sm disabled:opacity-30">↓</button>
-                <div className="font-mono text-xs">{renderStatus(item)}</div>
-                <button
-                  onClick={() => startEdit(item)}
-                  className="w-8 h-8 rounded-full text-ink-mute hover:bg-bg-alt hover:text-ink transition flex items-center justify-center text-sm"
-                  title="Rename"
-                  aria-label="Rename"
-                >
-                  ✎
-                </button>
-                {onDelete && (
-                  <button
-                    onClick={() => onDelete(item)}
-                    className="w-8 h-8 rounded-full flex items-center justify-center text-ink-mute hover:bg-accent hover:text-paper transition text-sm"
-                    title="Delete"
-                    aria-label="Delete"
-                  >
-                    🗑
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
+            {rowError && <p role="alert" className="text-xs text-danger mt-2">{rowError}</p>}
+          </div> : <div role={clickable ? "button" : undefined} tabIndex={clickable ? 0 : undefined}
+            onClick={() => clickable && onItemClick!(item)}
+            onKeyDown={event => { if (clickable && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); onItemClick!(item); } }}
+            className={"material-list-open " + (clickable ? "cursor-pointer group" : "")}>
+            <div dir="auto" className={"font-semibold break-words " + (clickable ? "group-hover:text-accent" : "")}>{item.title}</div>
+            <div className="text-xs text-ink-soft tabular-nums mt-1 flex flex-wrap gap-x-2 gap-y-1">{renderMeta(item)}</div>
+          </div>}
+        </div>
+        {!isEditing && <div className="material-row-actions">
+          <div className="material-row-status tabular-nums">{renderStatus(item)}</div>
+          <button type="button" aria-label={t("Move") + " " + item.title + " " + t("up")} disabled={reordering || index === 0} onClick={() => saveOrder(index,index - 1)} className="icon-button"><Icon name="arrow-up" size={17} /></button>
+          <button type="button" aria-label={t("Move") + " " + item.title + " " + t("down")} disabled={reordering || index === items.length - 1} onClick={() => saveOrder(index,index + 1)} className="icon-button"><Icon name="arrow-down" size={17} /></button>
+          <button type="button" onClick={() => startEdit(item)} title={t("Rename")} aria-label={t("Rename")} className="icon-button"><Icon name="edit" size={17} /></button>
+          {onDelete && <button type="button" onClick={() => onDelete(item)} title={t("Delete")} aria-label={t("Delete")} className="icon-button danger"><Icon name="trash" size={17} /></button>}
+        </div>}
+      </div>;
+    })}
+  </div>;
 }

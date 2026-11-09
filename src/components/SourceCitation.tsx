@@ -1,5 +1,7 @@
 "use client";
 
+import Icon from "@/components/Icon";
+
 import { useEffect, useState } from "react";
 import { apiFetch } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
@@ -57,12 +59,12 @@ export default function SourceCitation({ sourceRefs, courseId }: { sourceRefs: u
   if (!refs.length) return null;
   const current = preview?.identity === previewKey ? preview : null;
   return <div className="mt-3 text-xs text-ink-soft" onClick={event => event.stopPropagation()}>
-    <div className="flex flex-wrap items-center gap-2"><span>{t("Sources")}:</span>{refs.map(ref => <button type="button" key={JSON.stringify([ref.documentId, ref.sourceRevision, ref.unitId])} className="underline hover:text-accent" onClick={() => { setPreview(null); setSelection({ identity, ref }); }}>{ref.label || ref.unitId}</button>)}</div>
-    {selected && <div className="mt-2 p-3 border border-line rounded-xl bg-bg" role="region" aria-label={t("Source preview")}>
-      <button type="button" className="float-end underline" onClick={() => setSelection(null)}>{t("Close source")}</button>
-      {!current ? <p>{t("Loading source…")}</p> : current.error ? <div role="alert"><p>{t(current.error)}</p>{<button type="button" className="underline mt-2" onClick={() => setAttempt(n => n + 1)}>{t("Retry source")}</button>}</div> : <>
-        {current.text ? <pre className="whitespace-pre-wrap font-sans leading-relaxed">{current.text}</pre> : !current.images?.length && <p>{t("This source unit is blank.")}</p>}
-        {current.warnings?.map((warning, i) => <p key={`warning-${i}`} className="text-gold mt-2">{warning}</p>)}
+    <div className="material-source-links"><span>{t("Sources")}:</span>{refs.map(ref => <button type="button" key={JSON.stringify([ref.documentId, ref.sourceRevision, ref.unitId])} className="material-source-link" onClick={() => { setPreview(null); setSelection({ identity, ref }); }}>{ref.label || ref.unitId}</button>)}</div>
+    {selected && <div className="material-source-preview" role="region" aria-label={t("Source preview")}>
+      <button type="button" className="ui-button ghost float-end mb-2" onClick={() => setSelection(null)}><Icon name="close" size={15} />{t("Close source")}</button>
+      {!current ? <p>{t("Loading source…")}</p> : current.error ? <div role="alert"><p>{t(current.error)}</p>{<button type="button" className="ui-button secondary mt-2" onClick={() => setAttempt(n => n + 1)}>{t("Retry source")}</button>}</div> : <>
+        {current.text ? <pre dir="auto" className="whitespace-pre-wrap font-sans leading-relaxed">{current.text}</pre> : !current.images?.length && <p>{t("This source unit is blank.")}</p>}
+        {current.warnings?.map((warning, i) => <p key={`warning-${i}`} className="material-inline-notice warning mt-3">{warning}</p>)}
         {current.images?.map((src, i) => (
           // eslint-disable-next-line @next/next/no-img-element -- Authenticated original data URIs need native image rendering.
           <img key={i} src={src} alt={`${selected.label || selected.unitId} ${i + 1}`} className="max-w-full mt-3" />

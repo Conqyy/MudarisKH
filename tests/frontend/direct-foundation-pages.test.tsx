@@ -69,7 +69,12 @@ beforeEach(() => {
     return response({});
   });
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+function focusAfterFreshnessWindow() {
+  vi.spyOn(Date, "now").mockReturnValue(Date.now() + 30_001);
+  fireEvent(window, new Event("focus"));
+}
 
 describe("direct study-page foundation gates", () => {
   it.each(pages)("preserves a pending %s request through an unchanged background check", async (_, Page, actionName) => {
@@ -87,7 +92,7 @@ describe("direct study-page foundation gates", () => {
     render(<Page />);
     fireEvent.click(await screen.findByRole('button', { name: actionName }));
     await waitFor(() => expect(signal).toBeDefined());
-    fireEvent(window, new Event('focus'));
+    focusAfterFreshnessWindow();
     await waitFor(() => expect(reads).toBe(2));
     expect(signal?.aborted).toBe(false);
     await act(async () => check.resolve(response(mocks.foundation)));
@@ -148,11 +153,11 @@ describe("direct study-page foundation gates", () => {
     fireEvent.click(await screen.findByRole("button", { name: actionName }));
     await waitFor(() => expect(signal).toBeDefined());
     mocks.foundation = { ...mocks.foundation, ready: false, state: "processing", pendingCount: 1 };
-    fireEvent(window, new Event("focus"));
+    focusAfterFreshnessWindow();
     await screen.findByRole("link", { name: /back to course/i });
     await waitFor(() => expect(signal?.aborted).toBe(true));
     mocks.foundation = { ...mocks.foundation, ready: true, state: "ready", pendingCount: 0 };
-    fireEvent(window, new Event("focus"));
+    focusAfterFreshnessWindow();
     await screen.findByRole("button", { name: actionName });
     await act(async () => pending.resolve(response({
       doc_id: "stale-output", title: "Stale generated output", reply: "Stale generated output", chat_id: "stale-chat",

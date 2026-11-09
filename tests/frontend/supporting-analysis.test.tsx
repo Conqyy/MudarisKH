@@ -14,6 +14,35 @@ vi.mock('@/lib/auth-context', () => ({ useAuth: () => ({ user: { uid: 'u1' } }) 
 vi.mock('@/lib/i18n', () => ({ useLang: () => ({ t: (value: string) => value }) }));
 afterEach(cleanup);
 
+it('shows the saved analysis failure reason beside the retry action', () => {
+  hook.value.status = { status: 'incomplete', kind: 'tutorial', materialId: 't1', stale: false, legacy: false,
+    errorMessage: 'The AI response was incomplete. Retry analysis to read the remaining source content.' };
+  render(<SupportingMaterialAction kind="tutorial" materialId="t1" courseId="c1" />);
+  expect(screen.getByRole('status').textContent).toContain('The AI response was incomplete.');
+  expect(screen.getByRole('button', { name: 'Retry analysis' })).toBeTruthy();
+});
+
+it.each([
+  ['preparing', 'Preparing source file…'],
+  ['extracting', 'Extracting source content…'],
+  ['reconciling', 'Verifying source content…'],
+  ['aligning', 'Comparing with lectures…'],
+])('shows the %s phase and identifies verified progress', (stage, label) => {
+  hook.value.status = { status: 'processing', stage, kind: 'tutorial', materialId: 't1', stale: false, legacy: false,
+    progress: { completedUnits: 1, totalUnits: 3, completedRequirements: 0, totalRequirements: null } };
+  render(<SupportingMaterialAction kind="tutorial" materialId="t1" courseId="c1" />);
+  expect(screen.getByText(new RegExp(label)).textContent).toContain('1/3 source units verified');
+  expect(screen.queryByRole('button', { name: 'Retry analysis' })).toBeNull();
+});
+
+it('prevents repeated retry submissions while a retry is being queued', () => {
+  hook.value.status = { status: 'incomplete', kind: 'tutorial', materialId: 't1', stale: false, legacy: false };
+  hook.value.loading = true;
+  render(<SupportingMaterialAction kind="tutorial" materialId="t1" courseId="c1" />);
+  expect((screen.getByRole('button', { name: 'Retry analysis' }) as HTMLButtonElement).disabled).toBe(true);
+  hook.value.loading = false;
+});
+
 describe('supporting selection and report identity', () => {
   const ready = { id: 'h1', materialId: 'h1', kind: 'historical_exam' as const, status: 'completed', jobId: 'j1', sourceRevision: 's1', reportRevision: 'r1', stale: false, legacy: false };
   it('keeps pending and legacy selected materials visible as blockers, while an empty selection means none', () => {

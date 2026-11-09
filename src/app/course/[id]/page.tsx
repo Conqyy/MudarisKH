@@ -3,8 +3,11 @@
 import { useEffect, useState, useRef } from "react";
 import { useRouter, useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import Navbar from "@/components/Navbar";
-import Sidebar from "@/components/Sidebar";
+import AppShell from "@/components/AppShell";
+import Icon from "@/components/Icon";
+import CourseJourney from "@/components/CourseJourney";
+import CourseMaterialPanel from "@/components/CourseMaterialPanel";
+import { resolveCourseView } from "@/lib/course-navigation";
 import EditCourseModal from "@/components/EditCourseModal";
 import BookmarkButton from "@/components/BookmarkButton";
 import { useAuth } from "@/lib/auth-context";
@@ -30,8 +33,6 @@ import UploadTutorialModal from "@/components/UploadTutorialModal";
 import DocumentViewer from "@/components/DocumentViewer";
 import AudioViewer from "@/components/AudioViewer";
 import ReorderableList from "@/components/ReorderableList";
-import CourseReminders from "@/components/CourseReminders";
-import { CourseReminder } from "@/lib/firestore-helpers";
 import { ordered } from "@/lib/ordering";
 import { useLang } from "@/lib/i18n";
 
@@ -41,16 +42,8 @@ import { CourseFoundationGate } from "@/components/CourseFoundationGate";
 import SupportingMaterialAction from "@/components/SupportingMaterialAction";
 import { kindForRow } from "@/lib/supporting-materials";
 import HistoricalExamTypeSelect from "@/components/HistoricalExamTypeSelect";
-import { EXAM_GROUP_LABELS, HISTORICAL_EXAM_TYPES, HistoricalExamType } from "@/lib/historical-exam-types";
+import { EXAM_GROUP_LABELS, EXAM_TYPE_LABELS, HISTORICAL_EXAM_TYPES, HistoricalExamType } from "@/lib/historical-exam-types";
 
-function StudyAction({ ready, href, label, className, reason }: { ready: boolean; href: string; label: string; className: string; reason: string }) {
-  return ready ? <Link href={href} className={className}>{label} →</Link> : (
-    <div>
-      <p className="mb-3 text-xs text-ink-soft">{reason}</p>
-      <button disabled aria-describedby="foundation-lock-reason" className={`${className} w-full opacity-50 cursor-not-allowed`}><span aria-hidden="true">🔒</span> {label}</button>
-    </div>
-  );
-}
 // Reorder an array of items to match a list of ids.
 function applyOrder<T extends { id: string }>(
   items: T[],
@@ -60,12 +53,22 @@ function applyOrder<T extends { id: string }>(
   return orderedIds.map((id) => map.get(id)).filter(Boolean) as T[];
 }
 
+// A supporting material whose delete stopped partway. It is never a usable
+// material; finishing re-runs that material's own idempotent DELETE.
+type UnfinishedDeletion = { id: string; kind: "historical_exam" | "tutorial" | "audio" | "notes"; title: string | null };
+const DELETE_ROUTES: Record<UnfinishedDeletion["kind"], string> = {
+  historical_exam: "historical-exams", tutorial: "tutorials", audio: "audio", notes: "audio",
+};
+const unfinishedDeletions = (data: { unfinished_deletions?: UnfinishedDeletion[] }) =>
+  (data.unfinished_deletions || []).filter(item => item && typeof item.id === "string" && item.kind in DELETE_ROUTES);
+
 export default function CoursePage() {
   const { user, loading } = useAuth();
   const router = useRouter();
   const params = useParams();
   const searchParams = useSearchParams();
   const courseId = params.id as string;
+  const view = resolveCourseView(searchParams || new URLSearchParams());
   const { t } = useLang();
   const { foundation, loading: foundationLoading, error: foundationError, refresh: refreshFoundation, confirm: confirmFoundation } = useCourseFoundation(courseId);
 
@@ -88,11 +91,15 @@ export default function CoursePage() {
     return () => classificationRequest.current?.abort();
   }, [courseId, user?.uid]);
   const [tutorials, setTutorials] = useState<Tutorial[]>([]);
+  const [stalledDeletions, setStalledDeletions] = useState<UnfinishedDeletion[]>([]);
+  const [finishingDeletion, setFinishingDeletion] = useState<string | null>(null);
+  const [finishDeletionError, setFinishDeletionError] = useState("");
   const [examCount, setExamCount] = useState(0);
   const [showEdit, setShowEdit] = useState(false);
   const [showDocUpload, setShowDocUpload] = useState(false);
   const [showAudioUpload, setShowAudioUpload] = useState(false);
   const [showHistExamUpload, setShowHistExamUpload] = useState(false);
+  const [historicalExamUploadType, setHistoricalExamUploadType] = useState<HistoricalExamType | undefined>();
   const [showTutorialUpload, setShowTutorialUpload] = useState(false);
   const [viewingDoc, setViewingDoc] = useState<CourseDocument | null>(null);
   const [viewingAudio, setViewingAudio] = useState<AudioRecording | null>(null);
@@ -103,9 +110,13 @@ export default function CoursePage() {
     setDocumentChanging(false);
     return () => documentMutation.current?.abort();
   }, [courseId, user?.uid]);
-  const foundationReady = foundation?.ready === true && !foundationLoading && !foundationError && !showDocUpload && !documentChanging;
+  // Returning from a native file chooser rechecks the foundation on focus.
+  // Retain confirmation and active upload state until that check actually
+  // revokes readiness; only starting new actions waits for the response.
+  const foundationConfirmed = foundation?.ready === true && !foundationError && !showDocUpload && !documentChanging;
+  const foundationReady = foundationConfirmed && !foundationLoading;
   const stagesComplete = documents.length > 0 && documents.every(doc => doc.preparationStatus === "completed" && doc.guideStatus === "completed" && !foundation?.failedDocumentIds?.includes(doc.id));
-  const lockReason = t("Complete and confirm all lecture documents to unlock.");
+  const lockReason = t(foundationLoading ? "Checking your lecture document foundation…" : "Complete and confirm all lecture documents to unlock.");
 
   useEffect(() => {
     if (!loading && !user) router.push("/signin");
@@ -117,7 +128,7 @@ export default function CoursePage() {
 
   useEffect(() => {
     if (!pageLoading && searchParams?.get("section") === "documents") {
-      document.getElementById("documents")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+      document.getElementById("documents")?.scrollIntoView?.({ behavior: "auto", block: "start" });
     }
   }, [pageLoading, searchParams]);
 
@@ -225,12 +236,17 @@ export default function CoursePage() {
       // Fetch from backend API (bypasses Firestore security rules)
       await Promise.all([
         apiJson(`${API_URL}/api/documents/${courseId}`, { signal: controller.signal }).then(d => d.documents || []),
-        apiJson(`${API_URL}/api/audio/${courseId}`, { signal: controller.signal }).then(d => d.audio_recordings || []),
-        apiJson(`${API_URL}/api/historical-exams/${courseId}`, { signal: controller.signal }).then(d => d.historical_exams || []),
+        apiJson(`${API_URL}/api/audio/${courseId}`, { signal: controller.signal }),
+        apiJson(`${API_URL}/api/historical-exams/${courseId}`, { signal: controller.signal }),
         apiJson(`${API_URL}/api/exams/list/${courseId}`, { signal: controller.signal }).then(d => d.exams || []),
-        apiJson(`${API_URL}/api/tutorials/${courseId}`, { signal: controller.signal }).then(d => d.tutorials || []),
-      ]).then(([docsData, audioData, histData, examData, tutData]) => {
+        apiJson(`${API_URL}/api/tutorials/${courseId}`, { signal: controller.signal }),
+      ]).then(([docsData, audioList, histList, examData, tutList]) => {
         if (controller.signal.aborted) return;
+        const audioData = audioList.audio_recordings || [];
+        const histData = histList.historical_exams || [];
+        const tutData = tutList.tutorials || [];
+        setStalledDeletions([...unfinishedDeletions(histList), ...unfinishedDeletions(tutList), ...unfinishedDeletions(audioList)]);
+        setFinishDeletionError("");
         setDocuments(
           ordered(docsData, courseData?.documentOrder, courseData?.titleOverrides)
         );
@@ -291,6 +307,22 @@ export default function CoursePage() {
     } catch (error) {
       console.error(error);
       alert("Failed to delete. Make sure the backend is running.");
+    }
+  };
+
+  const handleFinishDeletion = async (item: UnfinishedDeletion) => {
+    setFinishingDeletion(item.id);
+    setFinishDeletionError("");
+    try {
+      const res = await apiFetch(`${API_URL}/api/${DELETE_ROUTES[item.kind]}/${item.id}`, { method: "DELETE" });
+      // 404: the material is already gone, which is what finishing means.
+      if (!res.ok && res.status !== 404) throw new Error(`Delete failed (${res.status})`);
+      setStalledDeletions(prev => prev.filter(other => other.id !== item.id));
+    } catch (error) {
+      console.error(error);
+      setFinishDeletionError(t("The deletion still could not finish. Please retry."));
+    } finally {
+      setFinishingDeletion(null);
     }
   };
 
@@ -382,17 +414,6 @@ export default function CoursePage() {
     setHistoricalExams((prev) =>
       prev.map((h) => (h.id === id ? { ...h, title } : h))
     );
-  };
-
-  // ---- Reminders (stored on the course doc) ----
-  const handleRemindersChange = async (reminders: CourseReminder[]) => {
-    try {
-      const saved = await updateCourse(courseId, { reminders }, { reminders: course?.reminders || [] });
-      setCourse((prev) => (prev ? { ...prev, reminders: saved.reminders } : prev));
-    } catch (error) {
-      alert("Could not save reminders. Please retry.");
-      throw error;
-    }
   };
 
   const handleRenameTutorial = async (id: string, title: string) => {
@@ -492,343 +513,111 @@ export default function CoursePage() {
     );
   };
 
-  if (loadError && !pageLoading) return <><Navbar /><div className="pt-28 px-6 text-center" role="alert"><p>{loadError}</p><button onClick={() => loadData()} className="mt-4 underline">Retry loading</button></div></>;
+  const openHistoricalExamUpload = (type?: HistoricalExamType) => {
+    setHistoricalExamUploadType(type);
+    setShowHistExamUpload(true);
+  };
+  const examUploadAction = (type?: HistoricalExamType, first = false) => <button
+    onClick={() => openHistoricalExamUpload(type)} disabled={!foundationReady} aria-describedby="foundation-lock-reason" className="ui-button primary">
+    <Icon name={foundationReady ? "plus" : "lock"} size={16} />{t(first ? "Upload your first past exam" : "Upload")}
+  </button>;
+  const examRows = (exams: HistoricalExam[]) => <ReorderableList<HistoricalExam>
+    items={exams} onReorder={handleReorderExams} onRename={handleRenameExam}
+    onDelete={exam => handleDeleteItem("historical-exams", exam.id, exam.title)}
+    renderIcon={() => <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center text-accent"><Icon name="exam" size={22} /></div>}
+    renderMeta={exam => <>{new Date(exam.uploadedAt).toLocaleDateString()}{exam.analysis && (exam.analysis.paperCount
+      ? ` · ${exam.analysis.paperCount} ${t("papers")} · ~${exam.analysis.totalQuestions} ${t("questions per paper")}`
+      : ` · ${exam.analysis.totalQuestions} ${t("questions")}`)}</>}
+    renderStatus={exam => <div>
+      {!exam.examType && <HistoricalExamTypeSelect value="" label={`${t("Classify")} ${exam.title}`} disabled={!!classifying} onChange={type => void handleClassifyExam(exam.id, type)} />}
+      <SupportingMaterialAction kind="historical_exam" materialId={exam.id} courseId={courseId} />
+    </div>}
+  />;
+  const examDetails = (type?: HistoricalExamType) => {
+    const exams = type ? historicalExams.filter(exam => exam.examType === type) : historicalExams;
+    return <div className="course-material-panel-body">
+      {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
+      {exams.length === 0 && <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
+        <div className="text-4xl mb-3 opacity-60"><Icon name="exam" size={22} /></div>
+        <h3 className="font-sans text-xl font-medium mb-2">{t("No past exams yet")}</h3>
+        <p className="text-ink-soft text-sm mb-5 max-w-md mx-auto">{t("Upload old exam PDFs. The AI will analyze topic weights, question patterns, and difficulty distribution.")}</p>
+        {examUploadAction(type, true)}
+      </div>}
+      {!type && classificationError && <p role="alert" className="text-sm text-accent mb-4">{classificationError}</p>}
+      {type ? examRows(exams) : [...HISTORICAL_EXAM_TYPES, "uncategorized" as const].map(group => {
+        const rows = historicalExams.filter(exam => group === "uncategorized" ? !exam.examType : exam.examType === group);
+        if (group === "uncategorized" && !rows.length) return null;
+        const label = group === "uncategorized" ? "Needs classification" : EXAM_GROUP_LABELS[group];
+        return <section key={group} aria-label={t(label)} className="mb-6">
+          <h3 className="font-sans text-xl font-medium mb-3">{t(label)} <span className="font-sans text-sm text-ink-mute">{rows.length}</span></h3>
+          {group === "uncategorized" && <p className="text-sm text-ink-soft mb-3">{t("Assign a type before using these papers for exams or summaries.")}</p>}
+          {examRows(rows)}
+        </section>;
+      })}
+    </div>;
+  };
 
-  if (loading || pageLoading) {
-    return (
-      <>
-        <Navbar />
-        <div className="pt-20 min-h-screen flex items-center justify-center">
-          <div className="font-mono text-sm text-ink-mute">Loading…</div>
-        </div>
-      </>
-    );
-  }
-
+  if (loadError && !pageLoading) return <AppShell courses={allCourses}><main className="workspace-main"><div role="alert" className="ui-notice danger mt-8"><Icon name="alert" /><div><p>{loadError}</p><button onClick={() => void loadData()} className="ui-button secondary mt-3">{t("Retry loading")}</button></div></div></main></AppShell>;
+  if (loading || pageLoading) return <AppShell courses={allCourses}><main className="workspace-main"><div className="course-loading"><Icon name="loader" className="animate-spin" /><p>{t("Loading…")}</p></div></main></AppShell>;
   if (!user) return null;
+  if (!course) return <AppShell courses={allCourses}><main className="workspace-main"><div className="dashboard-empty ui-panel mt-8"><Icon name="search" size={30} /><h1>{t("Course not found")}</h1><p>{t("This course may have been deleted or doesn't exist.")}</p><Link href="/dashboard" className="ui-button primary">{t("Back to Dashboard")}</Link></div></main></AppShell>;
 
-  if (!course) {
-    return (
-      <>
-        <Navbar />
-        <div className="pt-20 min-h-screen flex items-center justify-center">
-          <div className="text-center max-w-md px-6">
-            <div className="text-6xl mb-6">🔍</div>
-            <h1 className="font-serif text-3xl font-medium mb-3">
-              Course not found
-            </h1>
-            <p className="text-ink-soft mb-8">
-              This course may have been deleted or doesn&apos;t exist.
-            </p>
-            <Link
-              href="/dashboard"
-              className="inline-block bg-ink text-paper px-6 py-3 rounded-full text-sm font-medium hover:bg-accent transition"
-            >
-              ← Back to Dashboard
-            </Link>
+  return (<>
+    <AppShell courses={allCourses} course={course} courseId={courseId} activeTab={view}>
+      <main className="workspace-main course-page">
+        <header className="page-header">
+          <div><div className="course-page-code"><span className="course-color-dot" style={{ background: course.color }} />{course.code}</div><h1 className="page-heading">{course.title}</h1>{course.instructor && <p className="page-subtitle flex items-center gap-2"><Icon name="user" size={15} />{course.instructor}</p>}</div>
+          <div className="flex flex-wrap items-center gap-2">
+            <BookmarkButton item={{ kind: "course", id: course.id, title: course.code + " — " + course.title, href: "/course/" + course.id, courseCode: course.code, courseColor: course.color }} />
+            <button className="ui-button secondary" onClick={() => setShowEdit(true)}><Icon name="edit" size={15} />{t("Edit")}</button>
+            <button className="icon-button danger" aria-label={t("Delete")} title={t("Delete course")} onClick={handleDelete}><Icon name="trash" size={17} /></button>
           </div>
-        </div>
-      </>
-    );
-  }
-
-  const completedDocs = documents.filter((d) => d.status === "completed").length;
-  const completedHist = historicalExams.filter((h) => h.status === "completed").length;
-  const examReady = foundationReady && completedDocs > 0 && completedHist > 0;
-
-  return (
-    <>
-      <Navbar />
-
-      <div className="pt-20 flex">
-        <Sidebar courses={allCourses} />
-
-        <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-7xl mx-auto w-full">
-          {/* Breadcrumb */}
-          <div className="my-8">
-            <Link
-              href="/dashboard"
-              className="text-xs font-mono text-ink-soft hover:text-accent transition"
-            >
-              ← Dashboard
-            </Link>
+        </header>
+        {view === "overview" && <CourseJourney courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} ready={foundationReady} confirmed={foundationConfirmed}
+          onRetry={refreshFoundation} onUpload={() => setShowDocUpload(true)} onConfirm={confirmFoundation} canConfirm={stagesComplete}
+          showConfirmation={foundation?.state === "confirmation_required" && !foundationLoading && !documentChanging && !showDocUpload}
+          supportCount={historicalExams.length + tutorials.length + audioRecordings.length} />}
+        {!foundationReady && <p id="foundation-lock-reason" className="text-sm text-ink-soft mb-4">{lockReason}</p>}
+        {stalledDeletions.length > 0 && <section className="ui-notice danger mb-6" aria-label={t("Unfinished deletions")}>
+          <Icon name="alert" size={18} />
+          <div>
+            <p>{t("These materials were only partly deleted. They stay out of your study tools until the deletion finishes.")}</p>
+            <ul className="mt-2 space-y-2">
+              {stalledDeletions.map(item => {
+                const title = item.title || t("Untitled material");
+                return <li key={`${item.kind}:${item.id}`} className="flex flex-wrap items-center gap-3">
+                  <span className="font-semibold text-ink">{title}</span>
+                  <button className="ui-button secondary" disabled={finishingDeletion !== null}
+                    aria-label={`${t("Finish deleting")}: ${title}`} onClick={() => void handleFinishDeletion(item)}>
+                    {finishingDeletion === item.id ? t("Finishing…") : t("Finish deleting")}
+                  </button>
+                </li>;
+              })}
+            </ul>
+            {finishDeletionError && <p role="alert" className="text-sm text-accent mt-2">{finishDeletionError}</p>}
           </div>
-
-          {/* Course Header */}
-          <div
-            className="bg-paper border border-line rounded-3xl p-8 md:p-10 mb-10 relative overflow-hidden"
-            style={{ borderTop: `6px solid ${course.color}` }}
-          >
-            <div className="absolute top-6 right-6 flex gap-2 items-center">
-              <BookmarkButton
-                item={{
-                  kind: "course",
-                  id: course.id,
-                  title: `${course.code} — ${course.title}`,
-                  href: `/course/${course.id}`,
-                  courseCode: course.code,
-                  courseColor: course.color,
-                }}
-                size="sm"
-              />
-              <button
-                onClick={() => setShowEdit(true)}
-                className="px-4 py-2 border border-line rounded-full text-xs font-medium hover:bg-bg-alt transition"
-              >
-                ✎ Edit
-              </button>
-              <button
-                onClick={handleDelete}
-                className="px-4 py-2 border border-line rounded-full text-xs font-medium text-ink-mute hover:bg-accent hover:text-paper hover:border-accent transition"
-              >
-                Delete
-              </button>
-            </div>
-
-            <div className="font-mono text-xs text-ink-mute uppercase tracking-widest mb-3">
-              {course.code}
-            </div>
-            <h1 className="font-serif text-3xl md:text-5xl font-medium tracking-tight leading-tight mb-3 pr-32">
-              {course.title}
-            </h1>
-            <div className="flex flex-wrap gap-x-6 gap-y-2 text-ink-soft text-sm">
-              <span className="flex items-center gap-2">
-                <span className="opacity-60">👤</span>
-                {course.instructor}
-              </span>
-            </div>
-          </div>
-
-
-          <CourseFoundationGate courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} onRetry={refreshFoundation} />
-          {!foundationReady && <p id="foundation-lock-reason" className="mb-6 text-sm text-ink-soft">{lockReason}</p>}
-          {foundation?.state === "confirmation_required" && !foundationLoading && !documentChanging && !showDocUpload && (
-            <div className="mb-8 bg-paper border border-sage/30 rounded-2xl p-6">
-              <p className="text-sm text-ink-soft mb-4">{t("Upload every lecture document you intend to study before confirming. Adding, deleting, or reanalyzing a document will require confirmation again.")}</p>
-              <button disabled={!stagesComplete} onClick={() => { if (stagesComplete) void confirmFoundation(); }} className="disabled:opacity-50 disabled:cursor-not-allowed bg-sage text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition">{t("I've uploaded all lecture documents")}</button>
-            </div>
-          )}
-
-          {/* Exam readiness bar */}
-          {foundationReady && <div className="mb-12 bg-paper border border-line rounded-2xl px-6 py-4 flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <span
-                className={`w-2.5 h-2.5 rounded-full ${
-                  examReady ? "bg-sage" : "bg-gold"
-                }`}
-              />
-              <span className="text-sm text-ink-soft">
-                {examReady ? (
-                  <>{t("This course is")} <span className="text-sage font-medium">{t("exam-ready")}</span> {t("— documents and past exams analyzed.")}</>
-                ) : completedDocs === 0 ? (
-                  t("Upload lecture documents to start building practice exams.")
-                ) : completedHist === 0 ? (
-                  t("Add a past exam so generated exams match its format.")
-                ) : (
-                  t("Ready to generate practice exams.")
-                )}
-              </span>
-            </div>
-          </div>}
-
-          {/* Reminders */}
-          <CourseReminders
-            reminders={course.reminders || []}
-            onChange={handleRemindersChange}
-          />
-
-          {/* Intelligence Summary */}
-          {(documents.some(d => d.status === "completed") ||
-            audioRecordings.some(a => a.status === "completed") ||
-            historicalExams.some(h => h.status === "completed") ||
-            tutorials.some(t => t.status === "completed")) && (
-            <section className="mb-12">
-              <div className="bg-paper border border-line rounded-3xl p-7">
-                <h2 className="font-serif text-2xl font-medium tracking-tight mb-4">
-                  {t("Intelligence Summary")}
-                </h2>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <div className="bg-bg rounded-2xl p-4 text-center">
-                    <div className="font-serif text-2xl font-medium text-sage">
-                      {documents.filter(d => d.status === "completed").length}
-                    </div>
-                    <div className="text-xs text-ink-mute font-mono mt-1">{t("Documents")}</div>
-                  </div>
-                  <div className="bg-bg rounded-2xl p-4 text-center">
-                    <div className="font-serif text-2xl font-medium text-accent">
-                      {historicalExams.filter(h => h.status === "completed").length}
-                    </div>
-                    <div className="text-xs text-ink-mute font-mono mt-1">{t("Past Exams")}</div>
-                  </div>
-                  <div className="bg-bg rounded-2xl p-4 text-center">
-                    <div className="font-serif text-2xl font-medium text-[#3f6f7d]">
-                      {tutorials.filter(t => t.status === "completed").length}
-                    </div>
-                    <div className="text-xs text-ink-mute font-mono mt-1">{t("Tutorials")}</div>
-                  </div>
-                  <div className="bg-bg rounded-2xl p-4 text-center">
-                    <div className="font-serif text-2xl font-medium text-gold">
-                      {audioRecordings.filter(a => a.status === "completed").length}
-                    </div>
-                    <div className="text-xs text-ink-mute font-mono mt-1">{t("Audio")}</div>
-                  </div>
-                </div>
-
-                {historicalExams.some(h => h.status === "completed" && h.analysis?.topicWeights?.length) && (
-                  <div className="mt-4 pt-4 border-t border-line">
-                    <div className="text-xs font-mono text-ink-mute uppercase tracking-widest mb-2">{t("Top Exam Topics")}</div>
-                    <div className="flex flex-wrap gap-2">
-                      {historicalExams
-                        .filter(h => h.status === "completed" && h.analysis?.topicWeights)
-                        .flatMap(h => h.analysis!.topicWeights.slice(0, 5))
-                        .slice(0, 8)
-                        .map((tw, i) => (
-                          <span key={i} className="bg-accent/10 text-accent text-xs px-3 py-1 rounded-full">
-                            {tw.topic} ({Math.round(tw.weight * 100)}%)
-                          </span>
-                        ))}
-                    </div>
-                  </div>
-                )}
-
-                {tutorials.some(t => t.status === "completed" && t.analysis?.problems?.length) && (
-                  <div className="mt-4 pt-4 border-t border-line">
-                    <div className="text-xs font-mono text-ink-mute uppercase tracking-widest mb-2">
-                      {t("Practice Problems · likely to reappear with new numbers")}
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {Array.from(
-                        new Set(
-                          tutorials
-                            .filter(t => t.status === "completed" && t.analysis?.problems)
-                            .flatMap(t =>
-                              t.analysis!.problems.map(
-                                p => p.concept || p.type || ""
-                              )
-                            )
-                            .filter(Boolean)
-                        )
-                      )
-                        .slice(0, 10)
-                        .map((concept, i) => (
-                          <span
-                            key={i}
-                            className="text-xs px-3 py-1 rounded-full"
-                            style={{ backgroundColor: "#3f6f7d1a", color: "#3f6f7d" }}
-                          >
-                            {concept}
-                          </span>
-                        ))}
-                    </div>
-                  </div>
-                )}
-
-                {audioRecordings.some(a => a.status === "completed" && a.insights?.examHints?.length) && (
-                  <div className="mt-4 pt-4 border-t border-line">
-                    <div className="text-xs font-mono text-ink-mute uppercase tracking-widest mb-2">{t("Exam Hints")}</div>
-                    <div className="space-y-1.5">
-                      {audioRecordings
-                        .filter(a => a.status === "completed" && a.insights?.examHints)
-                        .flatMap(a => a.insights!.examHints.filter(h => h.confidence >= 0.7))
-                        .slice(0, 5)
-                        .map((hint, i) => (
-                          <div key={i} className="text-sm text-ink-soft flex items-start gap-2">
-                            <span className="text-gold flex-shrink-0">●</span>
-                            <span>{hint.hint}</span>
-                          </div>
-                        ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </section>
-          )}
-
-          {/* Study tools */}
-          <section className="mb-12 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-            <div className="bg-paper border border-line rounded-3xl p-7 flex flex-col justify-between gap-5">
-              <div>
-                <div className="text-2xl mb-2">🎓</div>
-                <h2 className="font-serif text-xl font-medium tracking-tight mb-1">
-                  {t("AI Coach")}
-                </h2>
-                <p className="text-sm text-ink-soft">
-                  {t("Chat with a coach grounded in your documents, recordings, and past exams.")}
-                </p>
-              </div>
-              <StudyAction ready={foundationReady} reason={lockReason} label={t("Ask the Coach")}
-                href={`/course/${courseId}/tutor`}
-                className="bg-accent text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2"
-              />
-            </div>
-
-            <div className="bg-paper border border-line rounded-3xl p-7 flex flex-col justify-between gap-5">
-              <div>
-                <div className="text-2xl mb-2">📝</div>
-                <h2 className="font-serif text-xl font-medium tracking-tight mb-1">
-                  {t("Practice Exam")}
-                </h2>
-                <p className="text-sm text-ink-soft">
-                  {t("An AI exam from your documents, matched to your past exams.")}
-                </p>
-              </div>
-              <StudyAction ready={foundationReady} reason={lockReason} label={t("Generate Exam")}
-                href={`/course/${courseId}/exam`}
-                className="bg-[#3f6f7d] text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2"
-              />
-            </div>
-
-            <div className="bg-paper border border-line rounded-3xl p-7 flex flex-col justify-between gap-5">
-              <div>
-                <div className="text-2xl mb-2">🗂️</div>
-                <h2 className="font-serif text-xl font-medium tracking-tight mb-1">
-                  {t("Flashcards")}
-                </h2>
-                <p className="text-sm text-ink-soft">
-                  {t("Study cards weighted by past exams and lecture emphasis.")}
-                </p>
-              </div>
-              <StudyAction ready={foundationReady} reason={lockReason} label={t("Make Flashcards")}
-                href={`/course/${courseId}/flashcards`}
-                className="bg-sage text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2"
-              />
-            </div>
-
-            <div className="bg-paper border border-line rounded-3xl p-7 flex flex-col justify-between gap-5">
-              <div>
-                <div className="text-2xl mb-2">📝</div>
-                <h2 className="font-serif text-xl font-medium tracking-tight mb-1">
-                  {t("Summary")}
-                </h2>
-                <p className="text-sm text-ink-soft">
-                  {t("A structured study summary, focused on what your exams test.")}
-                </p>
-              </div>
-              <StudyAction ready={foundationReady} reason={lockReason} label={t("Make Summary")}
-                href={`/course/${courseId}/summary`}
-                className="bg-gold text-paper px-5 py-3 rounded-full text-sm font-medium hover:bg-ink transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2"
-              />
-            </div>
-          </section>
-
+        </section>}
+        <div className={view === "overview" ? "course-materials course-materials-overview" : "course-materials"}>
+          {view === "materials" && <>
+            <div className="section-heading"><div><h2>{t("Course materials")}</h2><p className="page-subtitle">{t("Your lecture foundation and supporting sources, in one place.")}</p></div><Link href={"/course/" + courseId} className="ui-button ghost">{t("Back to overview")}<Icon name="arrow-right" size={15} /></Link></div>
+            <CourseFoundationGate courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} onRetry={refreshFoundation} />
+            <nav className="materials-groups" aria-label={t("Material groups")}><a href="#documents"><Icon name="file" size={17} />{t("Documents")}<span>{documents.length}</span></a><a href="#past-exams"><Icon name="exam" size={17} />{t("Past Exams")}<span>{historicalExams.length}</span></a><a href="#tutorials"><Icon name="book" size={17} />{t("Tutorials")}<span>{tutorials.length}</span></a><a href="#recordings"><Icon name="audio" size={17} />{t("Audio Recordings")}<span>{audioRecordings.length}</span></a></nav>
+          </>}
           {/* Documents Section */}
-          <section id="documents" className="mb-12 scroll-mt-24" aria-label={t("Documents")}>
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="font-serif text-2xl font-medium tracking-tight">
-                {t("Documents")}
-              </h2>
-              <button
+          <CourseMaterialPanel id="documents" title={t("Documents")} icon="file" count={documents.length}
+            summary={t("Lecture documents and source guides")} overview={view === "overview"} holdOpen={showDocUpload || !!viewingDoc}
+            actions={<button
                 onClick={() => setShowDocUpload(true)}
-                className="bg-sage text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2"
+                className="ui-button primary"
               >
                 <span>+</span> {t("Upload")}
-              </button>
-            </div>
+              </button>}>
 
+            <div className="course-material-panel-body">
             {documents.length === 0 ? (
               <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
-                <div className="text-4xl mb-3 opacity-60">📄</div>
-                <h3 className="font-serif text-xl font-medium mb-2">
+                <div className="text-4xl mb-3 opacity-60">{<Icon name="file" size={22} />}</div>
+                <h3 className="font-sans text-xl font-medium mb-2">
                   {t("No documents yet")}
                 </h3>
                 <p className="text-ink-soft text-sm mb-5 max-w-md mx-auto">
@@ -836,7 +625,7 @@ export default function CoursePage() {
                 </p>
                 <button
                   onClick={() => setShowDocUpload(true)}
-                  className="bg-sage text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition"
+                  className="ui-button primary"
                 >
                   + {t("Upload your first document")}
                 </button>
@@ -852,7 +641,7 @@ export default function CoursePage() {
                   handleDeleteItem("documents", doc.id, doc.title)
                 }
                 renderIcon={(doc) => (
-                  <div className="w-10 h-10 rounded-xl bg-sage/10 flex items-center justify-center text-sage text-sm font-mono uppercase">
+                  <div className="w-10 h-10 rounded-xl bg-sage/10 flex items-center justify-center text-sage text-sm font-sans uppercase">
                     {doc.fileType}
                   </div>
                 )}
@@ -880,106 +669,45 @@ export default function CoursePage() {
                 }}
               />
             )}
-          </section>
+            </div>
+          </CourseMaterialPanel>
 
           {/* Historical Exams Section */}
-          <section className="mb-12">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="font-serif text-2xl font-medium tracking-tight">
-                {t("Past Exams")}
-              </h2>
-              <button
-                onClick={() => setShowHistExamUpload(true)}
-                disabled={!foundationReady} aria-describedby="foundation-lock-reason"
-                className="bg-accent text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload")}
-              </button>
-            </div>
-
-            {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
-
-            {historicalExams.length === 0 && (
-              <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
-                <div className="text-4xl mb-3 opacity-60">📋</div>
-                <h3 className="font-serif text-xl font-medium mb-2">
-                  {t("No past exams yet")}
-                </h3>
-                <p className="text-ink-soft text-sm mb-5 max-w-md mx-auto">
-                  {t("Upload old exam PDFs. The AI will analyze topic weights, question patterns, and difficulty distribution.")}
-                </p>
-                <button
-                  onClick={() => setShowHistExamUpload(true)}
-                  disabled={!foundationReady} aria-describedby="foundation-lock-reason"
-                  className="bg-accent text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload your first past exam")}
-                </button>
-              </div>
-            )}
-            {classificationError && <p role="alert" className="text-sm text-accent mb-4">{classificationError}</p>}
-            {[...HISTORICAL_EXAM_TYPES, "uncategorized" as const].map(type => {
-              const exams = historicalExams.filter(exam => type === "uncategorized" ? !exam.examType : exam.examType === type);
-              if (type === "uncategorized" && !exams.length) return null;
-              const label = type === "uncategorized" ? "Needs classification" : EXAM_GROUP_LABELS[type];
-              return <section key={type} aria-label={t(label)} className="mb-6">
-                <h3 className="font-serif text-xl font-medium mb-3">{t(label)} <span className="font-mono text-sm text-ink-mute">{exams.length}</span></h3>
-                {type === "uncategorized" && <p className="text-sm text-ink-soft mb-3">{t("Assign a type before using these papers for exams or summaries.")}</p>}
-              <ReorderableList<HistoricalExam>
-                items={exams}
-                onReorder={handleReorderExams}
-                onRename={handleRenameExam}
-                onDelete={(exam) =>
-                  handleDeleteItem("historical-exams", exam.id, exam.title)
-                }
-                renderIcon={() => (
-                  <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center text-accent">
-                    📋
-                  </div>
-                )}
-                renderMeta={(exam) => (
-                  <>
-                    {new Date(exam.uploadedAt).toLocaleDateString()}
-                    {exam.analysis && (exam.analysis.paperCount
-                      ? ` · ${exam.analysis.paperCount} ${t("papers")} · ~${exam.analysis.totalQuestions} ${t("questions per paper")}`
-                      : ` · ${exam.analysis.totalQuestions} ${t("questions")}`)}
-                  </>
-                )}
-                renderStatus={(exam) => <div>
-                  {!exam.examType && <HistoricalExamTypeSelect value="" label={`${t("Classify")} ${exam.title}`} disabled={!!classifying} onChange={type => void handleClassifyExam(exam.id, type)} />}
-                  <SupportingMaterialAction kind="historical_exam" materialId={exam.id} courseId={courseId} />
-                </div>}
-              />
-              </section>;
-            })}
-          </section>
+          {view === "overview" ? <section id="past-exams" className="course-exam-panels" aria-label={t("Past Exams")}>
+            <h2 className="sr-only">{t("Past Exams")}</h2>
+            {(["final", "midterm", "quiz"] as const).map(type => <CourseMaterialPanel key={type} mini
+              id={`past-exams-${type}`} title={t(EXAM_TYPE_LABELS[type])} icon="exam"
+              count={historicalExams.filter(exam => exam.examType === type).length} summary={t("Past Exams")} overview
+              holdOpen={showHistExamUpload && historicalExamUploadType === type} actions={examUploadAction(type)}>
+              {examDetails(type)}
+            </CourseMaterialPanel>)}
+            {historicalExams.some(exam => !exam.examType) && <Link className="course-exam-mini-notice" href={`/course/${courseId}?view=materials#past-exams`}>
+              <Icon name="alert" size={15} />{t("Needs classification")} ({historicalExams.filter(exam => !exam.examType).length})<Icon name="arrow-right" size={15} />
+            </Link>}
+          </section> : <CourseMaterialPanel id="past-exams" title={t("Past Exams")} icon="exam" count={historicalExams.length}
+            summary={t("Previous quizzes, midterms and finals")} overview={false} actions={examUploadAction()}>
+            {examDetails()}
+          </CourseMaterialPanel>}
 
           {/* Tutorials Section */}
-          <section className="mb-12">
-            <div className="flex items-center justify-between mb-6">
-              <div>
-                <h2 className="font-serif text-2xl font-medium tracking-tight">
-                  {t("Tutorials")}
-                </h2>
-                <p className="text-ink-soft text-sm mt-1">
-                  {t("Practice problems. The exam generator reuses their ideas (with different numbers) — no marks or format weighting.")}
-                </p>
-              </div>
-              <button
+          <CourseMaterialPanel id="tutorials" title={t("Tutorials")} icon="book" count={tutorials.length}
+            summary={t("Practice sheets and worked problems")} overview={view === "overview"} holdOpen={showTutorialUpload}
+            description={t("Practice problems. The exam generator reuses their ideas (with different numbers) — no marks or format weighting.")}
+            actions={<button
                 onClick={() => setShowTutorialUpload(true)}
                 disabled={!foundationReady} aria-describedby="foundation-lock-reason"
-                className="bg-[#3f6f7d] text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2 flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="ui-button primary"
               >
-                <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload")}
-              </button>
-            </div>
+                <span aria-hidden="true">{<Icon name={foundationReady ? "plus" : "lock"} size={16} />}</span> {t("Upload")}
+              </button>}>
 
+            <div className="course-material-panel-body">
             {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
 
             {tutorials.length === 0 ? (
               <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
-                <div className="text-4xl mb-3 opacity-60">✏️</div>
-                <h3 className="font-serif text-xl font-medium mb-2">
+                <div className="text-4xl mb-3 opacity-60">{<Icon name="book" size={22} />}</div>
+                <h3 className="font-sans text-xl font-medium mb-2">
                   {t("No tutorials yet")}
                 </h3>
                 <p className="text-ink-soft text-sm mb-5 max-w-md mx-auto">
@@ -988,9 +716,9 @@ export default function CoursePage() {
                 <button
                   onClick={() => setShowTutorialUpload(true)}
                   disabled={!foundationReady} aria-describedby="foundation-lock-reason"
-                  className="bg-[#3f6f7d] text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="ui-button primary"
                 >
-                  <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload your first tutorial")}
+                  <span aria-hidden="true">{<Icon name={foundationReady ? "plus" : "lock"} size={16} />}</span> {t("Upload your first tutorial")}
                 </button>
               </div>
             ) : (
@@ -1002,8 +730,8 @@ export default function CoursePage() {
                   handleDeleteItem("tutorials", tut.id, tut.title)
                 }
                 renderIcon={() => (
-                  <div className="w-10 h-10 rounded-xl bg-[#3f6f7d]/10 flex items-center justify-center text-[#3f6f7d]">
-                    ✏️
+                  <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center text-accent">
+                    {<Icon name="book" size={22} />}
                   </div>
                 )}
                 renderMeta={(tut) => (
@@ -1017,29 +745,27 @@ export default function CoursePage() {
                 renderStatus={(tut) => <SupportingMaterialAction kind="tutorial" materialId={tut.id} courseId={courseId} />}
               />
             )}
-          </section>
+            </div>
+          </CourseMaterialPanel>
 
           {/* Audio Recordings Section */}
-          <section className="mb-12">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="font-serif text-2xl font-medium tracking-tight">
-                {t("Audio Recordings")}
-              </h2>
-              <button
+          <CourseMaterialPanel id="recordings" title={t("Audio Recordings")} icon="audio" count={audioRecordings.length}
+            summary={t("Lecture recordings and typed notes")} overview={view === "overview"} holdOpen={showAudioUpload || !!viewingAudio}
+            actions={<button
                 onClick={() => setShowAudioUpload(true)}
                 disabled={!foundationReady} aria-describedby="foundation-lock-reason"
-                className="bg-gold text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="ui-button primary"
               >
-                <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload")}
-              </button>
-            </div>
+                <span aria-hidden="true">{<Icon name={foundationReady ? "plus" : "lock"} size={16} />}</span> {t("Upload")}
+              </button>}>
 
+            <div className="course-material-panel-body">
             {!foundationReady && <p className="mb-4 text-sm text-ink-soft">{lockReason}</p>}
 
             {audioRecordings.length === 0 ? (
               <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-10 text-center">
-                <div className="text-4xl mb-3 opacity-60">🎙️</div>
-                <h3 className="font-serif text-xl font-medium mb-2">
+                <div className="text-4xl mb-3 opacity-60">{<Icon name="audio" size={22} />}</div>
+                <h3 className="font-sans text-xl font-medium mb-2">
                   {t("No recordings yet")}
                 </h3>
                 <p className="text-ink-soft text-sm mb-5 max-w-md mx-auto">
@@ -1048,9 +774,9 @@ export default function CoursePage() {
                 <button
                   onClick={() => setShowAudioUpload(true)}
                   disabled={!foundationReady} aria-describedby="foundation-lock-reason"
-                  className="bg-gold text-paper px-5 py-2.5 rounded-full text-sm font-medium hover:bg-ink transition disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="ui-button primary"
                 >
-                  <span aria-hidden="true">{foundationReady ? "+" : "🔒"}</span> {t("Upload your first recording")}
+                  <span aria-hidden="true">{<Icon name={foundationReady ? "plus" : "lock"} size={16} />}</span> {t("Upload your first recording")}
                 </button>
               </div>
             ) : (
@@ -1063,7 +789,7 @@ export default function CoursePage() {
                 onDelete={(rec) => handleDeleteItem("audio", rec.id, rec.title)}
                 renderIcon={() => (
                   <div className="w-10 h-10 rounded-xl bg-gold/10 flex items-center justify-center text-gold">
-                    🎙️
+                    {<Icon name="audio" size={22} />}
                   </div>
                 )}
                 renderMeta={(rec) => (
@@ -1076,10 +802,13 @@ export default function CoursePage() {
                 renderStatus={(rec) => <SupportingMaterialAction kind={kindForRow(rec, "audio")} materialId={rec.id} courseId={courseId} />}
               />
             )}
-          </section>
+            </div>
+          </CourseMaterialPanel>
 
-        </main>
-      </div>
+
+        </div>
+      </main>
+    </AppShell>
 
       {showEdit && (
         <EditCourseModal
@@ -1097,7 +826,7 @@ export default function CoursePage() {
         />
       )}
 
-      {showAudioUpload && foundationReady && (
+      {showAudioUpload && foundationConfirmed && (
         <UploadAudioModal
           courseId={course.id}
           onClose={() => setShowAudioUpload(false)}
@@ -1105,15 +834,16 @@ export default function CoursePage() {
         />
       )}
 
-      {showHistExamUpload && foundationReady && (
+      {showHistExamUpload && foundationConfirmed && (
         <UploadHistoricalExamModal
           courseId={course.id}
+          initialExamType={historicalExamUploadType}
           onClose={() => setShowHistExamUpload(false)}
           onSuccess={loadData}
         />
       )}
 
-      {showTutorialUpload && foundationReady && (
+      {showTutorialUpload && foundationConfirmed && (
         <UploadTutorialModal
           courseId={course.id}
           onClose={() => setShowTutorialUpload(false)}

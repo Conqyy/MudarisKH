@@ -1,5 +1,7 @@
 "use client";
 
+import Icon from "@/components/Icon";
+
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { useLang } from "@/lib/i18n";
@@ -36,16 +38,16 @@ export default function SupportingCitation({ sourceRefs, courseId }: { sourceRef
   const source = current?.source;
   const originalLink = original?.key === key ? original.url + (Number.isInteger(source?.originalPage) && (source?.originalPage || 0) > 0 ? `#page=${source?.originalPage}` : "") : null;
   return <div className="mt-3 text-xs text-ink-soft" onClick={event => event.stopPropagation()}>
-    <div className="flex flex-wrap items-center gap-2"><span>{t("Original source")}:</span>{refs.map(ref => <button type="button" key={JSON.stringify(ref)} className="underline hover:text-accent" onClick={() => { setPreview(null); setSelection({ identity, ref }); }}>{ref.unitId}</button>)}</div>
-    {selected && <div className="mt-2 p-3 border border-line rounded-xl bg-bg" role="region" aria-label={t("Source preview")}>
-      <button type="button" className="float-end underline" onClick={() => setSelection(null)}>{t("Close source")}</button>
-      {!current ? <p>{t("Loading source…")}</p> : current.error ? <div role="alert"><p>{t(current.error)}</p>{!current.unavailable && <button type="button" className="underline mt-2" onClick={() => setAttempt(value => value + 1)}>{t("Retry source")}</button>}</div> : source && <>
+    <div className="material-source-links"><span>{t("Original source")}:</span>{refs.map(ref => <button type="button" key={JSON.stringify(ref)} className="material-source-link" onClick={() => { setPreview(null); setSelection({ identity, ref }); }}>{ref.unitId}</button>)}</div>
+    {selected && <div className="material-source-preview" role="region" aria-label={t("Source preview")}>
+      <button type="button" className="ui-button ghost float-end mb-2" onClick={() => setSelection(null)}><Icon name="close" size={15} />{t("Close source")}</button>
+      {!current ? <p>{t("Loading source…")}</p> : current.error ? <div role="alert"><p>{t(current.error)}</p>{!current.unavailable && <button type="button" className="ui-button secondary mt-2" onClick={() => setAttempt(value => value + 1)}>{t("Retry source")}</button>}</div> : source && <>
         {selected.kind === "notes" && <p className="mb-2">{t("This passage is from your typed notes.")}</p>}
         {source.unit.timing ? <p>{source.unit.timing.startSeconds.toFixed(1)}–{source.unit.timing.endSeconds.toFixed(1)} {t("seconds")}</p> : selected.kind === "audio" && <p>{t("No recording time available")}</p>}
         {[source.unit.text, source.unit.visualText].filter(value => typeof value === "string" && value.trim()).map((text, index) => <pre key={index} dir="auto" className="whitespace-pre-wrap font-sans leading-relaxed">{text}</pre>)}
         {!source.unit.text && !source.unit.visualText && !source.unit.visualAssets?.length && <p>{t("This source unit is blank.")}</p>}
         {source.unit.visualAssets?.length > 0 && <p>{t("The original page contains visual content.")}</p>}
-        {originalLink ? <a className="underline" href={originalLink} target="_blank" rel="noopener noreferrer">{t("Open original")}</a> : <button type="button" className="underline" onClick={async () => {
+        {originalLink ? <a className="ui-button secondary" href={originalLink} target="_blank" rel="noopener noreferrer">{t("Open original")}</a> : <button type="button" className="ui-button secondary" onClick={async () => {
           originalRequest.current?.abort();
           const request = new AbortController();
           originalRequest.current = request;

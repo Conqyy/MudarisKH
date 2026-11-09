@@ -1125,9 +1125,16 @@ class FirebaseClient:
         # caller metadata so cleanup can be retried rather than hidden.
         if not self.use_local:
             from firebase_admin import storage
-            blob = storage.bucket().blob(storage_path)
-            if blob.exists():
-                blob.delete()
+            from google.api_core.exceptions import NotFound
+            try:
+                storage.bucket().blob(storage_path).delete()
+            except NotFound:
+                # Absence is the goal of a delete. Storage also answers 404 when
+                # its client retries a delete that already succeeded, and a
+                # separate exists() check can be stale by the time the delete is
+                # sent. Either way a missing object must not abort a resumable
+                # cleanup; every other storage error still propagates.
+                pass
         local_path.unlink(missing_ok=True)
 
     @local_locked

@@ -2,208 +2,91 @@
 
 import { useRouter } from "next/navigation";
 import Navbar from "@/components/Navbar";
+import Icon from "@/components/Icon";
 import { useAuth } from "@/lib/auth-context";
 import { useLang } from "@/lib/i18n";
+import "./entry.css";
 
 export default function Home() {
   const { user } = useAuth();
-  const { t } = useLang();
+  const { t, dir } = useLang();
   const router = useRouter();
-
-  const handleCTA = () => {
-    if (user) {
-      router.push("/dashboard");
-    } else {
-      router.push("/signup");
-    }
-  };
+  const handleCTA = () => router.push(user ? "/dashboard" : "/signup");
+  const tools = [
+    { icon: "exam", title: "Practice Exams", copy: "Build a Quiz, Midterm, or Final from your selected course material. Solve it, then reveal the answers." },
+    { icon: "cards", title: "Flashcards", copy: "Turn course concepts into a focused deck, with the source behind each side within reach." },
+    { icon: "summary", title: "Summaries", copy: "Bring concepts, definitions, and formulas into a structured summary you can return to." },
+    { icon: "chat", title: "AI Coach", copy: "Choose your sources and work through questions with a coach grounded in your course." },
+  ] as const;
 
   return (
     <>
       <Navbar />
-
-      <main className="pt-20">
-        {/* ============ HERO ============ */}
-        <section className="px-6 md:px-12 pt-20 pb-32 max-w-7xl mx-auto relative">
-          <h1 className="font-serif text-5xl md:text-7xl lg:text-8xl font-normal leading-[0.95] tracking-tight mb-8 max-w-5xl">
-            {t("Your lectures,")}{" "}
-            <em className="italic font-light text-accent">{t("finally")}</em>
-            <br />
-            <span className="relative inline-block">
-              {t("unforgotten.")}
-              <span className="absolute bottom-2 left-0 right-0 h-3 bg-accent-soft -z-10 opacity-60"></span>
-            </span>
-          </h1>
-
-          <p className="text-lg md:text-xl text-ink-soft max-w-2xl leading-relaxed mb-12">
-            {t("Mudaris turns your lecture documents, recordings, and past exams — in Arabic, English, or both — into structured summaries, full practice exams, smart flashcards, and an AI coach that actually knows your material.")}
-          </p>
-
-          <div className="flex flex-wrap gap-4 items-center">
-            <button
-              onClick={handleCTA}
-              className="bg-ink text-paper px-8 py-4 rounded-full text-sm font-medium hover:bg-accent transition-all hover:-translate-y-0.5 hover:shadow-lift inline-flex items-center gap-2.5"
-            >
-              {user ? t("Go to Dashboard") : t("Get started — it's free")}
-              <span>→</span>
-            </button>
-            <a
-              href="#features"
-              className="border border-ink px-6 py-4 rounded-full text-sm font-medium hover:bg-ink hover:text-paper transition"
-            >
-              {t("How it works")}
-            </a>
+      <main className="home-main">
+        <section className="home-hero">
+          <div className="home-hero-copy">
+            <h1>{t("A home for your lectures. Room to understand.")}</h1>
+            <p>{t("Turn your lecture documents into a course workspace for practice exams, flashcards, summaries, and questions. Start with what you're actually studying.")}</p>
+            <div className="home-actions">
+              <button onClick={handleCTA} className="ui-button primary">{user ? t("Open Dashboard") : t("Create your workspace")}<Icon name={dir === "rtl" ? "arrow-left" : "arrow-right"} size={18} /></button>
+              <a href="#how-it-works" className="ui-button secondary">{t("How it works")}</a>
+            </div>
+            <div className="home-language"><Icon name="globe" size={16} />{t("Your material in Arabic, English, or both.")}</div>
           </div>
-
-          {/* ============ FLOATING DECO CARDS ============ */}
-          <div className="absolute top-32 w-[400px] h-[500px] pointer-events-none hidden lg:block ltr:right-0 rtl:left-0">
-            <div className="deco-card deco-card-1">
-              <div className="font-mono text-[10px] text-ink-mute uppercase tracking-widest mb-2">
-                {t("Summary · Generated")}
-              </div>
-              <div className="font-serif text-lg font-medium mb-1.5">
-                {t("Neural Networks")}
-              </div>
-              <div className="text-xs text-ink-soft leading-relaxed">
-                {t("Key concept: backpropagation adjusts weights by computing gradients from the output layer backward through the network…")}
-              </div>
-            </div>
-
-            <div className="deco-card deco-card-2">
-              <div className="font-mono text-[10px] text-ink-mute uppercase tracking-widest mb-2">
-                {t("Practice Exam · Midterm · 24 questions")}
-              </div>
-              <div className="font-serif text-lg font-medium mb-1.5">
-                {t("What is the role of an activation function?")}
-              </div>
-              <div className="text-xs text-ink-soft leading-relaxed">
-                {t("A) To initialize weights")}
-                <br />
-                {t("B) To introduce non-linearity ✓")}
-                <br />
-                {t("C) To reduce overfitting")}
-              </div>
-            </div>
-
-            <div className="deco-card deco-card-3">
-              <div className="font-mono text-[10px] text-ink-mute uppercase tracking-widest mb-2">
-                {t("Flashcard · 3 of 24")}
-              </div>
-              <div className="font-serif text-lg font-medium mb-1.5">{t("CNN")}</div>
-              <div className="text-xs text-ink-soft leading-relaxed">
-                {t("Convolutional Neural Network — a deep learning architecture specialized for processing grid-like data such as images.")}
+          <div className="home-preview" aria-label={t("Illustrative course workspace")}>
+            <div className="home-preview-caption"><span>{t("A look inside Mudaris")}</span><span>{t("Illustrative example")}</span></div>
+            <div className="home-preview-window">
+              <div className="home-preview-topbar"><span>{t("Mudaris")}</span><div className="home-preview-dots" aria-hidden="true"><i /><i /><i /></div></div>
+              <div className="home-preview-body">
+                <div className="home-preview-course"><span><Icon name="folder" size={21} /></span><div><h2>{t("Machine Learning")}</h2><p>{t("Your course workspace")}</p></div></div>
+                <div className="home-preview-tabs" aria-hidden="true"><span>{t("Overview")}</span><span>{t("Materials")}</span><span>{t("Study tools")}</span></div>
+                <div className="home-preview-foundation">
+                  <strong>{t("A foundation built from your lectures")}</strong>
+                  <p>{t("Prepare your lecture documents, then confirm that your course material is complete.")}</p>
+                  <div className="home-preview-files">
+                    {["Introduction to learning.pdf", "Neural networks.pdf"].map((file) => <div className="home-preview-file" key={file}><Icon name="file" size={15} /><span>{t(file)}</span><Icon name="check-circle" size={15} /></div>)}
+                  </div>
+                </div>
+                <div className="home-preview-tools">{tools.map((tool) => <div className="home-preview-tool" key={tool.title}><Icon name={tool.icon} size={16} /><span>{t(tool.title)}</span></div>)}</div>
               </div>
             </div>
           </div>
         </section>
 
-        {/* ============ STATS STRIP ============ */}
-        <section className="bg-ink text-paper px-6 md:px-12 py-16 grid grid-cols-2 md:grid-cols-4 gap-8 md:gap-12">
-          {[
-            { num: "4", label: t("Study tools"), em: true },
-            { num: "AI", label: t("Course-grounded help"), em: false },
-            { num: "AR + EN", label: t("Bilingual support"), em: true },
-            { num: "PDF", label: t("Download study materials"), em: false },
-          ].map((s, i) => (
-            <div key={i} className="border-s border-paper/15 ps-6">
-              <div className="font-serif text-4xl md:text-5xl font-normal leading-none mb-2">
-                {s.em ? (
-                  <em className="italic text-accent-soft font-light">{s.num}</em>
-                ) : (
-                  s.num
-                )}
-              </div>
-              <div className="text-xs text-paper/60 font-mono uppercase tracking-widest">
-                {s.label}
-              </div>
-            </div>
-          ))}
-        </section>
-
-        {/* ============ FEATURES ============ */}
-        <section id="features" className="px-6 md:px-12 py-24 max-w-7xl mx-auto">
-          <div className="font-mono text-xs text-accent uppercase tracking-widest mb-4 flex items-center gap-3">
-            <span className="w-6 h-px bg-accent"></span>
-            {t("Capabilities")}
-          </div>
-
-          <h2 className="font-serif text-4xl md:text-6xl font-normal leading-none tracking-tight mb-20 max-w-3xl">
-            {t("One recording. Everything you need.")}
-          </h2>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-px bg-line border border-line rounded-3xl overflow-hidden">
+        <section id="how-it-works" className="home-flow">
+          <h2 className="home-section-title">{t("Start with your course. Find your way through it.")}</h2>
+          <div className="home-flow-grid">
             {[
-              {
-                num: "01",
-                icon: "🎙",
-                title: t("Bilingual Transcription"),
-                desc: t("Drop in lecture recordings — Arabic, English, or the natural mix. Whisper transcribes them and the AI surfaces exam hints, emphasized concepts, and chapter breakdowns."),
-              },
-              {
-                num: "02",
-                icon: "📋",
-                title: t("Structured Summaries"),
-                desc: t("Your chapters become key concepts, definitions, and formulas — with each section tagged high / medium / low likelihood for the exam, based on your past papers."),
-              },
-              {
-                num: "03",
-                icon: "📝",
-                title: t("Practice Exams"),
-                desc: t("Generate Quiz, Midterm, or Final practice papers predicted from all your selected past exams. Download the PDF, solve it yourself, then reveal the model answer key in red."),
-              },
-              {
-                num: "04",
-                icon: "🗂️",
-                title: t("Smart Flashcards"),
-                desc: t("Cards auto-built from your documents — weighted toward the topics your past exams emphasize, so you study what's actually likely to show up."),
-              },
-              {
-                num: "05",
-                icon: "🎓",
-                title: t("AI Chat Coach"),
-                desc: t("Pick which chapters, recordings, and past exams to ground the conversation in, then ask anything — explanations, quick quizzes, exam tips — in Arabic or English."),
-              },
-              {
-                num: "06",
-                icon: "🔍",
-                title: t("Past-Exam Intelligence"),
-                desc: t("Upload old exams once. Mudaris extracts topic weights, question patterns, and difficulty — and uses them to shape every summary, flashcard, exam, and coach reply."),
-              },
-            ].map((f) => (
-              <div key={f.num} className="bg-paper p-10 hover:bg-bg-alt transition">
-                <div className="font-serif italic text-sm text-ink-mute mb-6">
-                  {f.num} / 06
-                </div>
-                <div className="w-12 h-12 flex items-center justify-center bg-bg-alt rounded-xl mb-5 text-2xl">
-                  {f.icon}
-                </div>
-                <h3 className="font-serif text-2xl font-medium mb-3 tracking-tight">
-                  {f.title}
-                </h3>
-                <p className="text-sm text-ink-soft leading-relaxed">{f.desc}</p>
-              </div>
-            ))}
+              ["1", "Bring your lectures together", "Upload all your lecture documents first. Preparation and analysis make the original material ready for your study tools."],
+              ["2", "Confirm your foundation", "Check that every lecture document is ready, then confirm you've added them all. Add past exams, recordings, and tutorials when you need them."],
+              ["3", "Choose how you study", "Select your sources, make a practice exam, review a deck, read a summary, or talk through a question with the AI Coach."],
+            ].map(([step, title, copy]) => <div className="home-flow-item" key={step}><span className="home-flow-number">{step}</span><h3>{t(title)}</h3><p>{t(copy)}</p></div>)}
           </div>
         </section>
 
-        {/* ============ CTA ============ */}
-        <section className="px-6 md:px-12 py-24 max-w-4xl mx-auto text-center">
-          <h2 className="font-serif text-4xl md:text-6xl font-normal leading-tight tracking-tight mb-8">
-            {t("Stop re-listening. Start mastering.")}
-          </h2>
-          <button
-            onClick={handleCTA}
-            className="bg-ink text-paper px-10 py-5 rounded-full text-base font-medium hover:bg-accent transition-all hover:-translate-y-0.5 hover:shadow-lift inline-flex items-center gap-2.5"
-          >
-            {user ? t("Open Dashboard") : t("Get Started Free")}
-            <span>→</span>
-          </button>
+        <section id="features" className="home-tools-section">
+          <div className="home-tools-inner">
+            <h2 className="home-section-title">{t("Four ways to work with what you're learning.")}</h2>
+            <div className="home-tools-grid">{tools.map((tool) => <article key={tool.title}><div className="home-tool-icon"><Icon name={tool.icon} size={22} /></div><h3>{t(tool.title)}</h3><p>{t(tool.copy)}</p></article>)}</div>
+          </div>
         </section>
 
-        {/* ============ FOOTER ============ */}
-        <footer className="border-t border-line px-6 md:px-12 py-8 text-center text-sm text-ink-mute">
-          {t("Mudaris © 2026 · Built with ♥ in Riyadh")}
-        </footer>
+        <section className="home-evidence">
+          <div className="home-evidence-copy">
+            <h2 className="home-section-title">{t("Keep the source in sight.")}</h2>
+            <p>{t("Open the lecture evidence behind supported answers, concepts, and study materials. Your original sources stay connected to the work you create, so you can check the context for yourself.")}</p>
+            <button onClick={handleCTA} className="ui-button primary">{user ? t("Go to Dashboard") : t("Get Started")}<Icon name={dir === "rtl" ? "arrow-left" : "arrow-right"} size={17} /></button>
+          </div>
+          <div className="home-source-sample">
+            <p>{t("Illustrative source preview")}</p>
+            <div className="home-source-paper">
+              <h3>{t("Neural networks.pdf")}</h3>
+              <blockquote>{t("An activation function introduces non-linearity, allowing a neural network to learn more complex relationships.")}</blockquote>
+              <small><Icon name="file" size={14} />{t("Original lecture material")}</small>
+            </div>
+          </div>
+        </section>
+        <footer className="home-footer"><span>{t("Mudaris © 2026")}</span><span>{t("Made for studying in Arabic and English.")}</span></footer>
       </main>
     </>
   );

@@ -9,9 +9,7 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        // RGB-triplet CSS variables (set in globals.css) so the whole palette
-        // swaps for dark mode while opacity modifiers (e.g. bg-sage/10) keep
-        // working via <alpha-value>.
+        // Shared RGB-triplet palette with opacity modifiers such as bg-sage/10.
         bg: "rgb(var(--c-bg) / <alpha-value>)",
         "bg-alt": "rgb(var(--c-bg-alt) / <alpha-value>)",
         ink: "rgb(var(--c-ink) / <alpha-value>)",
@@ -23,25 +21,28 @@ const config: Config = {
         sage: "rgb(var(--c-sage) / <alpha-value>)",
         paper: "rgb(var(--c-paper) / <alpha-value>)",
         line: "rgb(var(--c-line) / <alpha-value>)",
+        control: "rgb(var(--c-control) / <alpha-value>)",
+        depth: "rgb(var(--c-depth) / <alpha-value>)",
+        danger: "rgb(var(--c-danger) / <alpha-value>)",
       },
       fontFamily: {
         // Direct font names — match prototype exactly
-        serif: ['Fraunces', 'serif'],
-        sans: ['"IBM Plex Sans"', 'sans-serif'],
-        mono: ['"IBM Plex Mono"', 'monospace'],
+        serif: ['Manrope', 'sans-serif'],
+        sans: ['Manrope', 'sans-serif'],
+        mono: ['Manrope', 'sans-serif'],
       },
       boxShadow: {
-        soft: "0 1px 3px rgba(26,24,20,0.04), 0 8px 24px rgba(26,24,20,0.06)",
-        lift: "0 4px 12px rgba(26,24,20,0.08), 0 20px 40px rgba(26,24,20,0.1)",
+        soft: "0 2px 8px rgb(var(--c-shadow) / .04)",
+        lift: "0 8px 32px rgb(var(--c-shadow) / .08)",
       },
       animation: {
         "spin-slow": "spin 1.2s linear infinite",
         "pulse-soft": "pulse 2s infinite",
-        "fade-in": "fadeIn 0.5s ease-out",
+        "fade-in": "fadeIn 0.18s cubic-bezier(0.23,1,0.32,1)",
       },
       keyframes: {
         fadeIn: {
-          from: { opacity: "0", transform: "translateY(10px)" },
+          from: { opacity: "0", transform: "translateY(3px)" },
           to: { opacity: "1", transform: "translateY(0)" },
         },
       },

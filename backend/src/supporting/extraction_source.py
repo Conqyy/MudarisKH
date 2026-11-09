@@ -9,7 +9,7 @@ from src.supporting.contracts import (canonical_bytes, source_coverage, supporti
     validate_identity, validate_supporting_manifest, MAX_IMAGES_PER_CALL, MAX_TEXT_PER_CALL)
 from src.utils.document_sources import extract_source_units
 from src.utils.pdf_extract import image_to_image_uri
-from src.utils.source_context import navigation_guides
+from src.utils.source_context import build_source_plan, navigation_guides
 
 
 def prepare_pages(identity, original, file_type):
@@ -74,15 +74,24 @@ def lecture_context(reader, query, *, text_budget, image_budget):
     navigation.guide = []
 
     def planned():
-        candidates = navigation._plan('focused', query)
+        # This bridge already reserves the enclosing extraction policy/schema.
+        # Reserve the actual packet additions instead of SourceEvidence._plan's
+        # extra 1,000-character general-purpose request-wrapper allowance.
+        reserved = len(canonical_bytes(navigation.guide).decode('utf-8')) - 2 + len(',"navigationView":"partial"')
+        candidates = build_source_plan(navigation.scope, 'focused', query=query,
+            text_budget=navigation.text_budget - reserved, image_budget=navigation.image_budget)
         if not candidates:
-            candidates = navigation._plan('summary')
+            candidates = build_source_plan(navigation.scope, 'summary',
+                text_budget=navigation.text_budget - reserved, image_budget=navigation.image_budget)
         return next((p for p in candidates if any(e['disposition'] != 'excluded_blank' for e in p['evidence'])), None)
 
     batch = planned()
     if batch is None:
         raise ValueError('Prepared lecture guide and original context are required')
     navigation.guide = _navigation_guides(reader, batch)
+    # Captions are real request text. Reserve their exact metadata before
+    # packing the selected lecture context, which is navigation only.
+    navigation.text_budget -= image_caption_size({'lectureNavigation': batch})
     batch = planned()  # reserve selected guide bytes before packing original ranges
     if batch is None:
         raise ValueError('No bounded original lecture context is available')
@@ -93,7 +102,10 @@ def lecture_context(reader, query, *, text_budget, image_budget):
     images = packet.pop('imageParts', [])
     if not packet.get('guide') or not packet.get('evidence'):
         raise ValueError('Prepared lecture guide and original context are required')
-    if len(images) > image_budget or len(canonical_bytes(packet).decode('utf-8')) > text_budget:
+    captions = image_role_captions({'lectureNavigation': packet})
+    if len(captions) != len(images):
+        raise ValueError('Lecture image count differs from its original asset metadata')
+    if len(images) > image_budget or len(canonical_bytes(packet).decode('utf-8')) + sum(map(len, captions)) > text_budget:
         raise ValueError('Indivisible lecture guide/metadata exceeds available request bounds; split or simplify the source guide')
     if any(p.get('type') != 'image_url' or not str(p.get('image_url', {}).get('url', '')).startswith('data:image/') for p in images):
         raise ValueError('Lecture original image is unavailable')
@@ -154,8 +166,55 @@ def materialize(manifest, records, render):
     return parts
 
 
-def request_messages(policy, envelope, images):
+def image_role_captions(envelope):
+    """Match materialize's previous/current order, then lecture image order."""
+    captions = []
+
+    def add(role, ref, asset, instruction):
+        if not isinstance(asset, str) or not asset or not isinstance(ref, (dict, str)):
+            raise ValueError('Original image role is missing its exact source/asset locator')
+        if isinstance(ref, str) and ref not in envelope.get('sourceReferences', {}):
+            raise ValueError('Original image role has an unknown source reference')
+        captions.append(canonical_bytes({'imageRole': role, 'sourceReference': ref,
+            'assetId': asset, 'instruction': instruction}).decode('utf-8'))
+
+    for name, role, instruction in (
+        ('previous', 'PREVIOUS_CONTEXT_ONLY',
+         'Context only. Do not inventory again or classify the current source from this image.'),
+        ('source', 'CURRENT_SOURCE',
+         'Current source to inventory. Classify this page and retain all its academic content.')):
+        record = envelope.get(name)
+        if record is None:
+            continue
+        if not isinstance(record, dict) or not isinstance(record.get('assetIds'), list):
+            raise ValueError('Original image role metadata is invalid')
+        for asset in record['assetIds']:
+            add(role, record.get('ref'), asset, instruction)
+    for entry in envelope.get('lectureNavigation', {}).get('evidence', []):
+        for image in entry.get('images', []):
+            add('LECTURE_NAVIGATION_ONLY', image.get('ref'), image.get('asset', {}).get('assetId'),
+                'Lecture navigation only. Do not inventory it or classify the supporting page from it.')
+    return captions
+
+
+def image_caption_size(envelope):
+    return sum(map(len, image_role_captions(envelope)))
+
+
+def request_messages(policy, envelope, images, *, schema_size=0):
     encoded = canonical_bytes(envelope).decode('utf-8')
-    if len(policy) + len(encoded) > MAX_TEXT_PER_CALL or len(images) > MAX_IMAGES_PER_CALL:
+    captions = image_role_captions(envelope)
+    if len(captions) != len(images):
+        raise ValueError('Original image count differs from its role/asset metadata')
+    if any(not isinstance(part, dict) or part.get('type') != 'image_url' or
+           not isinstance(part.get('image_url'), dict) or
+           not str(part['image_url'].get('url', '')).startswith('data:image/') for part in images):
+        raise ValueError('Original image content is unavailable')
+    if type(schema_size) is not int or schema_size < 0:
+        raise ValueError('Invalid supporting schema size')
+    if len(policy) + len(encoded) + sum(map(len, captions)) + schema_size > MAX_TEXT_PER_CALL or len(images) > MAX_IMAGES_PER_CALL:
         raise ValueError('Supporting request metadata/context exceeds bounds; split source or reduce lecture context')
-    return [{'role': 'system', 'content': policy}, {'role': 'user', 'content': [{'type': 'text', 'text': encoded}, *images]}]
+    content = [{'type': 'text', 'text': encoded}]
+    for caption, part in zip(captions, images):
+        content.extend([{'type': 'text', 'text': caption}, deepcopy(part)])
+    return [{'role': 'system', 'content': policy}, {'role': 'user', 'content': content}]

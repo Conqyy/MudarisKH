@@ -2,80 +2,49 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import Navbar from "@/components/Navbar";
-import Sidebar from "@/components/Sidebar";
+import Link from "next/link";
+import AppShell from "@/components/AppShell";
+import Icon from "@/components/Icon";
 import ActivityListView from "@/components/ActivityListView";
 import { useAuth } from "@/lib/auth-context";
+import { useLang } from "@/lib/i18n";
 import { getUserCourses, Course } from "@/lib/firestore-helpers";
 import { clearRecents, useRecents } from "@/lib/activity";
+import "@/app/entry.css";
 
 export default function RecentPage() {
   const { user, loading } = useAuth();
+  const { t } = useLang();
   const router = useRouter();
   const recents = useRecents();
   const [courses, setCourses] = useState<Course[]>([]);
 
+  useEffect(() => { if (!loading && !user) router.push("/signin"); }, [user, loading, router]);
   useEffect(() => {
-    if (!loading && !user) router.push("/signin");
-  }, [user, loading, router]);
-
-  useEffect(() => {
-    if (!user) return;
-    getUserCourses(user.uid).then(setCourses).catch(console.error);
+    let cancelled = false;
+    setCourses([]);
+    if (user) getUserCourses(user.uid).then((items) => { if (!cancelled) setCourses(items); }).catch(console.error);
+    return () => { cancelled = true; };
   }, [user]);
 
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="font-mono text-sm text-ink-mute">Loading…</div>
-      </div>
-    );
-  }
+  if (loading) return <div className="entry-loading" role="status"><Icon name="loader" size={18} className="animate-spin" />{t("Loading…")}</div>;
   if (!user) return null;
 
   const handleClear = () => {
-    if (!confirm("Clear your entire Recent list? Bookmarks are kept.")) return;
+    if (!confirm(t("Clear your entire Recent list? Bookmarks are kept."))) return;
     clearRecents(user.uid);
   };
-
   const entries = recents.map((r) => ({ ...r, ts: r.lastAt }));
 
   return (
-    <>
-      <Navbar />
-      <div className="pt-20 flex">
-        <Sidebar courses={courses} />
-        <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-6xl mx-auto w-full">
-          <div className="my-10">
-            <h1 className="font-serif text-4xl md:text-5xl font-normal tracking-tight leading-tight mb-2">
-              Recent
-            </h1>
-            <p className="text-ink-soft">
-              Everything you&apos;ve opened lately — picks back up where you
-              left off.
-            </p>
-          </div>
-
-          {entries.length === 0 ? (
-            <div className="bg-paper border-2 border-dashed border-line rounded-3xl p-16 text-center">
-              <div className="text-5xl mb-4 opacity-60">◷</div>
-              <h3 className="font-serif text-2xl font-medium mb-2">
-                Nothing recent yet
-              </h3>
-              <p className="text-ink-soft max-w-md mx-auto">
-                Open a course, a chapter, a recording, or a practice exam, and
-                it&apos;ll show up here for quick access.
-              </p>
-            </div>
-          ) : (
-            <ActivityListView
-              items={entries}
-              mode="recent"
-              onClear={handleClear}
-            />
-          )}
-        </main>
-      </div>
-    </>
+    <AppShell courses={courses}>
+      <main className="workspace-main">
+        <header className="page-header"><div><h1 className="page-heading">{t("Recent")}</h1><p className="page-subtitle">{t("Return to the courses and study materials you've opened.")}</p></div></header>
+        <p className="entry-local-note"><Icon name="history" size={14} />{t("Your recent activity is stored on this device.")}</p>
+        {entries.length === 0 ? (
+          <section className="entry-empty-state"><div className="entry-empty-symbol"><Icon name="history" size={26} /></div><h2>{t("Nothing recent yet")}</h2><p>{t("Open a course, lecture document, recording, or practice exam to find it here next time.")}</p><Link href="/dashboard" className="ui-button primary">{t("Browse your courses")}</Link></section>
+        ) : <ActivityListView items={entries} mode="recent" onClear={handleClear} />}
+      </main>
+    </AppShell>
   );
 }

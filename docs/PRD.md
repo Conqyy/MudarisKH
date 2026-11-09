@@ -134,7 +134,7 @@ Each feature lists **what it does**, **how it works today**, and **acceptance cr
 
 ### 5.8 Study schedule / reminders
 **What:** Lightweight study-plan entries and reminders (weekly schedule + dashboard reminders).
-**How:** `POST/PUT/GET/DELETE /api/schedule*`; `schedule_entries` collection. UI: `WeeklySchedule`, `CourseReminders`, `DashboardReminders`.
+**How:** `POST/PUT/GET/DELETE /api/schedule*`; `schedule_entries` collection. UI: `WeeklySchedule`, `DashboardReminders` (lists existing reminders and marks them done; the course-page reminder editor was removed in the course-workspace redesign).
 
 ### 5.9 Cross-cutting invariants (do-not-regress)
 - **Dark mode** via `[data-theme="dark"]` CSS variables; `theme.tsx` provider; light/dark both supported.

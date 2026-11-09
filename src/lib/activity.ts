@@ -253,15 +253,6 @@ export const KIND_LABEL: Record<ActivityKind, string> = {
   flashcards: "Flashcards",
 };
 
-export const KIND_ICON: Record<ActivityKind, string> = {
-  course: "📚",
-  document: "📄",
-  audio: "🎙️",
-  exam: "📝",
-  summary: "📋",
-  flashcards: "🗂️",
-};
-
 export function relativeTime(ms: number): string {
   const diff = Date.now() - ms;
   if (diff < 60_000) return "just now";

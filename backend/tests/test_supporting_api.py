@@ -33,6 +33,203 @@ def test_supporting_status_has_only_public_progress_fields(api_module, monkeypat
     api.app.dependency_overrides.clear()
 
 
+_LIST_CASES = [
+    ('/api/historical-exams/course', 'get_course_historical_exams', 'historical_exams', 'historical_exam'),
+    ('/api/tutorials/course', 'get_course_tutorials', 'tutorials', 'tutorial'),
+    ('/api/audio/course', 'get_course_audio_recordings', 'audio_recordings', 'audio'),
+    ('/api/audio/course', 'get_course_audio_recordings', 'audio_recordings', 'notes'),
+]
+
+
+def _list_row(material_id, kind, *, managed=True, **overrides):
+    row = {'id': material_id, 'userId': 'owner', 'courseId': 'course',
+           'title': material_id, 'status': 'incomplete'}
+    if managed:
+        row['supportingAnalysis'] = {'version': 1}
+    if kind == 'notes':
+        row['sourceType'] = 'notes'
+    return {**row, **overrides}
+
+
+def _public_status(identity):
+    return {'materialId': identity['materialId'], 'kind': identity['kind'],
+            'status': 'incomplete', 'stage': 'aligning', 'jobId': 'job-1',
+            'legacy': False, 'stale': False, 'progress': {}, 'errorMessage': None}
+
+
+@pytest.mark.parametrize('route,getter,result_key,kind', _LIST_CASES)
+@pytest.mark.parametrize('managed', [True, False], ids=['managed', 'legacy'])
+def test_supporting_lists_omit_deleting_rows_without_hiding_valid_materials(
+        api_module, monkeypatch, route, getter, result_key, kind, managed):
+    api = api_module
+    _auth(monkeypatch, api)
+    rows = [_list_row('deleted', kind, managed=managed, status='deleting'),
+            _list_row('valid', kind),
+            _list_row('foreign-owner', kind, userId='another-owner'),
+            _list_row('foreign-course', kind, courseId='another-course')]
+    monkeypatch.setattr(api.db_client, getter, lambda *args, **kwargs: deepcopy(rows))
+    library = MagicMock()
+
+    def status(identity):
+        if identity['materialId'] == 'deleted':
+            raise api.DataConflict('Supporting material was deleted')
+        assert identity['materialId'] == 'valid'
+        assert identity['kind'] == kind
+        return _public_status(identity)
+
+    library.public_status.side_effect = status
+    monkeypatch.setattr(api, 'supporting_library', library)
+    with TestClient(api.app) as client:
+        response = client.get(route)
+    assert response.status_code == 200
+    assert [row['id'] for row in response.json()[result_key]] == ['valid']
+    assert library.public_status.call_count == 1
+    api.app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize('route,getter,result_key,kind', _LIST_CASES)
+def test_supporting_lists_name_unfinished_deletions_apart_from_usable_materials(
+        api_module, monkeypatch, route, getter, result_key, kind):
+    api = api_module
+    _auth(monkeypatch, api)
+    rows = [_list_row('stalled', kind, status='deleting', title='Tutorial 4 (1)',
+                      processingJob={}, storagePath='private/path'),
+            _list_row('valid', kind),
+            _list_row('foreign-owner', kind, userId='another-owner', status='deleting'),
+            _list_row('foreign-course', kind, courseId='another-course', status='deleting')]
+    monkeypatch.setattr(api.db_client, getter, lambda *args, **kwargs: deepcopy(rows))
+    library = MagicMock()
+    library.public_status.side_effect = _public_status
+    monkeypatch.setattr(api, 'supporting_library', library)
+    with TestClient(api.app) as client:
+        response = client.get(route)
+    assert response.status_code == 200
+    body = response.json()
+    # Study tools read only the material list, so a deleting row never
+    # becomes selectable; the course page offers to finish the deletion.
+    assert [row['id'] for row in body[result_key]] == ['valid']
+    assert body['unfinished_deletions'] == [
+        {'id': 'stalled', 'kind': kind, 'courseId': 'course', 'title': 'Tutorial 4 (1)'}]
+    library.public_status.assert_called_once()
+    api.app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize('route,getter,result_key,kind', _LIST_CASES)
+@pytest.mark.parametrize('reason', ['Supporting material was deleted', 'Supporting material is no longer available'])
+def test_supporting_lists_survive_a_material_disappearing_after_the_query(
+        api_module, monkeypatch, route, getter, result_key, kind, reason):
+    api = api_module
+    _auth(monkeypatch, api)
+    course_check = MagicMock(return_value={'id': 'course', 'userId': 'owner'})
+    monkeypatch.setattr(api, '_require_course', course_check)
+    monkeypatch.setattr(api.db_client, getter, lambda *args, **kwargs: [
+        _list_row('gone', kind), _list_row('valid', kind)])
+    library = MagicMock()
+
+    def status(identity):
+        if identity['materialId'] == 'gone':
+            raise api.DataConflict(reason)
+        assert identity['kind'] == kind
+        return _public_status(identity)
+
+    library.public_status.side_effect = status
+    monkeypatch.setattr(api, 'supporting_library', library)
+    with TestClient(api.app) as client:
+        response = client.get(route)
+    assert response.status_code == 200
+    assert [row['id'] for row in response.json()[result_key]] == ['valid']
+    assert course_check.call_count == 2
+    course_check.assert_called_with('course', 'owner')
+    api.app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize('route,getter,result_key,kind', _LIST_CASES)
+def test_supporting_list_conflict_does_not_hide_parent_course_deletion(
+        api_module, monkeypatch, route, getter, result_key, kind):
+    api = api_module
+    _auth(monkeypatch, api)
+    course_check = MagicMock(side_effect=[{'id': 'course', 'userId': 'owner'},
+        api.HTTPException(status_code=404, detail='Course not found')])
+    monkeypatch.setattr(api, '_require_course', course_check)
+    monkeypatch.setattr(api.db_client, getter, lambda *args, **kwargs: [_list_row('gone', kind)])
+    library = MagicMock()
+    library.public_status.side_effect = api.DataConflict('Course is no longer available')
+    monkeypatch.setattr(api, 'supporting_library', library)
+    with TestClient(api.app) as client:
+        response = client.get(route)
+    assert response.status_code == 404
+    assert response.json()['detail'] == 'Course not found'
+    assert course_check.call_count == 2
+    api.app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize('kind,getter', [
+    ('historical_exam', 'get_historical_exam'), ('tutorial', 'get_tutorial'),
+    ('audio', 'get_audio_recording'), ('notes', 'get_audio_recording')])
+def test_direct_status_read_still_rejects_unavailable_materials(api_module, monkeypatch, kind, getter):
+    api = api_module
+    _auth(monkeypatch, api)
+    monkeypatch.setattr(api.db_client, getter, lambda *args, **kwargs: _list_row('gone', kind))
+    library = MagicMock()
+    library.public_status.side_effect = api.DataConflict('Supporting material was deleted')
+    monkeypatch.setattr(api, 'supporting_library', library)
+    with TestClient(api.app) as client:
+        response = client.get(f'/api/supporting/{kind}/gone/status?course_id=course')
+    assert response.status_code == 404
+    assert response.json()['detail'] == 'Supporting material not found'
+    api.app.dependency_overrides.clear()
+
+
+@pytest.mark.parametrize('managed', [True, False], ids=['managed', 'legacy'])
+def test_supporting_list_returns_empty_when_every_material_is_deleting(api_module, monkeypatch, managed):
+    api = api_module
+    _auth(monkeypatch, api)
+    monkeypatch.setattr(api.db_client, 'get_course_tutorials', lambda *args, **kwargs: [
+        _list_row('deleted', 'tutorial', managed=managed, status='deleting')])
+    library = MagicMock()
+    monkeypatch.setattr(api, 'supporting_library', library)
+    with TestClient(api.app) as client:
+        response = client.get('/api/tutorials/course')
+    assert response.status_code == 200
+    assert response.json()['tutorials'] == []
+    library.public_status.assert_not_called()
+    api.app.dependency_overrides.clear()
+
+
+def test_deleting_only_list_does_not_hide_account_cleanup(api_module, monkeypatch):
+    from src.database.firebase_client import DataDeletionConflict
+    api = api_module
+    _auth(monkeypatch, api)
+    course_check = MagicMock(side_effect=[{'id': 'course', 'userId': 'owner'},
+        DataDeletionConflict('Account cleanup is in progress')])
+    monkeypatch.setattr(api, '_require_course', course_check)
+    monkeypatch.setattr(api.db_client, 'get_course_tutorials', lambda *args, **kwargs: [
+        _list_row('deleted', 'tutorial', status='deleting')])
+    library = MagicMock()
+    monkeypatch.setattr(api, 'supporting_library', library)
+    with TestClient(api.app) as client:
+        response = client.get('/api/tutorials/course')
+    assert response.status_code == 409
+    assert course_check.call_count == 2
+    library.public_status.assert_not_called()
+    api.app.dependency_overrides.clear()
+
+
+def test_supporting_list_does_not_conceal_unexpected_status_failures(api_module, monkeypatch):
+    api = api_module
+    _auth(monkeypatch, api)
+    monkeypatch.setattr(api.db_client, 'get_course_tutorials', lambda *args, **kwargs: [
+        _list_row('valid', 'tutorial')])
+    library = MagicMock()
+    library.public_status.side_effect = RuntimeError('Provider is unavailable')
+    monkeypatch.setattr(api, 'supporting_library', library)
+    with TestClient(api.app, raise_server_exceptions=False) as client:
+        response = client.get('/api/tutorials/course')
+    assert response.status_code == 500
+    assert response.json()['detail'] == 'The operation could not be completed. Please retry.'
+    api.app.dependency_overrides.clear()
+
+
 def test_source_echoes_complete_typed_reference(api_module, monkeypatch):
     api = api_module
     _auth(monkeypatch, api)

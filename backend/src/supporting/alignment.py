@@ -6,7 +6,8 @@ from src.config.supporting_prompts import (ALIGNMENT_CONTEXT_VERIFY, ALIGNMENT_S
 from src.supporting.alignment_evidence import (compact_supplied, context_components,
     exact_review_coverage, proof_batch, proof_in_supplied, ref_key, validate_review_ledger)
 from src.supporting.contracts import (DEFAULT_MODEL_CALL_BUDGET, canonical_bytes, digest,
-    aggregate_item_alignment, validate_alignment_report, validate_identity, validate_source_proof)
+    aggregate_item_alignment, validate_alignment_report, validate_identity, validate_source_proof,
+    validate_source_proof_shape)
 from src.utils.source_context import build_source_plan
 from src.utils.source_context import resolve_source_scope
 from src.services.source_evidence import SourceEvidence
@@ -24,6 +25,29 @@ def _judgments(value, target_ids):
     if set(result) != set(target_ids):
         raise ValueError('Original response did not independently assess every target')
     return result
+
+
+def _blank_batch_refs(scope, batch):
+    """Exclude only source units that contain no text or original visual assets."""
+    evidence = batch.get('evidence')
+    if not evidence or not all(entry.get('disposition') == 'excluded_blank' for entry in evidence):
+        return None
+    units = {ref_key({'documentId': manifest['documentId'],
+        'sourceRevision': manifest['sourceRevision'], 'unitId': unit['unitId']}): unit
+        for manifest in scope['manifests'] for unit in manifest['units']}
+    refs = []
+    for entry in evidence:
+        unit = units.get(ref_key(entry.get('ref')))
+        if (unit is None or unit.get('blank') is not True
+                or any(unit.get(field, '') for field in ('text', 'visualText'))
+                or unit.get('visualAssets') != [] or entry.get('ranges') != []
+                or entry.get('images') != [] or entry.get('assetIds')):
+            raise ValueError('Excluded blank batch does not match empty selected originals')
+        refs.append(deepcopy(entry['ref']))
+    # Use the same selected-scope/duplicate/reference validation as publication
+    # and checkpoint recovery before this deterministic exclusion enters a ledger.
+    exact_review_coverage(scope, [], refs)
+    return refs
 
 
 def _proofs(identity, library, proofs):
@@ -70,6 +94,67 @@ def _supporting_packet(identity, library, proofs):
             images.append({'type': 'image_url', 'image_url': {'url': uri}})
         evidence.append(entry)
     return evidence, images
+
+
+def _validate_original_rows(stage, value, targets, supplied, *, manifest, scope, nominated):
+    """Validate a whole returned group before it can change accepted review state."""
+    rows = _judgments(value, [target['id'] for target in targets])
+    supporting_units = {unit['unitId']: unit for unit in manifest['units']}
+    lecture_units = {ref_key({'documentId': document['documentId'],
+        'sourceRevision': document['sourceRevision'], 'unitId': unit['unitId']}): unit
+        for document in scope['manifests'] for unit in document['units']}
+    supplied_map = {ref_key(entry['ref']): entry for entry in compact_supplied(
+        [entry for entry in supplied if entry.get('disposition') != 'excluded_blank'])}
+    positive = ('support', 'premise', 'related_anchor', 'conflict', 'explicit_exclusion')
+    for target in targets:
+        row = rows[target['id']]
+        if stage in ('source_check', 'context_verify'):
+            if row.get('sourceVerdict') not in ('established', 'uncertain', 'not_established'):
+                raise ValueError('Invalid supporting original judgment')
+            proofs = row.get('sourceProofs', [])
+            if not isinstance(proofs, list) or (row['sourceVerdict'] == 'established' and not proofs):
+                raise ValueError('Original supporting proofs are required')
+            for proof in proofs:
+                validate_source_proof_shape(proof, supporting=True)
+                if canonical_bytes(proof) not in set(map(canonical_bytes, target['supportingSourceProofs'])):
+                    raise ValueError('Source check proof was not supplied')
+                unit = supporting_units.get(proof['ref']['unitId'])
+                if unit is None:
+                    raise ValueError('Supporting proof is outside the original source')
+                validate_source_proof(proof, ref=proof['ref'], unit=unit)
+            if stage == 'source_check':
+                queries = row.get('queries', [])
+                if not isinstance(queries, list) or len(queries) > 3 or any(not isinstance(q, str) for q in queries):
+                    raise ValueError('Invalid semantic candidate queries')
+            if 'contextForItemId' in target:
+                if row.get('decision') not in ('required', 'not_required', 'unresolved'):
+                    raise ValueError('Original context dependency was not judged for this item')
+                if row.get('contentKind') not in ('academic_claim', 'hypothetical_data',
+                                                  'procedural_instruction', 'uncertain'):
+                    raise ValueError('Original context kind is uncertain')
+                if type(row.get('methodRequired')) is not bool:
+                    raise ValueError('Original context method dependency was not checked')
+            continue
+        verdicts = (*positive, 'no_support', 'uncertain') if stage == 'search' else (
+            'support', 'related_anchor', 'conflict', 'explicit_exclusion', 'reject', 'uncertain')
+        verdict = row.get('verdict')
+        if verdict not in verdicts:
+            raise ValueError('Invalid lecture original judgment')
+        proofs = row.get('lectureProofs', [])
+        if not isinstance(proofs, list):
+            raise ValueError('Invalid lecture proof list')
+        for proof in proofs:
+            validate_source_proof_shape(proof, supporting=False)
+            unit = lecture_units.get(ref_key(proof['ref']))
+            if unit is None:
+                raise ValueError('Lecture proof is outside selected originals')
+            validate_source_proof(proof, ref=proof['ref'], unit=unit)
+            proof_in_supplied(proof, supplied_map)
+        if verdict in positive and not proofs:
+            raise ValueError('Positive lecture judgment needs exact original proof')
+        if stage == 'verify' and verdict in positive and proofs != nominated[target['id']]['lectureProofs']:
+            raise ValueError('Independent verification changed nominated proofs')
+    return rows
 
 
 class SupportingAligner:
@@ -120,6 +205,14 @@ class SupportingAligner:
             checkpoint(deepcopy(state))
 
         def original_call(stage, batch, active, *, nominated=None, reader=None):
+            def failed(error):
+                state['error'] = error
+                for target in active:
+                    state['uncertain'][target['id']] = error
+                    state['failedReads'][target['id']] = error
+                save()
+                return None, None
+
             try:
                 policy = {'source_check': ALIGNMENT_SOURCE_CHECK, 'search': ALIGNMENT_SEARCH,
                           'verify': ALIGNMENT_VERIFY, 'context_verify': ALIGNMENT_CONTEXT_VERIFY}[stage]
@@ -137,6 +230,8 @@ class SupportingAligner:
                            if 'contextForItemId' in target else {})
                         for target in target_group],
                         'supportingEvidence': support, 'imageParts': images}
+                    task['supportingProofs'] = {target['id']: deepcopy(target['supportingSourceProofs'])
+                                                for target in target_group}
                     if nominated is not None:
                         task['nominatedProofs'] = {target['id']: deepcopy(nominated[target['id']])
                                                    for target in target_group}
@@ -161,27 +256,100 @@ class SupportingAligner:
 
                 combined, accepted_supply = {}, None
                 for target_group in packed:
-                    if state['modelCalls'] >= model_call_budget:
-                        state['error'] = ('Successful model-call budget exhausted; retry with a fresh '
-                                          'budget or split the source')
-                        save()
-                        return None, None
                     task = request_task(target_group)
+                    for attempt in range(2):
+                        if state['modelCalls'] >= model_call_budget:
+                            return failed('Successful model-call budget exhausted; retry with a fresh '
+                                          'budget or split the source')
+                        if not source_reader.original_batch_fits(batch, policy=policy, task=task):
+                            raise ValueError('Alignment contract repair exceeds the complete request bound; split its source context')
+                        completion_received = False
 
-                    def returned():
-                        state['modelCalls'] += 1
-                        save()
+                        def returned():
+                            nonlocal completion_received
+                            state['modelCalls'] += 1
+                            save()
+                            completion_received = True
 
-                    value, supplied = source_reader.read_original_batch(
-                        batch, policy=policy, task=task, on_response=returned)
-                    rows = _judgments(value, [target['id'] for target in target_group])
+                        try:
+                            value, supplied = source_reader.read_original_batch(
+                                batch, policy=policy, task=task, on_response=returned)
+                            rows = _validate_original_rows(stage, value, target_group, supplied,
+                                manifest=manifest, scope=source_reader.scope, nominated=nominated)
+                            break
+                        except (ValueError, TypeError, KeyError) as exc:
+                            if not completion_received or attempt:
+                                raise
+                            task['responseValidationError'] = str(exc)[:500]
+                            task['responseRepairInstructions'] = (
+                                'Return a fresh complete judgment for every supplied target, using the same '
+                                'originals. Correct only the invalid response contract; retain uncertainty '
+                                'or rejection when supported. Copy exact refs with no extra fields: supporting '
+                                '{kind, materialId, sourceRevision, unitId}; lecture '
+                                '{documentId, sourceRevision, unitId}. Use exact supplied proof ranges, quotes '
+                                'and image asset IDs. Do not invent evidence or change nominated proofs.')
                     combined.update(rows)
                     accepted_supply = supplied
+                for target in active:
+                    previous_error = state['failedReads'].pop(target['id'], None)
+                    if previous_error is not None and state['uncertain'].get(target['id']) == previous_error:
+                        state['uncertain'].pop(target['id'], None)
+                state['error'] = None
                 return combined, accepted_supply
             except Exception as exc:
-                state['error'] = str(exc) if isinstance(exc, (ValueError, RuntimeError)) else type(exc).__name__
+                return failed(str(exc) if isinstance(exc, (ValueError, RuntimeError)) else type(exc).__name__)
+
+        def verify_combined_premises(live):
+            joint_targets = [target for target in live if target['id'] not in state['verified']
+                             and target['id'] in state['premiseCandidates']]
+            bundles = {}
+            try:
+                for target in joint_targets:
+                    candidate = state['premiseCandidates'][target['id']]
+                    batch = proof_batch(scope, candidate['lectureProofs'])
+                    key = digest(batch['evidence'])
+                    bundles.setdefault(key, {'batch': batch, 'targets': []})['targets'].append(target)
+                for bundle in bundles.values():
+                    candidates = bundle['targets']
+                    nominated = {target['id']: {'verdict': 'support',
+                        'lectureProofs': deepcopy(state['premiseCandidates'][target['id']]['lectureProofs']),
+                        'reason': state['premiseCandidates'][target['id']]['reason']}
+                        for target in candidates}
+                    verified, _ = original_call('verify', bundle['batch'], candidates,
+                                                nominated=nominated)
+                    if verified is None:
+                        for target in candidates:
+                            state['uncertain'][target['id']] = (state.get('error') or
+                                'Combined original evidence could not be independently verified')
+                        save()
+                        return False
+                    for target in candidates:
+                        row = verified[target['id']]
+                        proof_set = nominated[target['id']]['lectureProofs']
+                        if row.get('verdict') == 'support' and row.get('lectureProofs') == proof_set:
+                            state['verified'][target['id']] = {'verdict': 'support',
+                                'lectureProofs': deepcopy(proof_set),
+                                'reason': str(row.get('reason', ''))[:500]}
+                            state['uncertain'].pop(target['id'], None)
+                        elif row.get('verdict') == 'uncertain':
+                            state['uncertain'][target['id']] = str(row.get('reason', ''))[:500] or True
+                        elif row.get('verdict') != 'reject':
+                            raise ValueError('Invalid combined-premise verification judgment')
+                    save()
+            except (ValueError, TypeError, KeyError) as exc:
+                state['error'] = str(exc)
+                for target in joint_targets:
+                    state['uncertain'][target['id']] = str(exc)
                 save()
-                return None, None
+                return False
+            return True
+
+        def complete_plan(target_scope):
+            remaining = model_call_budget - state['modelCalls']
+            if remaining < 1:
+                raise ValueError('Successful model-call budget exhausted; retry with a fresh budget or split the source')
+            return build_source_plan(target_scope, 'summary', text_budget=8000, image_budget=4,
+                                     include_blank_assets=True, max_batches=min(512, remaining))
 
         # Stage 1: independently establish what each supporting original says.
         groups = [targets[i:i+16] for i in range(0, len(targets), 16)]
@@ -194,8 +362,7 @@ class SupportingAligner:
                 candidates = build_source_plan(scope, 'focused', query=query, text_budget=8000,
                                                image_budget=4, include_blank_assets=True)
                 if not candidates:
-                    candidates = build_source_plan(scope, 'summary', text_budget=8000,
-                                                   image_budget=4, include_blank_assets=True)
+                    candidates = complete_plan(scope)
             except ValueError as exc:
                 state['error'] = str(exc)
                 save()
@@ -250,8 +417,7 @@ class SupportingAligner:
                                              text_budget=8000, image_budget=4,
                                              include_blank_assets=True)
                 if not batches:
-                    batches = build_source_plan(scope, 'summary', text_budget=8000, image_budget=4,
-                                                include_blank_assets=True)
+                    batches = complete_plan(scope)
             except ValueError as exc:
                 state['error'] = str(exc)
                 save()
@@ -290,159 +456,145 @@ class SupportingAligner:
                 continue
             queries = list(dict.fromkeys([target['text'] for target in live] +
                 [q for target in live for q in state['sourceChecks'][target['id']]['queries']]))
-            candidates = []
-            try:
-                for query in queries:
-                    candidates += build_source_plan(scope, 'focused', query=query, text_budget=8000,
-                                                    image_budget=4, include_blank_assets=True)
-                candidates += build_source_plan(scope, 'summary', text_budget=8000, image_budget=4,
-                                                include_blank_assets=True)
-            except ValueError as exc:
-                state['error'] = str(exc)
-                save()
-                return self._report(identity, inventory, scope, targets, state)
             visited = set()
-            for batch in candidates:
-                active = [target for target in live if target['id'] not in state['verified']]
-                if not active:
+            for exhaustive in (False, True):
+                if all(target['id'] in state['verified'] for target in live):
                     break
-                key = digest(batch['evidence'])
-                if key in visited:
-                    continue
-                visited.add(key)
-                rows, supplied = original_call('search', batch, active)
-                if rows is None:
-                    return self._report(identity, inventory, scope, targets, state)
+                candidates = []
                 try:
-                    blank_refs = [entry['ref'] for entry in supplied
-                                  if entry.get('disposition') == 'excluded_blank']
-                    ledger = compact_supplied([entry for entry in supplied
-                                               if entry.get('disposition') != 'excluded_blank'])
-                    selected = {ref_key(ref): unit for manifest_row in scope['manifests']
-                                for unit in manifest_row['units']
-                                for ref in [{'documentId': manifest_row['documentId'],
-                                    'sourceRevision': manifest_row['sourceRevision'], 'unitId': unit['unitId']} ]}
-                    nominations = {}
-                    premise_updates = {}
-                    accepted_rows = []
-                    for target in active:
-                        row = rows[target['id']]
-                        verdict = row.get('verdict')
-                        if verdict not in ('support', 'premise', 'no_support', 'related_anchor', 'conflict',
-                                           'explicit_exclusion', 'uncertain'):
-                            raise ValueError('Invalid lecture original judgment')
-                        proofs = row.get('lectureProofs', [])
-                        if not isinstance(proofs, list):
-                            raise ValueError('Invalid lecture proof list')
-                        supplied_map = {ref_key(entry['ref']): entry for entry in ledger}
-                        for proof in proofs:
-                            unit = selected.get(ref_key(proof['ref']))
-                            if unit is None:
-                                raise ValueError('Lecture proof is outside selected originals')
-                            validate_source_proof(proof, ref=proof['ref'], unit=unit)
-                            proof_in_supplied(proof, supplied_map)
-                        if verdict in ('support', 'premise', 'related_anchor', 'conflict',
-                                       'explicit_exclusion') and not proofs:
-                            raise ValueError('Positive lecture judgment needs exact original proof')
-                        accepted_rows.append((target['id'], verdict))
-                        if verdict == 'premise':
-                            previous = state['premiseCandidates'].get(target['id'], {})
-                            combined = {canonical_bytes(proof): deepcopy(proof)
-                                        for proof in [*previous.get('lectureProofs', []), *proofs]}
-                            premise_updates[target['id']] = {
-                                'verdict': 'premise', 'lectureProofs': list(combined.values()),
-                                'reason': str(row.get('reason', ''))[:500]}
-                        elif proofs and verdict != 'no_support':
-                            nominations[target['id']] = {'verdict': verdict, 'lectureProofs': proofs,
-                                'reason': str(row.get('reason', ''))[:500]}
-                    # A returned group is one acceptance unit. Validate every row
-                    # before recording any of its original-read coverage.
-                    state['premiseCandidates'].update(premise_updates)
-                    for target_id, verdict in accepted_rows:
-                        state['ledgers'][target_id] = compact_supplied([
-                            *state['ledgers'][target_id], *ledger])
-                        state['excludedBlankRefs'][target_id] = list({
-                            ref_key(ref): deepcopy(ref) for ref in [
-                                *state['excludedBlankRefs'][target_id], *blank_refs]}.values())
-                        state['acceptedReads'][target_id].append({
-                            'suppliedEvidence': deepcopy(ledger),
-                            'excludedBlankRefs': deepcopy(blank_refs)})
-                        if verdict == 'uncertain':
-                            state['uncertain'][target_id] = True
-                    save()
-                    if nominations:
-                        verify_targets = [target for target in active if target['id'] in nominations]
-                        verified, _ = original_call('verify', batch, verify_targets, nominated=nominations)
-                        if verified is None:
-                            return self._report(identity, inventory, scope, targets, state)
-                        for target in verify_targets:
-                            nominated = nominations[target['id']]
-                            row = verified[target['id']]
-                            verdict = row.get('verdict')
-                            if verdict not in ('support', 'related_anchor', 'conflict', 'explicit_exclusion',
-                                               'reject', 'uncertain'):
-                                raise ValueError('Invalid independent verification judgment')
-                            if verdict in ('support', 'related_anchor', 'conflict', 'explicit_exclusion'):
-                                if row.get('lectureProofs') != nominated['lectureProofs']:
-                                    raise ValueError('Independent verification changed nominated proofs')
-                                finding = {'verdict': verdict,
-                                    'lectureProofs': deepcopy(row['lectureProofs']),
-                                    'reason': str(row.get('reason', ''))[:500]}
-                                if verdict == 'related_anchor':
-                                    state['anchorCandidates'][target['id']] = finding
-                                elif verdict == 'explicit_exclusion':
-                                    state['explicitExclusions'][target['id']] = finding
-                                else:
-                                    state['verified'][target['id']] = finding
-                            elif verdict == 'uncertain':
-                                state['uncertain'][target['id']] = True
-                        save()
-                except (ValueError, TypeError, KeyError) as exc:
+                    if exhaustive:
+                        candidates = complete_plan(scope)
+                    else:
+                        for query in queries:
+                            candidates += build_source_plan(scope, 'focused', query=query, text_budget=8000,
+                                                            image_budget=4, include_blank_assets=True)
+                except ValueError as exc:
                     state['error'] = str(exc)
                     save()
                     return self._report(identity, inventory, scope, targets, state)
-            joint_targets = [target for target in live if target['id'] not in state['verified']
-                             and target['id'] in state['premiseCandidates']]
-            bundles = {}
-            try:
-                for target in joint_targets:
-                    candidate = state['premiseCandidates'][target['id']]
-                    batch = proof_batch(scope, candidate['lectureProofs'])
+                for batch in candidates:
+                    active = [target for target in live if target['id'] not in state['verified']]
+                    if not active:
+                        break
                     key = digest(batch['evidence'])
-                    bundles.setdefault(key, {'batch': batch, 'targets': []})['targets'].append(target)
-                for bundle in bundles.values():
-                    candidates = bundle['targets']
-                    nominated = {target['id']: {'verdict': 'support',
-                        'lectureProofs': deepcopy(state['premiseCandidates'][target['id']]['lectureProofs']),
-                        'reason': state['premiseCandidates'][target['id']]['reason']}
-                        for target in candidates}
-                    verified, _ = original_call('verify', bundle['batch'], candidates,
-                                                nominated=nominated)
-                    if verified is None:
-                        for target in candidates:
-                            state['uncertain'][target['id']] = (state.get('error') or
-                                'Combined original evidence could not be independently verified')
+                    if key in visited:
+                        continue
+                    visited.add(key)
+                    try:
+                        blank_refs = _blank_batch_refs(scope, batch)
+                    except ValueError as exc:
+                        state['error'] = str(exc)
                         save()
                         return self._report(identity, inventory, scope, targets, state)
-                    for target in candidates:
-                        row = verified[target['id']]
-                        proof_set = nominated[target['id']]['lectureProofs']
-                        if row.get('verdict') == 'support' and row.get('lectureProofs') == proof_set:
-                            state['verified'][target['id']] = {'verdict': 'support',
-                                'lectureProofs': deepcopy(proof_set),
-                                'reason': str(row.get('reason', ''))[:500]}
-                            state['uncertain'].pop(target['id'], None)
-                        elif row.get('verdict') == 'uncertain':
-                            state['uncertain'][target['id']] = str(row.get('reason', ''))[:500] or True
-                        elif row.get('verdict') != 'reject':
-                            raise ValueError('Invalid combined-premise verification judgment')
-                    save()
-            except (ValueError, TypeError, KeyError) as exc:
-                state['error'] = str(exc)
-                for target in joint_targets:
-                    state['uncertain'][target['id']] = str(exc)
-                save()
-                return self._report(identity, inventory, scope, targets, state)
+                    if blank_refs is not None:
+                        changed = False
+                        for target in active:
+                            target_id = target['id']
+                            existing = {ref_key(ref) for ref in state['excludedBlankRefs'][target_id]}
+                            new_refs = [ref for ref in blank_refs if ref_key(ref) not in existing]
+                            if new_refs:
+                                state['excludedBlankRefs'][target_id].extend(deepcopy(new_refs))
+                                state['acceptedReads'][target_id].append({
+                                    'suppliedEvidence': [], 'excludedBlankRefs': deepcopy(new_refs)})
+                                changed = True
+                        if changed:
+                            save()
+                        continue
+                    rows, supplied = original_call('search', batch, active)
+                    if rows is None:
+                        return self._report(identity, inventory, scope, targets, state)
+                    try:
+                        blank_refs = [entry['ref'] for entry in supplied
+                                      if entry.get('disposition') == 'excluded_blank']
+                        ledger = compact_supplied([entry for entry in supplied
+                                                   if entry.get('disposition') != 'excluded_blank'])
+                        selected = {ref_key(ref): unit for manifest_row in scope['manifests']
+                                    for unit in manifest_row['units']
+                                    for ref in [{'documentId': manifest_row['documentId'],
+                                        'sourceRevision': manifest_row['sourceRevision'], 'unitId': unit['unitId']} ]}
+                        nominations = {}
+                        premise_updates = {}
+                        accepted_rows = []
+                        for target in active:
+                            row = rows[target['id']]
+                            verdict = row.get('verdict')
+                            if verdict not in ('support', 'premise', 'no_support', 'related_anchor', 'conflict',
+                                               'explicit_exclusion', 'uncertain'):
+                                raise ValueError('Invalid lecture original judgment')
+                            proofs = row.get('lectureProofs', [])
+                            if not isinstance(proofs, list):
+                                raise ValueError('Invalid lecture proof list')
+                            supplied_map = {ref_key(entry['ref']): entry for entry in ledger}
+                            for proof in proofs:
+                                unit = selected.get(ref_key(proof['ref']))
+                                if unit is None:
+                                    raise ValueError('Lecture proof is outside selected originals')
+                                validate_source_proof(proof, ref=proof['ref'], unit=unit)
+                                proof_in_supplied(proof, supplied_map)
+                            if verdict in ('support', 'premise', 'related_anchor', 'conflict',
+                                           'explicit_exclusion') and not proofs:
+                                raise ValueError('Positive lecture judgment needs exact original proof')
+                            accepted_rows.append((target['id'], verdict))
+                            if verdict == 'premise':
+                                previous = state['premiseCandidates'].get(target['id'], {})
+                                combined = {canonical_bytes(proof): deepcopy(proof)
+                                            for proof in [*previous.get('lectureProofs', []), *proofs]}
+                                premise_updates[target['id']] = {
+                                    'verdict': 'premise', 'lectureProofs': list(combined.values()),
+                                    'reason': str(row.get('reason', ''))[:500]}
+                            elif proofs and verdict != 'no_support':
+                                nominations[target['id']] = {'verdict': verdict, 'lectureProofs': proofs,
+                                    'reason': str(row.get('reason', ''))[:500]}
+                        # A returned group is one acceptance unit. Validate every row
+                        # before recording any of its original-read coverage.
+                        state['premiseCandidates'].update(premise_updates)
+                        for target_id, verdict in accepted_rows:
+                            state['ledgers'][target_id] = compact_supplied([
+                                *state['ledgers'][target_id], *ledger])
+                            state['excludedBlankRefs'][target_id] = list({
+                                ref_key(ref): deepcopy(ref) for ref in [
+                                    *state['excludedBlankRefs'][target_id], *blank_refs]}.values())
+                            state['acceptedReads'][target_id].append({
+                                'suppliedEvidence': deepcopy(ledger),
+                                'excludedBlankRefs': deepcopy(blank_refs)})
+                            if verdict == 'uncertain':
+                                state['uncertain'][target_id] = True
+                        save()
+                        if nominations:
+                            verify_targets = [target for target in active if target['id'] in nominations]
+                            verified, _ = original_call('verify', batch, verify_targets, nominated=nominations)
+                            if verified is None:
+                                return self._report(identity, inventory, scope, targets, state)
+                            for target in verify_targets:
+                                nominated = nominations[target['id']]
+                                row = verified[target['id']]
+                                verdict = row.get('verdict')
+                                if verdict not in ('support', 'related_anchor', 'conflict', 'explicit_exclusion',
+                                                   'reject', 'uncertain'):
+                                    raise ValueError('Invalid independent verification judgment')
+                                if verdict in ('support', 'related_anchor', 'conflict', 'explicit_exclusion'):
+                                    if row.get('lectureProofs') != nominated['lectureProofs']:
+                                        raise ValueError('Independent verification changed nominated proofs')
+                                    finding = {'verdict': verdict,
+                                        'lectureProofs': deepcopy(row['lectureProofs']),
+                                        'reason': str(row.get('reason', ''))[:500]}
+                                    if verdict == 'related_anchor':
+                                        state['anchorCandidates'][target['id']] = finding
+                                    elif verdict == 'explicit_exclusion':
+                                        state['explicitExclusions'][target['id']] = finding
+                                    else:
+                                        state['verified'][target['id']] = finding
+                                elif verdict == 'uncertain':
+                                    state['uncertain'][target['id']] = True
+                            save()
+                    except (ValueError, TypeError, KeyError) as exc:
+                        state['error'] = str(exc)
+                        save()
+                        return self._report(identity, inventory, scope, targets, state)
+                # A positive deduction needs independent proof verification,
+                # not an absence sweep through unrelated lecture material.
+                if not verify_combined_premises(live):
+                    return self._report(identity, inventory, scope, targets, state)
         selected_report = self._report(identity, inventory, scope, targets, state)
         missing = {finding['requirementId'] for row in selected_report['alignments']
                    for finding in row['requirements'] if finding['relation'] == 'not_found'}
@@ -484,12 +636,15 @@ class SupportingAligner:
                                   and target['id'] not in state['excludedVerified']]
                         if not active:
                             continue
-                        batches = build_source_plan(excluded, 'summary', text_budget=8000, image_budget=4,
-                                                    include_blank_assets=True)
+                        batches = complete_plan(excluded)
                         for batch in batches:
                             active = [target for target in active if target['id'] not in state['excludedVerified']]
                             if not active:
                                 break
+                            # Empty excluded originals cannot provide a positive
+                            # outside-scope proof or extend selected coverage.
+                            if _blank_batch_refs(excluded, batch) is not None:
+                                continue
                             rows, supplied = original_call('search', batch, active, reader=excluded_reader)
                             if rows is None:
                                 break
@@ -613,12 +768,13 @@ class SupportingAligner:
                 'acceptedReads': {target['id']: [] for target in targets},
                 'verified': {}, 'anchorCandidates': {}, 'premiseCandidates': {},
                 'explicitExclusions': {}, 'verifiedContext': {}, 'excludedVerified': {},
-                'uncertain': {}, 'error': None}
+                'uncertain': {}, 'failedReads': {}, 'error': None}
 
     def _restore(self, resume, bindings, targets, *, scope, identity, authenticated):
         if resume is None:
             return self._empty_state(bindings, targets)
         state = deepcopy(resume)
+        state.setdefault('failedReads', {})
         canonical_bytes(state)
         if any(state.get(key) != value for key, value in bindings.items()):
             raise ValueError('Alignment checkpoint belongs to another source, scope or inventory')
@@ -639,6 +795,8 @@ class SupportingAligner:
                 or not isinstance(state.get('verifiedContext'), dict) or not set(state['verifiedContext']) <= ids
                 or not isinstance(state.get('excludedVerified'), dict) or not set(state['excludedVerified']) <= ids
                 or not isinstance(state.get('uncertain'), dict) or not set(state['uncertain']) <= ids
+                or not isinstance(state['failedReads'], dict) or not set(state['failedReads']) <= ids
+                or any(not isinstance(error, str) or not error for error in state['failedReads'].values())
                 or type(state.get('modelCalls')) is not int or state['modelCalls'] < 0):
             raise ValueError('Invalid alignment checkpoint')
         target_map = {target['id']: target for target in targets}
@@ -803,7 +961,8 @@ class SupportingAligner:
                 coverage['checkState'] = 'complete'
             elif (anchor and source and source['verdict'] == 'established'
                     and source['explicitTeaching'] and identity['kind'] in ('tutorial', 'audio', 'notes')
-                    and target['itemType'] not in ('question', 'subpart') and coverage['complete']):
+                    and target['itemType'] not in ('question', 'subpart') and coverage['complete']
+                    and not state['uncertain'].get(rid)):
                 relation = 'related_supplementary'
                 proofs = anchor['lectureProofs']
                 reason = anchor['reason'] or 'Explicit current teaching is related to a checked lecture anchor'
@@ -819,6 +978,8 @@ class SupportingAligner:
                     relation = 'outside_selected_scope'
             elif source and source['verdict'] != 'established':
                 reason = 'Supporting original did not independently establish the extracted requirement'
+            if rid in state['failedReads'] and relation == 'unverified':
+                coverage['checkState'] = 'pending'
             findings[rid] = {'requirementId': rid, 'relation': relation, 'reason': reason,
                 'lectureAnchorRefs': list({ref_key(p['ref']): p['ref'] for p in proofs}.values()),
                 'lectureSupportProofs': deepcopy(proofs),

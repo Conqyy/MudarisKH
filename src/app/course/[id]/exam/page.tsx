@@ -6,8 +6,9 @@ import Link from "next/link";
 import SourceCitation, { SourceRef } from "@/components/SourceCitation";
 import SupportingCitation from "@/components/SupportingCitation";
 import type { SupportingRef } from "@/lib/supporting-materials";
-import Navbar from "@/components/Navbar";
-import Sidebar from "@/components/Sidebar";
+import AppShell from "@/components/AppShell";
+import Icon from "@/components/Icon";
+import { StudyHeader, StudyBusy, StudySourceStatus } from "@/components/StudyWorkspace";
 import { CourseFoundationGate } from "@/components/CourseFoundationGate";
 import { useCourseFoundation } from "@/hooks/useCourseFoundation";
 import { useAuth } from "@/lib/auth-context";
@@ -49,7 +50,6 @@ interface SavedExam {
   grade?: { totalScore: number; maxScore: number; percentage: number };
 }
 
-
 interface TutorialItem extends SupportingRow {
   id: string;
   title: string;
@@ -65,16 +65,6 @@ interface AudioItem extends SupportingRow {
 }
 
 type PageState = "configure" | "generating" | "done" | "error";
-
-// Pipeline steps shown while the exam is generated. The last step is held
-// "in progress" until the real backend request resolves.
-const GEN_STEPS = [
-  { label: "Analyzing lecture documents", duration: 3000 },
-  { label: "Predicting format across past papers", duration: 3000 },
-  { label: "Generating exam questions", duration: 6000 },
-  { label: "Building LaTeX document", duration: 3000 },
-  { label: "Compiling PDF", duration: 4000 },
-];
 
 export default function ExamPage() {
   const { user } = useAuth();
@@ -142,27 +132,15 @@ function ExamPageContent() {
     tutorials: number;
   } | null>(null);
 
-  // Generation pipeline animation state
-  const [genStep, setGenStep] = useState(0);
-  const [genCompleted, setGenCompleted] = useState<Set<number>>(new Set());
-  const [genTimings, setGenTimings] = useState<Record<number, number>>({});
-  const genCancelled = useRef(false);
-  const genFinished = useRef(false);
   const studyRequest = useRef<AbortController | null>(null);
   const generationRequest = useRef<AbortController | null>(null);
-  const genTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => {
-    genCancelled.current = false;
-    return () => { genCancelled.current = true; studyRequest.current?.abort(); if (genTimer.current) clearTimeout(genTimer.current); };
-  }, [courseId, user?.uid]);
+  useEffect(() => () => { studyRequest.current?.abort(); }, [courseId, user?.uid]);
 
   useEffect(() => {
     if (foundationLoading || foundationError || foundationReady || !generationRequest.current) return;
     generationRequest.current.abort();
     generationRequest.current = null;
-    genCancelled.current = true;
-    genFinished.current = true;
-    if (genTimer.current) clearTimeout(genTimer.current);
+
     setPageState("configure");
   }, [foundationReady, foundationLoading, foundationError]);
 
@@ -175,7 +153,7 @@ function ExamPageContent() {
 
   useEffect(() => {
     return () => {
-      genCancelled.current = true;
+
       studyRequest.current?.abort();
     };
   }, []);
@@ -361,30 +339,7 @@ function ExamPageContent() {
     setPageState("generating");
     setErrorMsg("");
 
-    // Reset + start the pipeline animation
-    setGenStep(0);
-    setGenCompleted(new Set());
-    setGenTimings({});
-    genCancelled.current = false;
-    genFinished.current = false;
-    const startTime = Date.now();
-
-    (async () => {
-      for (let i = 0; i < GEN_STEPS.length; i++) {
-        if (genCancelled.current || genFinished.current) return;
-        setGenStep(i);
-        if (i === GEN_STEPS.length - 1) return; // hold last step until result
-        await new Promise((r) => { genTimer.current = setTimeout(r, GEN_STEPS[i].duration); });
-        if (genCancelled.current || genFinished.current) return;
-        setGenCompleted((prev) => new Set(prev).add(i));
-        setGenTimings((prev) => ({ ...prev, [i]: Date.now() - startTime }));
-      }
-    })();
-
-    const topicsList = topics
-      .split(",")
-      .map((t) => t.trim())
-      .filter(Boolean);
+    const topicsList = topics.split(",").map((topic) => topic.trim()).filter(Boolean);
 
     try {
       const res = await apiFetch(`${API_URL}/api/exams/generate-enhanced`, {
@@ -412,7 +367,7 @@ function ExamPageContent() {
           if (controller.signal.aborted) return;
           const currentFoundation = await refreshFoundation();
           if (currentFoundation?.ready) {
-            genFinished.current = true;
+
             setErrorMsg(err?.detail || `Backend returned ${res.status}`);
             setPageState("error");
           }
@@ -423,7 +378,6 @@ function ExamPageContent() {
 
       const data = await res.json();
       if (controller.signal.aborted || (!foundationReadyRef.current && !foundationUnknownRef.current)) return;
-      genFinished.current = true;
 
       // Take the student straight to the exam page (exam on the left, upload
       // your answers on the right). Model answers are built on demand there.
@@ -443,7 +397,7 @@ function ExamPageContent() {
     } catch (e: any) {
       if (controller.signal.aborted) return;
       console.error("Exam generation failed:", e);
-      genFinished.current = true;
+
       setErrorMsg(
         e.message ||
           "Could not connect to the backend. Make sure the server is running."
@@ -454,68 +408,49 @@ function ExamPageContent() {
     }
   };
 
-  const formatGenTime = (ms: number) => {
-    const sec = Math.floor(ms / 1000);
-    const mins = Math.floor(sec / 60);
-    const secs = sec % 60;
-    return `${mins}:${String(secs).padStart(2, "0")}`;
-  };
-
-  if (loadError && !pageLoading) return <><Navbar /><div className="pt-28 px-6 text-center" role="alert"><p>{loadError}</p><button onClick={() => loadData()} className="mt-4 underline">Retry loading</button></div></>;
+  if (loadError && !pageLoading) return <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="exam"><main className="workspace-main study-workspace"><div className="ui-panel study-busy" role="alert"><Icon name="alert" size={28} /><p>{loadError}</p><button onClick={() => loadData()} className="ui-button secondary">{t("Retry loading")}</button></div></main></AppShell>;
 
   if (loading || pageLoading || (course && historical.initialLoading)) {
     return (
-      <>
-        <Navbar />
-        <div className="pt-20 min-h-screen flex items-center justify-center">
-          <div className="font-mono text-sm text-ink-mute">Loading...</div>
-        </div>
-      </>
+      <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="exam"><main className="workspace-main study-workspace"><StudyBusy loading title="Loading…" /></main></AppShell>
     );
   }
   if (!user) return null;
   if (!course) {
     return (
-      <>
-        <Navbar />
-        <div className="pt-20 min-h-screen flex items-center justify-center">
+      <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="exam"><main className="workspace-main study-workspace"><div className="ui-panel study-busy">
           <div className="text-center">
-            <h1 className="font-serif text-3xl font-medium mb-3">Course not found</h1>
+            <h1 className="font-sans text-3xl font-medium mb-3">{t("Course not found")}</h1>
             <Link
               href="/dashboard"
               className="inline-block bg-ink text-paper px-6 py-3 rounded-full text-sm font-medium hover:bg-accent transition"
             >
-              Back to Dashboard
+              {t("Back to Dashboard")}
             </Link>
           </div>
-        </div>
-      </>
+        </div></main></AppShell>
     );
   }
 
   if (!foundationReady && pageState !== "done") {
     return (
-      <>
-        <Navbar />
-        <div className="pt-20 flex">
-          <Sidebar courses={allCourses} />
-          <main className="flex-1 px-6 md:px-10 py-8 max-w-4xl mx-auto w-full">
+      <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="exam"><main className="workspace-main study-workspace">
             <Link href={`/course/${courseId}`} className="inline-block mb-6 text-sm text-ink-soft hover:text-accent transition">
               ← {t("Back to course")}
             </Link>
             <CourseFoundationGate courseId={courseId} foundation={foundation} loading={foundationLoading} error={foundationError} onRetry={refreshFoundation} />
-          </main>
-        </div>
-      </>
+          </main></AppShell>
     );
   }
 
   const renderConfigure = () => (
-    <div className="space-y-8">
+    <div className="study-layout">
+      <aside className="ui-panel source-panel study-sources space-y-6">
+        <div className="study-source-title"><h2 className="section-heading">{t("Sources")}</h2><p className="page-subtitle">{t("Choose the material for this study session.")}</p></div>
       {/* Document selection */}
       <div>
-        <h3 className="font-serif text-xl font-medium mb-1 tracking-tight">
-          Select lecture documents
+        <h3 className="font-sans text-xl font-medium mb-1 tracking-tight">
+          {t("Select lecture documents")}
         </h3>
         <p className="text-sm text-ink-soft mb-4">
           Questions cover <span className="text-ink font-medium">only</span> the
@@ -532,7 +467,7 @@ function ExamPageContent() {
               href={`/course/${courseId}`}
               className="text-accent text-sm hover:underline"
             >
-              Go to course page to upload
+              {t("Go to course page to upload")}
             </Link>
           </div>
         ) : (
@@ -550,12 +485,12 @@ function ExamPageContent() {
                   onChange={() => toggleDoc(doc.id)}
                   className="w-4 h-4 accent-accent rounded"
                 />
-                <div className="w-10 h-10 rounded-xl bg-sage/10 flex items-center justify-center text-sage text-xs font-mono uppercase flex-shrink-0">
+                <div className="w-10 h-10 rounded-xl bg-sage/10 flex items-center justify-center text-sage text-xs tabular-nums  flex-shrink-0">
                   {doc.fileType}
                 </div>
                 <div className="flex-1 min-w-0">
                   <div className="font-medium truncate">{doc.title}</div>
-                  <div className="text-xs text-ink-mute font-mono">
+                  <div className="text-xs text-ink-mute tabular-nums">
                     {doc.sourceRevision ? `${doc.unitCount ?? "—"} ${t("source units")} · ${doc.guide?.sections.length ?? "—"} ${t("guide sections")}` : `${doc.analysis?.topics?.length || 0} ${t("topics")}`}
                     {!doc.sourceRevision && doc.analysis?.keyConceptCount
                       ? ` · ${doc.analysis.keyConceptCount} concepts`
@@ -565,8 +500,8 @@ function ExamPageContent() {
               </label>
             ))}
             <div className="px-5 py-3 bg-bg-alt border-t border-line flex items-center justify-between">
-              <span className="text-xs text-ink-mute font-mono">
-                {selectedDocs.size} of {documents.length} selected
+              <span className="text-xs text-ink-mute tabular-nums">
+                {selectedDocs.size} {t("of")} {documents.length} {t("selected")}
               </span>
               <button
                 type="button"
@@ -580,8 +515,8 @@ function ExamPageContent() {
                 className="text-xs text-accent hover:underline"
               >
                 {selectedDocs.size === documents.length
-                  ? "Deselect all"
-                  : "Select all"}
+                  ? t("Deselect all")
+                  : t("Select all")}
               </button>
             </div>
           </div>
@@ -597,8 +532,8 @@ function ExamPageContent() {
       </div>
       {histExams.length > 0 && (
         <div>
-          <h3 className="font-serif text-xl font-medium mb-1 tracking-tight">
-            Base it on past exams
+          <h3 className="font-sans text-xl font-medium mb-1 tracking-tight">
+            {t("Base it on past exams")}
           </h3>
           <p className="text-sm text-ink-soft mb-4">
             Predict one exam from recurring patterns across all selected papers.
@@ -619,23 +554,23 @@ function ExamPageContent() {
                   className="w-4 h-4 accent-accent rounded"
                 />
                 <div className="w-10 h-10 rounded-xl bg-accent/10 flex items-center justify-center text-accent flex-shrink-0">
-                  📋
+                  <Icon name="exam" size={18} />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium truncate">{h.title}</div>
-                  <div className="text-xs text-ink-mute font-mono">
+                  <div className="font-medium truncate">{h.title}</div><StudySourceStatus row={h} />
+                  <div className="text-xs text-ink-mute tabular-nums">
                     {h.analysis?.paperCount
                       ? `${h.analysis.paperCount} papers · ~${h.analysis.totalQuestions} questions per paper`
                       : h.analysis?.totalQuestions
                       ? `${h.analysis.totalQuestions} questions`
-                      : "analyzed"}
+                      : ""}
                   </div>
                 </div>
               </label>
             ))}
             <div className="px-5 py-3 bg-bg-alt border-t border-line flex items-center justify-between">
-              <span className="text-xs text-ink-mute font-mono">
-                {selectedHist.size} of {histExams.length} selected
+              <span className="text-xs text-ink-mute tabular-nums">
+                {selectedHist.size} {t("of")} {histExams.length} {t("selected")}
               </span>
               <button
                 type="button"
@@ -648,7 +583,7 @@ function ExamPageContent() {
                 }}
                 className="text-xs text-accent hover:underline"
               >
-                {selectedHist.size === histExams.length ? "Deselect all" : "Select all"}
+                {selectedHist.size === histExams.length ? t("Deselect all") : t("Select all")}
               </button>
             </div>
           </div>
@@ -657,8 +592,8 @@ function ExamPageContent() {
 
       {tutorials.length > 0 && (
         <div>
-          <h3 className="font-serif text-xl font-medium mb-1 tracking-tight">
-            Include tutorial problems
+          <h3 className="font-sans text-xl font-medium mb-1 tracking-tight">
+            {t("Include tutorial problems")}
           </h3>
           <p className="text-sm text-ink-soft mb-4">
             The generated exam re-creates the problem ideas from the tutorials you
@@ -678,29 +613,29 @@ function ExamPageContent() {
                   checked={selectedTut.has(t.id)}
                   onChange={() => toggleTut(t.id)}
                   className="w-4 h-4 rounded"
-                  style={{ accentColor: "#3f6f7d" }}
+                  style={{ accentColor: "var(--accent)" }}
                 />
                 <div
                   className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
-                  style={{ backgroundColor: "#3f6f7d1a", color: "#3f6f7d" }}
+                  style={{ backgroundColor: "var(--bg-alt)", color: "var(--ink-soft)" }}
                 >
-                  ✏️
+                  <Icon name="edit" size={18} />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium truncate">{t.title}</div>
-                  <div className="text-xs text-ink-mute font-mono">
+                  <div className="font-medium truncate">{t.title}</div><StudySourceStatus row={t} />
+                  <div className="text-xs text-ink-mute tabular-nums">
                     {t.analysis?.problems?.length
                       ? `${t.analysis.problems.length} problems`
                       : t.analysis?.problemCount
                       ? `${t.analysis.problemCount} problems`
-                      : "analyzed"}
+                      : ""}
                   </div>
                 </div>
               </label>
             ))}
             <div className="px-5 py-3 bg-bg-alt border-t border-line flex items-center justify-between">
-              <span className="text-xs text-ink-mute font-mono">
-                {selectedTut.size} of {tutorials.length} selected
+              <span className="text-xs text-ink-mute tabular-nums">
+                {selectedTut.size} {t("of")} {tutorials.length} {t("selected")}
               </span>
               <button
                 type="button"
@@ -712,9 +647,9 @@ function ExamPageContent() {
                   }
                 }}
                 className="text-xs hover:underline"
-                style={{ color: "#3f6f7d" }}
+                style={{ color: "var(--accent)" }}
               >
-                {selectedTut.size === tutorials.length ? "Deselect all" : "Select all"}
+                {selectedTut.size === tutorials.length ? t("Deselect all") : t("Select all")}
               </button>
             </div>
           </div>
@@ -723,8 +658,8 @@ function ExamPageContent() {
 
       {audioRecs.length > 0 && (
         <div>
-          <h3 className="font-serif text-xl font-medium mb-1 tracking-tight">
-            Include lecture recordings
+          <h3 className="font-sans text-xl font-medium mb-1 tracking-tight">
+            {t("Include lecture recordings")}
           </h3>
           <p className="text-sm text-ink-soft mb-4">
             The professor&apos;s exam hints and key emphasis from the recordings
@@ -743,27 +678,27 @@ function ExamPageContent() {
                   checked={selectedAudio.has(a.id)}
                   onChange={() => toggleAudio(a.id)}
                   className="w-4 h-4 rounded"
-                  style={{ accentColor: "#b8923a" }}
+                  style={{ accentColor: "var(--accent)" }}
                 />
                 <div
                   className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
-                  style={{ backgroundColor: "#b8923a1a", color: "#b8923a" }}
+                  style={{ backgroundColor: "var(--bg-alt)", color: "var(--ink-soft)" }}
                 >
-                  🎙️
+                  <Icon name="layers" size={18} />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium truncate">{a.title}</div>
-                  <div className="text-xs text-ink-mute font-mono">
+                  <div className="font-medium truncate">{a.title}</div><StudySourceStatus row={a} />
+                  <div className="text-xs text-ink-mute tabular-nums">
                     {a.insights?.examHints?.length
                       ? `${a.insights.examHints.length} exam hints`
-                      : "analyzed"}
+                      : ""}
                   </div>
                 </div>
               </label>
             ))}
             <div className="px-5 py-3 bg-bg-alt border-t border-line flex items-center justify-between">
-              <span className="text-xs text-ink-mute font-mono">
-                {selectedAudio.size} of {audioRecs.length} selected
+              <span className="text-xs text-ink-mute tabular-nums">
+                {selectedAudio.size} {t("of")} {audioRecs.length} {t("selected")}
               </span>
               <button
                 type="button"
@@ -775,28 +710,32 @@ function ExamPageContent() {
                   }
                 }}
                 className="text-xs hover:underline"
-                style={{ color: "#b8923a" }}
+                style={{ color: "var(--accent)" }}
               >
-                {selectedAudio.size === audioRecs.length ? "Deselect all" : "Select all"}
+                {selectedAudio.size === audioRecs.length ? t("Deselect all") : t("Select all")}
               </button>
             </div>
           </div>
         </div>
       )}
 
+      </aside>
+      <div className="study-content space-y-6">
+      <section className="ui-panel study-options space-y-6">
+        <div><h2 className="section-heading">{t("Exam options")}</h2><p className="page-subtitle">{t("Make it fit the way you study.")}</p></div>
       {/* Intelligence summary */}
       {intelligence &&
         (histExams.length > 0 ||
           intelligence.audio > 0 ||
           intelligence.tutorials > 0) && (
           <div className="bg-paper border border-line rounded-2xl p-5">
-            <h3 className="font-serif text-lg font-medium tracking-tight mb-2">
-              Intelligence Data
+            <h3 className="font-sans text-lg font-medium tracking-tight mb-2">
+              {t("Intelligence Data")}
             </h3>
             <p className="text-xs text-ink-soft mb-3">
               Topics are weighted by how often they appeared (and the marks they earned) in your past exams; rarely-tested topics get less coverage. Tutorials add practice-problem ideas (reused with different numbers) — never marks or format.
             </p>
-            <div className="flex flex-wrap gap-3 text-xs font-mono">
+            <div className="flex flex-wrap gap-3 text-xs tabular-nums">
               {histExams.length > 0 && (
                 <span className="bg-accent/10 text-accent px-2.5 py-1 rounded-full">
                   {histExams.length} past exam
@@ -811,7 +750,7 @@ function ExamPageContent() {
               {intelligence.tutorials > 0 && (
                 <span
                   className="px-2.5 py-1 rounded-full"
-                  style={{ backgroundColor: "#3f6f7d1a", color: "#3f6f7d" }}
+                  style={{ backgroundColor: "var(--bg-alt)", color: "var(--ink-soft)" }}
                 >
                   {intelligence.tutorials} tutorial
                   {intelligence.tutorials > 1 ? "s" : ""} (problem ideas)
@@ -824,13 +763,13 @@ function ExamPageContent() {
       {/* Total marks / exam type */}
       <div>
         <div className="flex items-center justify-between mb-3">
-          <label className="block text-sm font-medium text-ink-soft">
-            Exam total marks
+          <label htmlFor="exam-marks" className="block text-sm font-medium text-ink-soft">
+            {t("Exam total marks")}
           </label>
           <div className="flex items-center gap-2">
             {EXAM_TYPE_LABELS[historicalExamType] && (
               <span
-                className={`text-xs font-mono uppercase px-3 py-1 rounded-full ${
+                className={`text-xs tabular-nums  px-3 py-1 rounded-full ${
                   EXAM_TYPE_LABELS[historicalExamType] === "Final"
                     ? "bg-accent/10 text-accent"
                     : EXAM_TYPE_LABELS[historicalExamType] === "Midterm"
@@ -841,13 +780,14 @@ function ExamPageContent() {
                 {t(EXAM_TYPE_LABELS[historicalExamType])}
               </span>
             )}
-            <span className="font-mono text-sm bg-bg-alt px-3 py-1.5 rounded-lg min-w-[3.5rem] text-center">
+            <span className="tabular-nums text-sm bg-bg-alt px-3 py-1.5 rounded-lg min-w-[3.5rem] text-center">
               {totalMarks} pts
             </span>
           </div>
         </div>
 
         <input
+          id="exam-marks"
           type="range"
           min={5}
           max={40}
@@ -857,16 +797,16 @@ function ExamPageContent() {
           className="w-full accent-accent"
         />
 
-
       </div>
 
       {/* Topics */}
       <div>
-        <label className="block text-sm font-medium text-ink-soft mb-2">
-          Topics{" "}
-          <span className="text-ink-mute font-normal">(optional, comma-separated)</span>
+        <label htmlFor="exam-topics" className="block text-sm font-medium text-ink-soft mb-2">
+          {t("Topics")}{" "}
+          <span className="text-ink-mute font-normal">{t("(optional, comma-separated)")}</span>
         </label>
         <input
+          id="exam-topics"
           type="text"
           value={topics}
           onChange={(e) => setTopics(e.target.value)}
@@ -877,11 +817,12 @@ function ExamPageContent() {
 
       {/* Custom instructions */}
       <div>
-        <label className="block text-sm font-medium text-ink-soft mb-2">
-          Custom instructions{" "}
-          <span className="text-ink-mute font-normal">(optional)</span>
+        <label htmlFor="exam-instructions" className="block text-sm font-medium text-ink-soft mb-2">
+          {t("Custom instructions")}{" "}
+          <span className="text-ink-mute font-normal">{t("(optional)")}</span>
         </label>
         <textarea
+          id="exam-instructions"
           value={preference}
           onChange={(e) => setPreference(e.target.value)}
           placeholder="e.g. Focus on practical applications, include diagrams..."
@@ -895,32 +836,33 @@ function ExamPageContent() {
       <button
         onClick={handleGenerate}
         disabled={!foundationReady || historical.loading || !!historical.error || !!supportingBlocker || !documents.some((doc) => selectedDocs.has(doc.id))}
-        className="w-full bg-ink text-paper py-4 rounded-full text-sm font-medium hover:bg-accent transition-all hover:-translate-y-0.5 hover:shadow-lift flex items-center justify-center gap-2.5 disabled:opacity-50 disabled:cursor-not-allowed"
+        className="ui-button primary"
       >
-        Generate Exam <span>→</span>
+        {t("Generate Exam")} <Icon name="arrow-right" size={18} />
       </button>
 
-      <p className="text-xs text-ink-mute text-center font-mono">
+      <p className="text-xs text-ink-mute text-center tabular-nums">
         Question count and format are predicted from all selected papers and your
         requested marks. Older uploads may need a one-time rescan. Keep this tab open.
       </p>
 
+      </section>
+
       {/* Previous exams */}
       {savedExams.length > 0 && (
-        <div>
-          <h3 className="font-serif text-xl font-medium mb-4 tracking-tight">
-            Previous Exams
+        <div className="study-library" id="study-library">
+          <h3 className="font-sans text-xl font-medium mb-4 tracking-tight">
+            {t("Saved library")}
           </h3>
           <div className="bg-paper border border-line rounded-2xl overflow-hidden">
             {savedExams.map((exam, idx) => (
-              <Link
+              <div
                 key={exam.id}
-                href={`/course/${courseId}/exam/${exam.id}`}
-                className={`flex items-center justify-between p-5 hover:bg-bg-alt transition ${
+                className={`study-library-row ${
                   idx !== 0 ? "border-t border-line" : ""
                 }`}
               >
-                <div className="flex items-center gap-4">
+                <Link className="study-library-open" href={`/course/${courseId}/exam/${exam.id}`}>
                   <div
                     className={`w-10 h-10 rounded-xl flex items-center justify-center text-sm ${
                       exam.status === "graded"
@@ -928,112 +870,47 @@ function ExamPageContent() {
                         : "bg-accent/10 text-accent"
                     }`}
                   >
-                    {exam.status === "graded" ? "A+" : "?"}
+                    <Icon name="exam" size={20} />
                   </div>
                   <div>
-                    <div className="font-medium font-mono text-sm">
+                    <div className="font-medium tabular-nums text-sm">
                       {exam.examId}
                     </div>
-                    <div className="text-xs text-ink-mute font-mono mt-0.5">
+                    <div className="text-xs text-ink-mute tabular-nums mt-0.5">
                       {new Date(exam.createdAt).toLocaleDateString()} ·{" "}
                       {exam.questionCount} questions
                     </div>
                   </div>
-                </div>
+                </Link>
                 <div className="flex items-center gap-3">
                   {exam.grade ? (
-                    <span className="font-mono text-sm text-sage font-medium">
+                    <span className="tabular-nums text-sm text-sage font-medium">
                       {exam.grade.percentage}%
                     </span>
                   ) : (
-                    <span className="font-mono text-xs text-ink-mute">
-                      Not submitted
+                    <span className="tabular-nums text-xs text-ink-mute">
+                      {t("Ready to practice")}
                     </span>
                   )}
-                  <span className="text-ink-mute text-sm">→</span>
                   <button
                     onClick={(e) => handleDeleteExam(e, exam.id, exam.examId)}
                     title="Delete exam"
-                    className="w-8 h-8 rounded-full flex items-center justify-center text-ink-mute hover:bg-accent hover:text-paper transition text-sm"
+                    aria-label={t("Delete exam")}
+                    className="icon-button danger"
                   >
-                    🗑
+                    <Icon name="trash" size={16} />
                   </button>
                 </div>
-              </Link>
+              </div>
             ))}
           </div>
         </div>
       )}
-    </div>
-  );
-
-  const renderGenerating = () => (
-    <div className="flex items-start justify-center pt-6 pb-16">
-      <div className="max-w-xl w-full text-center">
-        {/* Spinning ring */}
-        <div className="w-24 h-24 mx-auto mb-7 relative">
-          <div className="w-24 h-24 border-[3px] border-bg-alt border-t-accent rounded-full animate-spin-slow" />
-          <div className="absolute inset-0 flex items-center justify-center font-serif italic text-4xl text-accent">
-            m
-          </div>
-        </div>
-
-        <h2 className="font-serif text-2xl md:text-3xl font-medium mb-2 tracking-tight">
-          Generating your exam…
-        </h2>
-        <p className="text-ink-soft text-sm mb-8 max-w-md mx-auto leading-relaxed">
-          Predicting a format from all your past papers using content from your selected
-          lectures.{" "}
-          <span className="text-ink font-medium">
-            Older uploads may need a one-time rescan
-          </span>{" "}
-          — please keep this tab open.
-        </p>
-
-        {/* Pipeline steps */}
-        <div className="bg-paper border border-line rounded-2xl p-5 md:p-6 text-left shadow-soft">
-          {GEN_STEPS.map((step, i) => {
-            const stepDone = genCompleted.has(i);
-            const isActive = i === genStep && !stepDone;
-            const isPending = i > genStep && !stepDone;
-
-            return (
-              <div
-                key={i}
-                className={`flex items-center gap-3.5 py-3 ${
-                  i < GEN_STEPS.length - 1 ? "border-b border-line" : ""
-                } ${isPending ? "opacity-40" : "opacity-100"}`}
-              >
-                <div
-                  className={`w-8 h-8 rounded-full flex items-center justify-center font-mono text-xs font-semibold flex-shrink-0 transition-all ${
-                    stepDone
-                      ? "bg-sage text-paper"
-                      : isActive
-                      ? "bg-accent text-paper animate-pulse-soft"
-                      : "bg-bg-alt text-ink-soft"
-                  }`}
-                >
-                  {stepDone ? "✓" : i + 1}
-                </div>
-                <div className="flex-1 text-sm font-medium">{step.label}</div>
-                <div className="font-mono text-[11px] text-ink-mute flex-shrink-0">
-                  {stepDone
-                    ? formatGenTime(genTimings[i] || 0)
-                    : isActive
-                    ? "in progress…"
-                    : "queued"}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        <p className="text-xs text-ink-mute mt-5 font-mono">
-          Hang tight — building your exam from the selected material.
-        </p>
       </div>
     </div>
   );
+
+  const renderGenerating = () => <StudyBusy title="Generating your exam…" />;
 
   const downloadPdf = () => {
     if (!pdfUrl) return;
@@ -1048,7 +925,7 @@ function ExamPageContent() {
       <SupportingCitation courseId={courseId} sourceRefs={sharedSupportingSourceRefs} />
       {questionStructure.map((question, index) => <div key={question.id || index}><span className="text-sm">{question.id || index + 1}</span><SourceCitation courseId={courseId} sourceRefs={question.sourceRefs} /><SupportingCitation courseId={courseId} sourceRefs={question.supportingSourceRefs} /></div>)}
       <div className="flex flex-wrap items-center gap-3">
-        <span className="font-mono text-xs text-sage bg-sage/10 px-3 py-1.5 rounded-full">
+        <span className="tabular-nums text-xs text-sage bg-sage/10 px-3 py-1.5 rounded-full">
           {examId} · {questionStructure.length} questions
         </span>
 
@@ -1100,11 +977,11 @@ function ExamPageContent() {
                 : "bg-ink-mute animate-pulse"
             }`}
           />
-          <span className="font-mono text-xs text-ink-mute">{examId}.pdf</span>
+          <span className="tabular-nums text-xs text-ink-mute">{examId}.pdf</span>
         </div>
 
         {pdfStatus === "loading" && (
-          <div className="flex items-center justify-center py-24 text-ink-mute text-sm font-mono">
+          <div className="flex items-center justify-center py-24 text-ink-mute text-sm tabular-nums">
             Preparing preview…
           </div>
         )}
@@ -1138,61 +1015,29 @@ function ExamPageContent() {
 
   const renderError = () => (
     <div className="flex items-center justify-center py-20">
-      <div className="text-center max-w-md">
-        <h2 className="font-serif text-2xl font-medium mb-3 tracking-tight">
-          Generation failed
+      <div className="ui-panel study-busy max-w-md" role="alert">
+        <h2 className="font-sans text-2xl font-medium mb-3 tracking-tight">
+          {t("Could not open study material")}
         </h2>
         <p className="text-ink-soft text-sm mb-8">{errorMsg}</p>
         <button
           onClick={() => setPageState("configure")}
           className="bg-ink text-paper px-6 py-3 rounded-full text-sm font-medium hover:bg-accent transition"
         >
-          Try again
+          {t("Try again")}
         </button>
       </div>
     </div>
   );
 
   return (
-    <>
-      <Navbar />
-      <div className="pt-20 flex">
-        <Sidebar courses={allCourses} />
-        <main className="flex-1 px-6 md:px-10 lg:px-12 pb-20 max-w-7xl mx-auto w-full">
-          <div className="my-8 flex items-center gap-2 text-xs font-mono">
-            <Link href="/dashboard" className="text-ink-soft hover:text-accent transition">
-              Dashboard
-            </Link>
-            <span className="text-ink-mute">›</span>
-            <Link href={`/course/${courseId}`} className="text-ink-soft hover:text-accent transition">
-              {course.code}
-            </Link>
-            <span className="text-ink-mute">›</span>
-            <span className="text-ink">Exam</span>
-          </div>
-
-          <div
-            className="bg-paper border border-line rounded-3xl p-8 mb-10 relative overflow-hidden"
-            style={{ borderTop: `6px solid ${course.color}` }}
-          >
-            <div className="font-mono text-xs text-ink-mute uppercase tracking-widest mb-3">
-              {course.code} · Exam Generator
-            </div>
-            <h1 className="font-serif text-3xl md:text-4xl font-medium tracking-tight leading-tight mb-2">
-              Generate <em className="italic text-accent">practice exam</em>
-            </h1>
-            <p className="text-ink-soft text-sm">
-              Select your lecture documents. The exam format and question count
-              will match your uploaded past exams.
-            </p>
-          </div>
+    <AppShell courses={allCourses} course={course} courseId={courseId} activeTab="exam"><main className="workspace-main study-workspace">
+          <StudyHeader title="Practice exams" description="Build a practice exam from your lectures and selected past papers." icon="exam" libraryCount={pageState === "configure" ? savedExams.length : 0} />
 
           {pageState === "configure" && renderConfigure()}
           {pageState === "generating" && renderGenerating()}
           {pageState === "done" && renderDone()}
           {pageState === "error" && renderError()}
-        </main>
-      </div>
-    </>
+        </main></AppShell>
   );
 }

@@ -39,8 +39,8 @@ Classification preserves their original files, analysis and saved source referen
 | **Summaries** | Produces notes whose length follows relevant content, complexity, importance and your instructions. There are no fixed page, section or term quotas; course administration and textbook lists are omitted by default. |
 | **Weekly calendar** | Organizes Sunday–Thursday lectures with times, hall notes and conflict checks. |
 
-The interface supports English and Najdi Arabic with RTL layout, saved language/theme
-preferences and dark mode. Some workflow labels use English fallback. Course content
+The interface supports English and Najdi Arabic with RTL layout, saved language/sidebar
+preferences and a light theme. Some workflow labels use English fallback. Course content
 keeps its own language. Source previews, saved chats and PDF exports are available within
 the relevant study tools.
 

@@ -10,7 +10,7 @@ import FlashcardsPage from "../../src/app/course/[id]/flashcards/page";
 import ReorderableList from "../../src/components/ReorderableList";
 import CoursePage from "../../src/app/course/[id]/page";
 
-const mocks = vi.hoisted(() => ({ api: vi.fn(), file: vi.fn(), object: vi.fn(), recent: vi.fn(), updateCourse: vi.fn(), user: { uid: "u1" }, routeId: "c1", course: { id: "c1", userId: "u1", code: "CS", name: "Course", color: "sage" } }));
+const mocks = vi.hoisted(() => ({ api: vi.fn(), file: vi.fn(), object: vi.fn(), recent: vi.fn(), updateCourse: vi.fn(), user: { uid: "u1" }, routeId: "c1", search: "", course: { id: "c1", userId: "u1", code: "CS", name: "Course", color: "sage" } }));
 vi.mock("@/lib/api", () => ({ apiFetch: mocks.api, apiJson: async (url: string, init?: RequestInit) => {
   // These regressions exercise saved content and asynchronous work in a course
   // whose document prerequisite has already been satisfied.
@@ -23,16 +23,20 @@ vi.mock("@/lib/activity", () => ({ useTrackRecent: mocks.recent }));
 vi.mock("@/components/Navbar", () => ({ default: () => null }));
 vi.mock("@/components/Sidebar", () => ({ default: () => null }));
 vi.mock("@/components/BookmarkButton", () => ({ default: () => null }));
-vi.mock("next/navigation", () => ({ useParams: () => ({ id: mocks.routeId, examId: "e1" }), useSearchParams: () => new URLSearchParams(), useRouter: () => ({ push: vi.fn() }) }));
+vi.mock("next/navigation", () => ({ useParams: () => ({ id: mocks.routeId, examId: "e1" }), useSearchParams: () => new URLSearchParams(mocks.search), useRouter: () => ({ push: vi.fn() }) }));
 vi.mock("next/link", () => ({ default: ({ children, ...props }: any) => <a {...props}>{children}</a> }));
 
 const response = (data: unknown, ok = true) => ({ ok, status: ok ? 200 : 500, json: async () => data });
 const doc: any = { id: "d1", courseId: "c1", title: "Notes", fileType: "txt", fileSize: 15, uploadedAt: Date.now() };
 function deferred<T>() { let resolve!: (v: T) => void; const promise = new Promise<T>(r => { resolve = r; }); return { promise, resolve }; }
+async function openTutorSources() {
+  fireEvent.click(await screen.findByRole("button", { name: "Sources" }));
+  return screen.findByRole("dialog", { name: "Sources" });
+}
 
 beforeEach(() => {
   vi.resetAllMocks();
-  mocks.routeId = "c1"; mocks.user = { uid: "u1" }; mocks.course = { id: "c1", userId: "u1", code: "CS", name: "Course", color: "sage" };
+  mocks.routeId = "c1"; mocks.search = ""; mocks.user = { uid: "u1" }; mocks.course = { id: "c1", userId: "u1", code: "CS", name: "Course", color: "sage" };
   vi.stubGlobal("alert", vi.fn()); vi.stubGlobal("confirm", () => true);
   URL.revokeObjectURL = vi.fn();
   HTMLElement.prototype.scrollTo = vi.fn();
@@ -116,10 +120,11 @@ describe("tutor request ownership", () => {
       return response({});
     });
     render(<TutorPage />);
-    await screen.findByRole("button", { name: /pending exam/i });
     fireEvent.click(await screen.findByRole("button", { name: "Explain the hardest concept simply." }));
     await waitFor(() => expect(sendSignal).toBeDefined());
-    fireEvent.click(screen.getByRole("button", { name: /pending exam/i }));
+    const sources = await openTutorSources();
+    fireEvent.click(within(sources).getByRole("button", { name: /pending exam/i }));
+    fireEvent.click(within(sources).getByRole("button", { name: "Close sources" }));
     fireEvent.click(screen.getByRole("button", { name: "Refresh material status" }));
     await waitFor(() => expect(mocks.api.mock.calls.filter(([url]) => String(url).includes("historical-exams/")).length).toBeGreaterThan(1));
     expect(sendSignal?.aborted).toBe(false);
@@ -266,16 +271,22 @@ describe("study loaders", () => {
     await waitFor(() => expect(sent).toMatchObject({ user_id: identity === "account" ? "u2" : "u1", course_id: identity === "course" ? "c2" : "c1", historical_exam_type: "final", historical_exam_ids: ["new-selected"] }));
     view.unmount();
   });
-  it.each([["summary", SummaryPage], ["exam", ExamGenerationPage], ["flashcards", FlashcardsPage], ["tutor", TutorPage]] as const)("clears %s supporting rows immediately on a course switch", async (_, Page) => {
+  it.each([["summary", SummaryPage], ["exam", ExamGenerationPage], ["flashcards", FlashcardsPage], ["tutor", TutorPage]] as const)("clears %s supporting rows immediately on a course switch", async (kind, Page) => {
     mocks.api.mockImplementation(async (url: string) => {
       if (url.includes("historical-exams/")) return response({ historical_exams: [{ id: mocks.routeId === "c1" ? "old" : "new", examType: "final", title: mocks.routeId === "c1" ? "Old private exam" : "New course exam", status: "queued", jobId: "j1" }] });
       return response({});
     });
     const view = render(<Page />);
+    if (kind === "tutor") await openTutorSources();
     await screen.findByText("Old private exam");
     mocks.routeId = "c2"; mocks.course = { id: "c2", userId: "u1", code: "CS", name: "New course", color: "sage" };
     view.rerender(<Page />);
     expect(screen.queryByText("Old private exam")).toBeNull();
+    if (kind === "tutor") {
+      expect(screen.queryByRole("dialog", { name: "Sources" })).toBeNull();
+      await openTutorSources();
+      expect(screen.queryByText("Old private exam")).toBeNull();
+    }
     await screen.findByText("New course exam");
   });
   it("clears a summary source from the previous account before the next load resolves", async () => {
@@ -329,6 +340,7 @@ it("offers keyboard reorder controls and awaits persistence", async () => {
 });
 
 it("retains the persisted material order when saving a reorder fails", async () => {
+  mocks.search = "view=materials";
   mocks.updateCourse.mockRejectedValue(new Error("offline"));
   mocks.api.mockImplementation(async (url: string) => response(url.includes("/documents/") ? { documents: [{ ...doc, id: "a", title: "First notes" }, { ...doc, id: "b", title: "Second notes" }] } : {}));
   render(<CoursePage />);

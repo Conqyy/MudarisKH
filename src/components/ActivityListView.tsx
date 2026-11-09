@@ -2,10 +2,12 @@
 
 import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
+import Icon from "@/components/Icon";
+import { ACTIVITY_ICONS } from "@/components/material-presentation";
+import { useLang } from "@/lib/i18n";
 import {
   ActivityItem,
   ActivityKind,
-  KIND_ICON,
   KIND_LABEL,
   relativeTime,
   toggleBookmark,
@@ -37,6 +39,7 @@ const ORDER: ActivityKind[] = [
 ];
 
 export default function ActivityListView({ items, mode, onClear }: Props) {
+  const { t } = useLang();
   // Group by kind, preserving the array's existing sort within each group.
   const grouped: Record<ActivityKind, Entry[]> = {
     course: [],
@@ -54,15 +57,15 @@ export default function ActivityListView({ items, mode, onClear }: Props) {
     <div>
       {totalCount > 0 && (
         <div className="flex items-center justify-between mb-6">
-          <span className="font-mono text-xs text-ink-mute">
-            {totalCount} item{totalCount === 1 ? "" : "s"}
+          <span className="tabular-nums text-xs text-ink-mute">
+            {totalCount} {t(totalCount === 1 ? "item" : "items")}
           </span>
           {onClear && (
             <button
               onClick={onClear}
-              className="text-xs text-ink-mute hover:text-accent transition"
+              className="ui-button ghost"
             >
-              Clear all
+              {t("Clear all")}
             </button>
           )}
         </div>
@@ -71,12 +74,12 @@ export default function ActivityListView({ items, mode, onClear }: Props) {
       <div className="space-y-10">
         {ORDER.filter((k) => grouped[k].length > 0).map((kind) => (
           <section key={kind}>
-            <div className="font-mono text-[11px] text-ink-mute uppercase tracking-widest mb-3 flex items-center gap-2">
-              <span>{KIND_ICON[kind]}</span>
-              <span>{KIND_LABEL[kind]}</span>
+            <div className="section-heading mb-3 flex items-center gap-2">
+              <Icon name={ACTIVITY_ICONS[kind]} size={18} />
+              <span>{t(KIND_LABEL[kind])}</span>
               <span className="text-ink-mute/60">· {grouped[kind].length}</span>
             </div>
-            <div className="bg-paper border border-line rounded-3xl overflow-hidden">
+            <div className="ui-panel overflow-hidden">
               {grouped[kind].map((it, idx) => (
                 <ActivityRow
                   key={`${it.kind}-${it.id}`}
@@ -103,6 +106,7 @@ function ActivityRow({
   first: boolean;
 }) {
   const { user } = useAuth();
+  const { t } = useLang();
   const marked = useIsBookmarked(entry.kind, entry.id);
 
   const handleStar = (e: React.MouseEvent) => {
@@ -132,19 +136,19 @@ function ActivityRow({
 
   return (
     <div
-      className={`group flex items-center gap-4 p-5 hover:bg-bg-alt transition ${
+      className={`group material-list-row hover:bg-bg-alt ${
         first ? "" : "border-t border-line"
       }`}
     >
       <Link href={entry.href} className="flex flex-1 min-w-0 items-center gap-4">
       <div className="w-10 h-10 rounded-xl bg-bg-alt flex items-center justify-center text-lg flex-shrink-0">
-        {KIND_ICON[entry.kind]}
+        <Icon name={ACTIVITY_ICONS[entry.kind]} />
       </div>
       <div className="flex-1 min-w-0">
-        <div className="font-medium truncate group-hover:text-accent transition">
+        <div dir="auto" className="font-semibold break-words group-hover:text-accent transition">
           {entry.title}
         </div>
-        <div className="text-xs text-ink-mute font-mono mt-0.5 flex items-center gap-2 truncate">
+        <div className="text-xs text-ink-soft tabular-nums mt-1 flex flex-wrap items-center gap-2">
           {entry.courseCode && (
             <span className="flex items-center gap-1.5">
               {entry.courseColor && (
@@ -158,7 +162,7 @@ function ActivityRow({
           )}
           <span className="text-ink-mute/60">·</span>
           <span>
-            {mode === "bookmark" ? "added " : ""}
+            {mode === "bookmark" ? t("added") + " " : ""}
             {relativeTime(entry.ts)}
           </span>
         </div>
@@ -166,23 +170,20 @@ function ActivityRow({
       </Link>
       <button
         onClick={handleStar}
-        aria-label={marked ? "Remove bookmark" : "Add bookmark"}
-        title={marked ? "Remove bookmark" : "Add bookmark"}
-        className={`w-8 h-8 rounded-full flex items-center justify-center text-sm transition flex-shrink-0 ${
-          marked
-            ? "bg-gold/15 text-gold"
-            : "text-ink-mute hover:bg-bg-alt hover:text-ink opacity-100 md:opacity-0 md:group-hover:opacity-100 focus:opacity-100"
-        }`}
+        aria-label={t(marked ? "Remove bookmark" : "Add bookmark")}
+        title={t(marked ? "Remove bookmark" : "Add bookmark")}
+        aria-pressed={marked}
+        className={`icon-button ${marked ? "is-active" : ""}`}
       >
-        {marked ? "★" : "☆"}
+        <Icon name="bookmark" size={18} className={marked ? "fill-current" : ""} />
       </button>
       <button
         onClick={handleRemove}
-        aria-label={mode === "recent" ? "Remove from recent" : "Remove bookmark"}
-        title={mode === "recent" ? "Remove from recent" : "Remove bookmark"}
-        className="w-8 h-8 rounded-full flex items-center justify-center text-ink-mute hover:bg-accent hover:text-paper transition flex-shrink-0 opacity-100 md:opacity-0 md:group-hover:opacity-100 focus:opacity-100 text-sm"
+        aria-label={t(mode === "recent" ? "Remove from recent" : "Remove bookmark")}
+        title={t(mode === "recent" ? "Remove from recent" : "Remove bookmark")}
+        className="icon-button danger"
       >
-        ×
+        <Icon name="close" size={18} />
       </button>
     </div>
   );

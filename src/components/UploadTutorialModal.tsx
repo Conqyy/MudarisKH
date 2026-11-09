@@ -31,8 +31,6 @@ export default function UploadTutorialModal({ courseId, onClose, onSuccess }: Pr
       onClose={onClose}
       onSuccess={onSuccess}
       endpoint="/api/tutorials/upload"
-      accent="#3f6f7d"
-      icon="✏️"
       acceptExts={["pdf", "pptx", "docx"]}
       acceptAttr="application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.pdf,.pptx,.docx"
       heading="Upload tutorials"

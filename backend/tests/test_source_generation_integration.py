@@ -303,7 +303,6 @@ def test_supporting_api_calls_supply_guide_original_and_atomic_publication(sourc
         agent.extract_exam_text.return_value = text
         agent.analyze_tutorial.return_value = {'topics': [], 'problems': [], 'problemCount': 2, 'formulas': [], 'skills': []}
         agent.analyze_pdf.return_value = {'papers': [], 'topicWeights': [], 'totalQuestions': 12, 'gradingBlueprint': '5 marks each'}
-        monkeypatch.setattr('src.utils.pdf_extract.pdf_to_image_uris', lambda *a: [])
         api.supporting_repository = MagicMock()
         api.supporting_repository.queue.return_value = {'id': 'job'}
         api._supporting_runner = MagicMock()

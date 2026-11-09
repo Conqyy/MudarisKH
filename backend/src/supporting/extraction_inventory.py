@@ -5,7 +5,47 @@ import math
 from src.supporting.contracts import (canonical_bytes, digest, validate_source_proof,
     ITEM_TYPES, REQUIREMENT_CATEGORIES, DISPOSITIONS)
 from src.supporting.extraction_source import reference
+from src.supporting.inventory_references import InventoryReferenceError, validate_topic_links
 from src.utils.ai_contracts import QUESTION_TYPES
+
+
+class ExclusionCoverageError(ValueError):
+    """An exclusion decision discarded current source content without evidence."""
+
+
+def _validate_exclusion_coverage(value, source):
+    """A whole-window omission must retain every visible original, including covers."""
+    if any(row['itemType'] != 'nonacademic' for row in value['items']):
+        return
+    if (value['disposition'] not in ('blank', 'nonacademic')
+            and value['pageRole'] not in ('blank', 'cover', 'answer_key')):
+        return
+    ranges = [span for span in source['ranges'] if span['text'].strip()]
+    assets = source['assetIds']
+    if not ranges and not assets:
+        return
+    if ranges and (value['disposition'] == 'blank' or value['pageRole'] == 'blank'):
+        raise ExclusionCoverageError('Original exclusion cannot label nonempty text blank')
+    retained = [*value['items'], *value['sharedContexts']]
+    proofs = [proof for row in retained for proof in row['proofs']
+              if proof['ref'] == source['ref']]
+    if not retained or not proofs:
+        raise ExclusionCoverageError('Original exclusion needs retained nonacademic content and current proofs')
+    for span in ranges:
+        cursor = span['start']
+        intervals = sorted((max(span['start'], proof['start']), min(span['end'], proof['end']))
+            for proof in proofs if proof['type'] == 'text_span' and proof['field'] == span['field']
+            and proof['start'] < span['end'] and span['start'] < proof['end'])
+        for start, end in intervals:
+            if span['text'][cursor - span['start']:start - span['start']].strip():
+                raise ExclusionCoverageError('Original exclusion leaves current text without retained evidence')
+            cursor = max(cursor, end)
+        if span['text'][cursor - span['start']:].strip():
+            raise ExclusionCoverageError('Original exclusion leaves current text without retained evidence')
+    for asset in assets:
+        if not any(proof['type'] == 'visual_region' and proof['assetId'] == asset
+                   and proof['box'] == [0, 0, 1, 1] for proof in proofs):
+            raise ExclusionCoverageError('Original exclusion needs a full-image proof for each current asset')
 
 
 def text(value, label, *, empty=False):
@@ -195,8 +235,18 @@ def validate_response(value, manifest, source, previous, earlier):
         raise ValueError('Nonacademic disposition conflicts with extracted questions')
     if value['disposition'] == 'readable' and value['pageRole'] not in ('answer_key', 'cover') and not (value['items'] or value['sharedContexts']):
         raise ValueError('Readable question evidence has no extracted items')
+    _validate_exclusion_coverage(value, source)
     canonical_bytes(value)
-    return value
+    # A valid proof locates original text, but does not by itself declare a
+    # shared-context record. Reject dangling links before accepting this window
+    # so the ordinary response repair can supply the missing original context.
+    contexts = {identifier(row['origin'], 'context') for response in [*earlier, value]
+                for row in response['sharedContexts']}
+    for row in value['items']:
+        if any(identifier(origin, 'context') not in contexts for origin in row['contextOrigins']):
+            raise InventoryReferenceError(
+                'Item context origin must reference a declared shared context in the current or an earlier inventory response')
+    return validate_topic_links(value, earlier)
 
 
 def inventory(manifest, plan, responses):
@@ -337,7 +387,7 @@ def comparable(response):
     return value
 
 
-def coverage(manifest, plan, extracted, reconciled, errors):
+def coverage(manifest, plan, extracted, reconciled, errors, resolutions=None, *, require_audit=False):
     unresolved = set(errors)
     accounted = []
     for unit in manifest['units']:
@@ -345,9 +395,22 @@ def coverage(manifest, plan, extracted, reconciled, errors):
         for index in indices:
             if index not in extracted or index not in reconciled:
                 unresolved.add(unit['unitId'])
-            elif comparable(extracted[index]) != comparable(reconciled[index]):
-                unresolved.add(unit['unitId'])
-                errors.setdefault(unit['unitId'], []).append('Independent original reconciliation disagrees')
+            elif require_audit or comparable(extracted[index]) != comparable(reconciled[index]):
+                from src.supporting.reconciliation import validated_certificate
+                from src.supporting.extraction_source import previous_evidence
+                certificate = (resolutions or {}).get(index)
+                try:
+                    # Coverage is recomputed on every checkpoint save; replaying
+                    # each certificate is pure, so reuse its exact-input result
+                    # instead of rebuilding every field comparison each time.
+                    accepted = certificate is not None and validated_certificate(certificate, manifest,
+                        plan[int(index)], previous_evidence(plan, int(index)),
+                        extracted[index], reconciled[index])['accepted']
+                except (ValueError, TypeError, KeyError):
+                    accepted = False
+                if not accepted:
+                    unresolved.add(unit['unitId'])
+                    errors.setdefault(unit['unitId'], []).append('Independent original reconciliation disagrees')
         if unit['disposition'] in ('uncertain', 'unsupported'):
             unresolved.add(unit['unitId'])
         if all(i in extracted and i in reconciled for i in indices):

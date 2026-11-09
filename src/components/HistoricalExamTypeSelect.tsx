@@ -6,7 +6,7 @@ export default function HistoricalExamTypeSelect({ value, onChange, label = "Pas
   const { t } = useLang();
   return <label className="block text-sm font-medium text-ink-soft mb-5">
     {t(label)}
-    <select aria-label={t(label)} value={value} required={required} disabled={disabled} onChange={event => onChange(event.target.value as HistoricalExamType)} className="block w-full mt-2 px-4 py-3 rounded-xl border border-line bg-paper text-ink focus:outline-none focus:border-accent">
+    <select aria-label={t(label)} value={value} required={required} disabled={disabled} onChange={event => onChange(event.target.value as HistoricalExamType)} className="ui-input block w-full mt-2">
       <option value="" disabled>{t("Choose an exam type")}</option>
       {HISTORICAL_EXAM_TYPES.map(type => <option key={type} value={type}>{t(EXAM_TYPE_LABELS[type])}</option>)}
     </select>

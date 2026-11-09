@@ -193,16 +193,6 @@ def _require_record_storage(row: dict, uid: str, category: str) -> None:
         raise HTTPException(status_code=409, detail="This file's course association is invalid. Cleanup was stopped.") from exc
 
 
-def _source_summary(intelligence: dict) -> dict:
-    ids = intelligence.get("source_ids", {})
-    return {
-        "documentIds": ids.get("document_ids", []),
-        "audioIds": ids.get("audio_ids", []),
-        "historicalExamIds": ids.get("historical_exam_ids", []),
-        "tutorialIds": ids.get("tutorial_ids", []),
-    }
-
-
 def _checked_source_summary(reader, supporting):
     materials = supporting['snapshot']['materials']
     return {'documentIds': [row['id'] for row in reader.scope['documents']],
@@ -489,7 +479,14 @@ summary_agent = SummaryGeneratorAgent()
 
 @app.get('/api/courses/{course_id}/foundation')
 def get_course_foundation(course_id: str, uid: str = Depends(require_uid)):
-    return _public_foundation(_load_document_foundation(course_id, uid))
+    """Read published readiness; confirmation/actions separately verify source bytes."""
+    from src.utils.course_foundation import build_foundation_status_projection
+    _require_course(course_id, uid)
+    documents = [row for row in owned_only(db_client.get_course_documents(course_id, user_id=uid), uid)
+                 if row.get('courseId') == course_id]
+    confirmation = db_client.get_document_foundation(uid, course_id)
+    confirmed_revision = confirmation.get('revision', '') if isinstance(confirmation, dict) else ''
+    return _public_foundation(build_foundation_status_projection(documents, confirmed_revision))
 
 
 class FoundationConfirmRequest(BaseModel):
@@ -1029,8 +1026,9 @@ def get_course_historical_exams(course_id: str,
     _require_course(course_id, uid)
     exams = owned_only(db_client.get_course_historical_exams(course_id, user_id=uid,
         **({'exam_type': exam_type} if exam_type is not None else {})), uid)
-    exams = [_supporting_projection(row, 'historical_exam') for row in exams if row.get('courseId') == course_id]
-    return {"status": "success", "historical_exams": exams}
+    projected = _supporting_list_projection(exams, 'historical_exam', course_id, uid)
+    return {"status": "success", "historical_exams": projected,
+            "unfinished_deletions": _unfinished_supporting_deletions(exams, 'historical_exam', course_id, uid)}
 
 
 # ──────────────────────────────────────────────────
@@ -1076,8 +1074,9 @@ async def upload_tutorial(
 def get_course_tutorials(course_id: str, uid: str = Depends(require_uid)):
     _require_course(course_id, uid)
     tutorials = owned_only(db_client.get_course_tutorials(course_id, user_id=uid), uid)
-    tutorials = [_supporting_projection(row, 'tutorial') for row in tutorials if row.get('courseId') == course_id]
-    return {"status": "success", "tutorials": tutorials}
+    projected = _supporting_list_projection(tutorials, 'tutorial', course_id, uid)
+    return {"status": "success", "tutorials": projected,
+            "unfinished_deletions": _unfinished_supporting_deletions(tutorials, 'tutorial', course_id, uid)}
 
 
 @app.delete("/api/tutorials/{tut_id}")
@@ -1185,10 +1184,6 @@ def _download_url_audio_to_mp3(url: str, out_dir: str):
         raise RuntimeError("Could not extract audio from the provided URL.")
     return mp3_path, title
 
-def _resolve_course_title(course_id: str, user_id: str) -> str:
-    return _require_course(course_id, user_id).get("title", course_id)
-
-
 _AUDIO_WORK_SLOTS = threading.BoundedSemaphore(2)
 
 
@@ -1294,11 +1289,18 @@ _audio_runner = AudioJobRunner(lambda: db_client, _run_saved_audio_job)
 
 
 def _supporting_reader(identity):
+    from src.services.document_library import DocumentLibrary
+    from src.services.source_evidence import SourceEvidence
+    from src.utils.source_context import source_scope_from_foundation
     foundation = _require_document_foundation(identity['courseId'], identity['userId'])
-    reader = _source_reader(identity['courseId'], identity['userId'], doc_processor)
-    if reader.scope.get('foundationRevision') != foundation['revision']:
+    scope = source_scope_from_foundation(foundation, identity['userId'], identity['courseId'])
+    # Recheck changes during the full read without downloading the same sources
+    # again. Queue, claim and publication retain their atomic foundation fences.
+    current = get_course_foundation(identity['courseId'], uid=identity['userId'])
+    if not current['ready'] or current['revision'] != foundation['revision']:
         raise ValueError('Lecture foundation changed while preparing supporting material')
-    return reader
+    return SourceEvidence(scope, DocumentLibrary(db_client), identity['userId'], identity['courseId'],
+                          doc_processor.client, doc_processor.model_id)
 
 
 from src.supporting.repository import SupportingRepository
@@ -1309,7 +1311,8 @@ from src.supporting.jobs import SupportingJobRunner
 
 supporting_repository = SupportingRepository(db_client)
 supporting_library = SupportingLibrary(supporting_repository)
-supporting_extractor = SupportingExtractor(doc_processor.client, doc_processor.model_id)
+supporting_extractor = SupportingExtractor(doc_processor.client, doc_processor.model_id,
+                                         native_tutorials=True, field_audits=True)
 supporting_workflow = SupportingWorkflow(supporting_repository, supporting_library,
     supporting_extractor, audio_agent, _supporting_reader)
 _supporting_runner = SupportingJobRunner(supporting_repository, supporting_workflow.run,
@@ -1366,6 +1369,47 @@ def _supporting_projection(row, kind):
             'errorMessage': row.get('errorMessage')}
     return {**status, 'id': row['id'], 'courseId': row['courseId'], **{key: row.get(key) for key in
         ('title', 'fileSize', 'uploadedAt', 'processedAt', 'sourceType', 'lectureId', 'examType') if key in row}}
+
+
+def _unfinished_supporting_deletions(rows, kind, course_id, uid):
+    """Name the owned materials whose delete stopped partway.
+
+    A row stays at status 'deleting' (behind its tombstone) when a delete
+    fails after it started. These rows are never projected as usable
+    materials; the course page only offers to finish their deletion through
+    the material's normal, idempotent DELETE endpoint.
+    """
+    unfinished = []
+    for row in rows:
+        if (row.get('userId') != uid or row.get('courseId') != course_id
+                or row.get('status') != 'deleting' or not row.get('id')):
+            continue
+        row_kind = 'notes' if kind == 'audio' and row.get('sourceType') == 'notes' else kind
+        unfinished.append({'id': row['id'], 'kind': row_kind, 'courseId': course_id,
+                           'title': row.get('title') if isinstance(row.get('title'), str) else None})
+    return unfinished
+
+
+def _supporting_list_projection(rows, kind, course_id, uid):
+    projected = []
+    unavailable = False
+    for row in rows:
+        if row.get('userId') != uid or row.get('courseId') != course_id:
+            continue
+        if row.get('status') == 'deleting':
+            unavailable = True
+            continue
+        row_kind = 'notes' if kind == 'audio' and row.get('sourceType') == 'notes' else kind
+        try:
+            projected.append(_supporting_projection(row, row_kind))
+        except DataConflict:
+            # A query can include a tombstoned row, or lose a row before its
+            # status is read. Direct reads/actions still enforce that conflict.
+            unavailable = True
+    if unavailable:
+        # Do not turn account/course cleanup into a successful partial list.
+        _require_course(course_id, uid)
+    return projected
 
 
 def _legacy_public_content(value):
@@ -1758,9 +1802,9 @@ def reanalyze_audio_recording(rec_id: str, uid: str = Depends(require_uid)):
 def get_course_audio_recordings(course_id: str, uid: str = Depends(require_uid)):
     _require_course(course_id, uid)
     recordings = owned_only(db_client.get_course_audio_recordings(course_id, user_id=uid), uid)
-    recordings = [_supporting_projection(row, 'notes' if row.get('sourceType') == 'notes' else 'audio')
-                  for row in recordings if row.get('courseId') == course_id]
-    return {"status": "success", "audio_recordings": recordings}
+    projected = _supporting_list_projection(recordings, 'audio', course_id, uid)
+    return {"status": "success", "audio_recordings": projected,
+            "unfinished_deletions": _unfinished_supporting_deletions(recordings, 'audio', course_id, uid)}
 
 
 # ──────────────────────────────────────────────────
@@ -3288,22 +3332,6 @@ def create_schedule_entry(payload: ScheduleEntryRequest, uid: str = Depends(requ
     except DataConflict as exc:
         raise HTTPException(status_code=409, detail="The schedule changed or this time overlaps another lecture. Reload and retry.") from exc
     return {"status": "success", "id": entry_id, **entry}
-
-
-def _check_schedule_overlap(user_id: str, day: str, start: int, end: int, exclude_id=None):
-    """Raise 409 if [start,end) overlaps another lecture on the same day."""
-    for e in db_client.get_user_schedule_entries(user_id):
-        if e.get("id") == exclude_id or e.get("day") != day:
-            continue
-        es = _to_minutes(e.get("startTime", ""))
-        ee = _to_minutes(e.get("endTime", ""))
-        if es is None or ee is None:
-            continue
-        if start < ee and end > es:
-            raise HTTPException(
-                status_code=409,
-                detail=f"That time overlaps an existing lecture ({e.get('startTime')}–{e.get('endTime')}) on {day.capitalize()}.",
-            )
 
 
 @app.put("/api/schedule/{entry_id}")
